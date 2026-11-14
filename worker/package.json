@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/crabbox-worker",
-  "version": "0.82.0",
+  "version": "0.83.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "build:node": "node scripts/build-node.mjs",
     "check": "tsc --noEmit",
     "check:node": "tsc --noEmit -p tsconfig.node.json",
-    "deploy": "wrangler deploy",
+    "deploy": "node ../scripts/deploy-coordinator.mjs",
     "deploy:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --containers-rollout=immediate",
     "deploy:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc",
     "prebuild": "node scripts/vendor-novnc.mjs",

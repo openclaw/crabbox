@@ -20,6 +20,8 @@ type state struct {
 	Removes   int
 	Calls     [][]string
 	Failure   string
+	ForkHost  string
+	Creates   int
 }
 
 func main() {
@@ -48,6 +50,8 @@ func main() {
 	switch {
 	case reflect.DeepEqual(a, []string{"info", "--format", "{{.ID}}"}):
 		output = "fixture-daemon"
+	case reflect.DeepEqual(a, []string{"version", "--format", "{{.Client.Version}}"}):
+		output = "fixture-runtime"
 	case reflect.DeepEqual(a, []string{"context", "show"}):
 		output = "default"
 	case reflect.DeepEqual(a, []string{"context", "inspect", "default", "--format", `{{(index .Endpoints "docker").Host}}`}):
@@ -89,6 +93,39 @@ func main() {
 		s.Tag = a[2]
 	case len(a) == 5 && a[0] == "image" && a[1] == "inspect" && a[2] == s.Tag && s.Tag != "" && a[3] == "--format" && a[4] == "{{.Id}}":
 		output = s.Image
+	case len(a) == 5 && a[0] == "image" && a[1] == "inspect" && a[2] == s.Image && s.Image != "" && a[3] == "--format" && a[4] == "{{json .RepoDigests}}":
+		output = "[]"
+	case len(a) > 3 && a[0] == "run" && a[1] == "-d" && s.ForkHost != "":
+		if !s.Removed || s.Image != image {
+			fail("fork requires a retained image and removed source")
+		}
+		labels := map[string]string{}
+		var name string
+		for i := 2; i+1 < len(a); i++ {
+			switch a[i] {
+			case "--name":
+				name = a[i+1]
+			case "--label":
+				key, value, ok := strings.Cut(a[i+1], "=")
+				if !ok {
+					fail("invalid fork label")
+				}
+				labels[key] = value
+			}
+		}
+		if name == "" || labels["lease"] == "" || labels["fixed_intent_sha256"] == "" {
+			fail("fork requires fixed identity")
+		}
+		output = strings.Repeat("b", 64)
+		s.Container = map[string]any{
+			"Id": output, "Name": "/" + name, "Image": s.Image,
+			"Mounts":          []any{},
+			"Config":          map[string]any{"Image": s.Image, "Labels": labels},
+			"State":           map[string]any{"Status": "running", "Running": true},
+			"NetworkSettings": map[string]any{"Ports": map[string]any{"2222/tcp": []map[string]string{{"HostIp": s.ForkHost, "HostPort": "49160"}}}},
+		}
+		s.Removed = false
+		s.Creates++
 	case reflect.DeepEqual(a, []string{"rm", "-f", source}):
 		s.Removes++
 		s.Removed = true

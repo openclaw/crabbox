@@ -364,6 +364,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	if cfg.TargetOS == targetLinux {
 		ctx = context.WithValue(ctx, creationObservationsKey{}, observations)
 	}
+	ctx = WithCheckpointReadinessLifetime(ctx, server)
 	waitCtx, cancelWait := context.WithCancelCause(ctx)
 	defer cancelWait(nil)
 	stopHeartbeat, err := startCoordinatorHeartbeat(waitCtx, b.coord, leaseID, cfg.Provider, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), b.rt.Stderr)
@@ -381,6 +382,14 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 			reportCoordinatorAcquisitionRollback(b.rt.Stderr, leaseID, "bootstrap error", released, releaseErr)
 		}
 		return LeaseTarget{}, err
+	}
+	if _, fixedWait := checkpointReadinessFromContext(ctx); fixedWait {
+		if !coordinatorLeaseStillActive(waitCtx, b.coord, leaseID, cancelWait, b.rt.Stderr) {
+			return LeaseTarget{}, context.Cause(waitCtx)
+		}
+		if err := context.Cause(waitCtx); err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	timing := coordinatorRunnerTiming(lease)
 	if timing == nil {

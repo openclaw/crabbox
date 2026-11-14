@@ -1,0 +1,425 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Cloudflare } from "./image-qualification-control.mjs";
+import {
+  bindingShape,
+  canonical,
+  digest,
+  readAdmission,
+  verifyAuthority,
+  requireAbsent,
+  verifyOwned,
+  authorityName,
+  controllerName,
+} from "./image-qualification-isolation.mjs";
+import { fixtureAdmission, ownedSettings, version } from "./fixtures/qualification-isolation.mjs";
+import { fixtureNetwork } from "./fixtures/qualification-network.mjs";
+
+function fixture() {
+  const f = fixtureAdmission();
+  const worker = "crabbox-image-qualification-42-1";
+  const transport = {
+    name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
+    type: "service",
+    service: authorityName,
+    props: {
+      runId: "image-qualification-42-1",
+      candidateWorker: worker,
+      deploymentHash: "b".repeat(64),
+    },
+  };
+  const fleet = {
+    name: "FLEET",
+    type: "durable_object_namespace",
+    class_name: "FleetDurableObject",
+    namespace_id: "3".repeat(32),
+  };
+  const state = {
+    version,
+    workers: {
+      [authorityName]: { bindings: f.bindings },
+      [worker]: ownedSettings(f.admission, worker, [transport, fleet]),
+    },
+    namespaces: [
+      ...f.record.authority.namespaces,
+      { script: worker, class: "FleetDurableObject", id: fleet.namespace_id },
+    ],
+  };
+  const events = [];
+  const cf = {
+    admission: f.admission,
+    settings: async (name) => state.workers[name],
+    latestVersion: async () => state.version,
+    list: async (route) => (route.startsWith("/workers/durable_objects") ? state.namespaces : []),
+    request: async (route, init = {}) => {
+      events.push(`${init.method ?? "GET"} ${route}`);
+      assert.equal(init.method, undefined, "isolation admission must be read only");
+      if (route.endsWith("/settings")) return state.workers[route.split("/")[3]];
+      if (route.endsWith("/subdomain")) return { enabled: false, previews_enabled: false };
+      if (route.endsWith("/schedules")) return { schedules: [] };
+      return [];
+    },
+  };
+  return { ...f, worker, transport, fleet, state, events, cf };
+}
+
+test("admission binds exact qualification identities and production exclusions", () => {
+  const f = fixture();
+  assert.equal(
+    readAdmission({ ...f.env, CLOUDFLARE_ACCOUNT_ID: f.record.accountId }).sha256,
+    f.admission.sha256,
+  );
+  assert.throws(() => readAdmission({}), /record missing/);
+  assert.throws(
+    () => readAdmission({ ...f.env, CLOUDFLARE_ACCOUNT_ID: "0".repeat(32) }),
+    /invalid admitted/,
+  );
+  assert.throws(
+    () =>
+      readAdmission({
+        ...f.env,
+        CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+        QUALIFICATION_SUBNET_ID: "subnet-99999999",
+      }),
+    /differs from admission/,
+  );
+});
+
+for (const [key, identity] of [
+  ["workers", authorityName],
+  ["workers", controllerName],
+  ["workers", "crabbox-image-qualification-42-1"],
+  ["namespaceIds", "1".repeat(32)],
+  ["roleArns", "arn:aws:iam::123456789012:role/Qualification"],
+  ["subnetIds", "subnet-00000000000000000"],
+  ["securityGroupIds", "sg-00000000000000000"],
+])
+  test(`production ${key} collision fails closed`, () => {
+    const f = fixture();
+    f.record.production[key].push(identity);
+    assert.throws(
+      () =>
+        readAdmission({
+          CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+          QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+          QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+        }),
+      /overlap/,
+    );
+  });
+
+test("live authority version, settings, private ingress and owned namespaces are checked", async () => {
+  const f = fixture();
+  await verifyAuthority(f.cf);
+  await verifyOwned(f.cf, f.worker);
+  assert.ok(f.events.every((event) => event.startsWith("GET ")));
+});
+
+for (const [name, change] of [
+  [
+    "wrong active authority version",
+    (f) => {
+      f.state.version = "22222222-2222-4222-8222-222222222222";
+    },
+  ],
+  [
+    "production broker binding",
+    (f) => {
+      f.state.workers[authorityName].bindings.push({
+        name: "BROKER",
+        type: "service",
+        service: "production-coordinator",
+      });
+    },
+  ],
+  [
+    "production namespace",
+    (f) => {
+      f.state.workers[authorityName].bindings[9].namespace_id = "9".repeat(32);
+    },
+  ],
+  [
+    "extra namespace class",
+    (f) => {
+      f.state.namespaces.push({ id: "4".repeat(32), script: authorityName, class: "Unexpected" });
+    },
+  ],
+  [
+    "wrong namespace owner",
+    (f) => {
+      f.state.namespaces[0].script = "production-coordinator";
+    },
+  ],
+])
+  test(`${name} stops admission without writes`, async () => {
+    const f = fixture();
+    change(f);
+    await assert.rejects(verifyAuthority(f.cf), /qualification isolation/);
+    assert.ok(f.events.every((event) => event.startsWith("GET ")));
+  });
+
+for (const [name, change] of [
+  [
+    "missing ownership marker",
+    (f) => {
+      f.state.workers[f.worker].tags = [];
+    },
+  ],
+  [
+    "production namespace substitution",
+    (f) => {
+      f.fleet.namespace_id = "9".repeat(32);
+    },
+  ],
+  [
+    "external namespace owner",
+    (f) => {
+      f.fleet.script_name = "production-coordinator";
+    },
+  ],
+  [
+    "external namespace environment",
+    (f) => {
+      f.fleet.environment = "production";
+    },
+  ],
+  [
+    "candidate name/run mismatch",
+    (f) => {
+      f.transport.props.runId = "image-qualification-99-1";
+    },
+  ],
+  [
+    "production service",
+    (f) => {
+      f.transport.service = "production-coordinator";
+    },
+  ],
+  [
+    "production service environment",
+    (f) => {
+      f.transport.environment = "production";
+    },
+  ],
+  [
+    "unexpected secret",
+    (f) => {
+      f.state.workers[f.worker].bindings.push({
+        name: "AWS_SECRET_ACCESS_KEY",
+        type: "secret_text",
+      });
+    },
+  ],
+  [
+    "dispatch namespace",
+    (f) => {
+      f.state.workers[f.worker].bindings.push({
+        name: "BROKER",
+        type: "dispatch_namespace",
+        namespace: "production",
+      });
+    },
+  ],
+  [
+    "extra owned namespace class",
+    (f) => {
+      f.state.namespaces.push({ script: f.worker, class: "Other", id: "5".repeat(32) });
+    },
+  ],
+])
+  test(`cleanup refuses ${name}`, async () => {
+    const f = fixture();
+    change(f);
+    // Even accidentally restamped metadata cannot authorize a production target.
+    if (name !== "missing ownership marker")
+      f.state.workers[f.worker] = ownedSettings(
+        f.admission,
+        f.worker,
+        f.state.workers[f.worker].bindings,
+      );
+    await assert.rejects(verifyOwned(f.cf, f.worker), /qualification isolation/);
+    assert.ok(f.events.every((event) => event.startsWith("GET ")));
+  });
+
+test("existing names and orphan namespaces cannot be adopted", async () => {
+  const f = fixture();
+  await assert.rejects(requireAbsent(f.cf, f.worker), /name collision/);
+  delete f.state.workers[f.worker];
+  await assert.rejects(requireAbsent(f.cf, f.worker), /name collision/);
+  await assert.rejects(verifyOwned(f.cf, f.worker, { allowAbsent: true }), /residue/);
+});
+
+test("binding digest retains every non-secret resource coordinate", () => {
+  const binding = {
+    name: "FLEET",
+    type: "durable_object_namespace",
+    class_name: "FleetDurableObject",
+    namespace_id: "1".repeat(32),
+    script_name: "external",
+    environment: "production",
+    dispatch_namespace: "production",
+  };
+  assert.deepEqual(bindingShape([binding]), [binding]);
+  assert.deepEqual(bindingShape([{ name: "TOKEN", type: "secret_text", text: "synthetic" }]), [
+    { name: "TOKEN", type: "secret_text" },
+  ]);
+});
+
+test("Cloudflare script inventory reads the unpaginated endpoint once for large shared accounts", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const calls = [];
+  const workers = Array.from({ length: 125 }, (_, index) => ({ id: `unrelated-${index}` }));
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    assert.equal(new URL(url).search, "");
+    return new Response(JSON.stringify({ success: true, result: workers }));
+  };
+  const cf = new Cloudflare("a".repeat(32), "synthetic");
+  assert.deepEqual(await cf.list("/workers/scripts"), workers);
+  assert.equal(calls.length, 1);
+});
+
+test("Cloudflare namespace inventory follows result_info through the final page", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const pages = [];
+  globalThis.fetch = async (value) => {
+    const page = Number(new URL(value).searchParams.get("page"));
+    pages.push(page);
+    return new Response(
+      JSON.stringify({
+        success: true,
+        result: [{ id: String(page) }],
+        result_info: { page, per_page: 100, total_pages: 2 },
+      }),
+    );
+  };
+  const cf = new Cloudflare("a".repeat(32), "synthetic");
+  assert.deepEqual(await cf.list("/workers/durable_objects/namespaces"), [
+    { id: "1" },
+    { id: "2" },
+  ]);
+  assert.deepEqual(pages, [1, 2]);
+});
+
+for (const schedules of [[], {}, { schedules: [{ cron: "* * * * *" }] }])
+  test(`authority schedule shape fails closed: ${JSON.stringify(schedules)}`, async () => {
+    const f = fixture();
+    const request = f.cf.request;
+    f.cf.request = async (route, ...args) =>
+      route.endsWith("/schedules") ? schedules : request(route, ...args);
+    await assert.rejects(verifyAuthority(f.cf), /authority is public/);
+  });
+
+test("explicitly verified empty production inventories are supported, unverified or missing inventories fail closed", () => {
+  const f = fixture();
+  for (const key of ["workers", "namespaceIds", "roleArns", "subnetIds", "securityGroupIds"])
+    f.record.production[key] = [];
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  assert.doesNotThrow(() => readAdmission(env()));
+  f.record.production.inventoryVerified = false;
+  assert.throws(() => readAdmission(env()), /inventory not verified/);
+  f.record.production.inventoryVerified = true;
+  delete f.record.production.workers;
+  assert.throws(() => readAdmission(env()), /inventory missing/);
+});
+
+async function sharedFixture() {
+  const f = fixture();
+  const { network } = await fixtureNetwork(f.record.aws);
+  f.record.version = 2;
+  f.record.aws.network = network;
+  f.record.production.inventoryVerified = false;
+  f.record.production.observation = {
+    verified: true,
+    scope: "qualification-identities-and-network",
+    observedAt: "2026-01-01T00:00:00Z",
+    receiptSha256: "e".repeat(64),
+  };
+  f.bindings.push({
+    name: "CRABBOX_AWS_QUALIFICATION_NETWORK_JSON",
+    type: "plain_text",
+    text: canonical(network),
+  });
+  f.record.authority.bindingDigest = digest(canonical(bindingShape(f.bindings)));
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  f.cf.admission = readAdmission(env());
+  return { ...f, admission: f.cf.admission, env };
+}
+
+test("versioned shared subnet admits an observed overlap without claiming a verified exclusive inventory", async () => {
+  const f = await sharedFixture();
+  f.record.production.subnetIds.push(f.record.aws.subnetId);
+  assert.equal(readAdmission(f.env()).production.inventoryVerified, false);
+  await verifyAuthority(f.cf);
+});
+
+for (const [name, change] of [
+  ["unverified observation", (f) => (f.record.production.observation.verified = false)],
+  ["missing receipt", (f) => delete f.record.production.observation.receiptSha256],
+  ["wrong observation scope", (f) => (f.record.production.observation.scope = "all-production")],
+  [
+    "future observation",
+    (f) => (f.record.production.observation.observedAt = "2999-01-01T00:00:00Z"),
+  ],
+  ["exclusive inventory assertion", (f) => (f.record.production.inventoryVerified = true)],
+  ["missing production identities", (f) => delete f.record.production.roleArns],
+  ["qualification role overlap", (f) => f.record.production.roleArns.push(f.record.aws.roleArn)],
+  [
+    "qualification group overlap",
+    (f) => f.record.production.securityGroupIds.push(f.record.aws.securityGroupId),
+  ],
+  ["qualification Worker overlap", (f) => f.record.production.workers.push(authorityName)],
+  [
+    "qualification namespace overlap",
+    (f) => f.record.production.namespaceIds.push(f.record.authority.namespaces[0].id),
+  ],
+  ["missing network", (f) => delete f.record.aws.network],
+  ["implicit version downgrade", (f) => (f.record.version = 1)],
+])
+  test(`shared admission rejects ${name}`, async () => {
+    const f = await sharedFixture();
+    change(f);
+    assert.throws(() => readAdmission(f.env()));
+  });
+
+test("explicit exclusive mode keeps verified inventory and subnet collision checks", () => {
+  const f = fixture();
+  f.record.version = 2;
+  f.record.aws.network = { mode: "exclusive" };
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  assert.doesNotThrow(() => readAdmission(env()));
+  f.record.production.subnetIds.push(f.record.aws.subnetId);
+  assert.throws(() => readAdmission(env()), /overlap/);
+});
+
+test("network policy must match both protected input and the actual authority binding", async () => {
+  const f = await sharedFixture();
+  assert.throws(
+    () =>
+      readAdmission({ ...f.env(), QUALIFICATION_NETWORK_JSON: canonical({ mode: "exclusive" }) }),
+    /network differs/,
+  );
+  const binding = f.bindings.find((b) => b.name === "CRABBOX_AWS_QUALIFICATION_NETWORK_JSON");
+  binding.text = canonical({ mode: "exclusive" });
+  f.record.authority.bindingDigest = digest(canonical(bindingShape(f.bindings)));
+  f.cf.admission = readAdmission(f.env());
+  await assert.rejects(verifyAuthority(f.cf), /authority network differs/);
+});

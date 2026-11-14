@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -38,6 +39,11 @@ func waitAWSAcquireReadyEvery(ctx context.Context, check func(context.Context) e
 	cancel(context.Canceled)
 	<-done
 	if cause != nil {
+		// Keep the wait's identity/deadline diagnostic when it wraps the
+		// authoritative stop cause. An unrelated wait error must not hide it.
+		if err != nil && errors.Is(err, cause) {
+			return err
+		}
 		return cause
 	}
 	if err != nil {

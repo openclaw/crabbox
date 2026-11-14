@@ -1250,6 +1250,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	fs := newFlagSet("checkpoint fork", a.Stderr)
 	leaseFlags := registerLeaseCreateFlags(fs, defaults)
 	requestedLeaseID := fs.String("lease-id", "", "fixed lease ID for idempotent external-provider orchestration")
+	waitTimeout := fs.Duration("wait-timeout", time.Hour, "readiness wait for fixed native Linux forks (maximum 4h)")
 	jsonOut := fs.Bool("json", false, "print forked leases as JSON")
 	id := fs.String("id", "", "provider source VM id/name for provider-native fork")
 	snapshot := fs.String("snapshot", "", "provider-native snapshot name or id")
@@ -1292,6 +1293,12 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			return Exit(2, "--lease-id cannot be combined with --workdir")
 		}
 	}
+	if *waitTimeout <= 0 || *waitTimeout > 4*time.Hour {
+		return Exit(2, "--wait-timeout must be greater than zero and at most 4h")
+	}
+	if flagWasSet(fs, "wait-timeout") && fixedLeaseID == "" {
+		return Exit(2, "--wait-timeout requires --lease-id for same-lease resumption")
+	}
 	if *jsonOut && *dryRun {
 		return Exit(2, "--json cannot be combined with --dry-run")
 	}
@@ -1320,6 +1327,11 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			return Exit(2, "archive checkpoints do not support --lease-id")
 		}
 		return Exit(2, "checkpoint kind=%s does not support --lease-id", record.Kind)
+	}
+	if fixedLeaseID != "" && isNativeCheckpointKind(record.Kind) && record.TargetOS == targetLinux {
+		ctx = context.WithValue(ctx, checkpointReadinessKey{}, checkpointReadinessWait{Timeout: *waitTimeout, CheckpointID: record.ID, LeaseID: fixedLeaseID})
+	} else if flagWasSet(fs, "wait-timeout") {
+		return Exit(2, "--wait-timeout requires a fixed native Linux checkpoint fork")
 	}
 	if unresolvedCheckpoint(record) {
 		return Exit(2, "checkpoint %s capture is unresolved; reconcile it before fork", record.ID)
