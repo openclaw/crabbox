@@ -491,7 +491,7 @@ jobs:
           QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}
           QUALIFICATION_EXPECTED_AUTHORITY_SHA: ${{ needs.deploy-enroll.outputs.authority_sha }}
           QUALIFICATION_EXPECTED_AUTHORITY_VERSION: ${{ needs.deploy-enroll.outputs.authority_version }}
-          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash || vars.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH }}
           QUALIFICATION_EXPECTED_ENROLLED_AT: ${{ needs.deploy-enroll.outputs.enrolled_at }}
           QUALIFICATION_EXPECTED_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
           QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST: ${{ needs.deploy-enroll.outputs.execution_manifest_digest }}
