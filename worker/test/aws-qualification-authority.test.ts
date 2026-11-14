@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { XMLBuilder, XMLParser } from "fast-xml-parser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fixtureNetwork } from "../../scripts/fixtures/qualification-network.mjs";
 import { EC2SpotClient } from "../src/aws";
 import {
   AWSQualificationController,
@@ -110,27 +107,12 @@ describe("AWS qualification authority deployment", () => {
         () => {
           assertActive: typeof assertActive;
           claim: typeof claim;
-          enrollAndClaim: (
-            props: AWSQualificationControllerProps,
-            value: AWSQualificationRunIdentity,
-          ) => Promise<unknown>;
           discover: typeof discover;
           markFinalizing: typeof markFinalizing;
           markFinalized: typeof markFinalized;
           retire: typeof retire;
         }
-      >(() => ({
-        assertActive,
-        claim,
-        discover,
-        markFinalizing,
-        markFinalized,
-        retire,
-        enrollAndClaim: async (props, value) => {
-          await enroll(props, value);
-          return await claim(props, value);
-        },
-      })),
+      >(() => ({ assertActive, claim, discover, markFinalizing, markFinalized, retire })),
     };
     const env = {
       AWS_QUALIFICATION_RUNS: namespace,
@@ -562,23 +544,17 @@ describe("AWS qualification authority", () => {
           if (typeof key === "object" && Object.hasOwn(key, "run")) expireWork();
         });
       } else if (delay === "registry transport") {
-        const enroll = fixture.run.enroll.bind(fixture.run);
-        vi.spyOn(fixture.run, "enroll").mockImplementation(async (...args) => {
-          await enroll(...args);
+        const claim = fixture.registry.claim.bind(fixture.registry);
+        vi.spyOn(fixture.registry, "claim").mockImplementation(async (...args) => {
           expireWork();
+          return await claim(...args);
         });
       } else {
         const get = fixture.registryStorage.get.bind(fixture.registryStorage);
-        let activeReads = 0;
         vi.spyOn(fixture.registryStorage, "get").mockImplementation(
           async <T>(key: string): Promise<T | undefined> => {
             const value = await get<T>(key);
-            if (key === "active") activeReads++;
-            if (
-              (delay === "retirement read" && key === "retired") ||
-              (delay === "active registry read" && key === "active" && activeReads === 2)
-            )
-              expireWork();
+            if (key === (delay === "retirement read" ? "retired" : "active")) expireWork();
             return value;
           },
         );
@@ -615,7 +591,6 @@ describe("AWS qualification authority", () => {
   it("preserves lexical AWS account IDs when verifying retained resources", async () => {
     const fixture = authorityFixture();
     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
     fixture.signer.accountId = "001234567890";
     await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
   });
@@ -2036,230 +2011,6 @@ describe("AWS qualification authority", () => {
     expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
   });
 
-  it.each([
-    "arn:aws:sts::123456789012:assumed-role/Production/qualification-test",
-    "arn:aws:iam::123456789012:user/Qualification",
-    "arn:aws:sts::123456789012:assumed-role/QualificationExtra/qualification-test",
-    "arn:aws:sts::999999999999:assumed-role/Qualification/qualification-test",
-    "",
-  ])(
-    "fences same-account or malformed principals before provisioning and cleanup: %s",
-    async (principal) => {
-      const fixture = authorityFixture();
-      await fixture.run.enroll(controller, identity);
-      await importKey(fixture);
-      fixture.signer.principalArn = principal;
-      const before = fixture.signer.calls.length;
-      await expect(
-        fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
-      ).rejects.toThrow("wrong role");
-      await expect(fixture.run.finalize(controller)).rejects.toThrow("wrong role");
-      expect(
-        fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
-      ).toBe(true);
-      expect((await fixture.run.attest(controller)).finalized).toBe(false);
-    },
-  );
-
-  it("requires a role ARN and binds role changes into the enrolled policy", async () => {
-    const fixture = authorityFixture();
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
-    await expect(fixture.run.enroll(controller, identity)).rejects.toThrow("role ARN is malformed");
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Qualification";
-    await fixture.run.enroll(controller, identity);
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
-    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
-      "policy changed",
-    );
-  });
-
-  it("settles a legacy persisted policy through the controller without rewriting enrollment", async () => {
-    useImmediateTimeouts();
-    const fixture = authorityHTTPFixture(identity);
-    await fixture.controller.claim(identity);
-    await importKey(fixture);
-    await fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2"));
-    const before = await persistLegacyPolicy(fixture);
-    fixture.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "f".repeat(40);
-    const network = await fixtureNetwork();
-    Object.assign(fixture.env, {
-      CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(network.network),
-    });
-    fixture.reopen();
-    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
-      "policy changed",
-    );
-
-    await fixture.controller.finalize(identity.runId);
-    expect(await fixture.storage.get("run")).toMatchObject({
-      policy: before["policy"],
-      policyHash: before["policyHash"],
-      authoritySha: before["authoritySha"],
-      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
-      finalizationSource: "controller",
-      finalizedAt: expect.any(String),
-    });
-    expect((await fixture.controller.attest(identity.runId)).finalReceipt).toMatchObject({
-      failureCodes: [],
-      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
-    });
-    expect(fixture.signer.calls.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
-    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
-    await fixture.controller.retire(identity.runId);
-    expect(await fixture.controller.discover()).toBeUndefined();
-  });
-
-  it("pins a legacy cleanup role across failed cleanup, restart and alarm retry", async () => {
-    useImmediateTimeouts();
-    const fixture = authorityHTTPFixture(identity);
-    await fixture.controller.claim(identity);
-    await importKey(fixture);
-    await persistLegacyPolicy(fixture);
-    const execute = fixture.signer.execute.bind(fixture.signer);
-    const fail = vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
-      if (args[1] === "DeleteKeyPair") throw new Error("cleanup transport unavailable");
-      return await execute(...args);
-    });
-    await expect(fixture.controller.finalize(identity.runId)).rejects.toThrow("cleanup incomplete");
-    expect(await fixture.storage.get("run")).toMatchObject({
-      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
-    });
-    expect(fixture.storage.alarm).toEqual(expect.any(Number));
-    fail.mockRestore();
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
-    fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
-    fixture.reopen();
-    const before = fixture.signer.calls.length;
-    await expect(fixture.run.alarm()).rejects.toThrow("wrong role");
-    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
-      "GetCallerIdentity",
-    ]);
-    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
-      "finalizing",
-    );
-    fixture.signer.principalArn = undefined;
-    fixture.reopen();
-    await fixture.run.alarm();
-    expect((await fixture.controller.attest(identity.runId)).finalized).toBe(true);
-    await fixture.controller.finalize(identity.runId);
-    await fixture.controller.retire(identity.runId);
-    expect(await fixture.controller.discover()).toBeUndefined();
-  });
-
-  it("recovers a legacy pending image on the automatic cleanup path after restart", async () => {
-    useImmediateTimeouts();
-    const fixture = authorityFixture({ loseAfterEffect: "CreateImage" });
-    await fixture.run.enroll(controller, identity);
-    await importKey(fixture);
-    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
-    await expect(
-      fixture.run.execute(
-        identity,
-        request(
-          "CreateImage",
-          {
-            InstanceId: "i-owned",
-            Name: "qualification-image",
-            NoReboot: "true",
-          },
-          "ec2",
-        ),
-      ),
-    ).rejects.toThrow("lost response");
-    const before = await persistLegacyPolicy(fixture);
-    const reopened = new AWSQualificationRun(
-      { storage: fixture.storage } as never,
-      fixture.env as never,
-      fixture.signer,
-    );
-    await reopened.alarm();
-    expect(await fixture.storage.get("run")).toMatchObject({
-      policy: before["policy"],
-      policyHash: before["policyHash"],
-      finalizationSource: "automatic",
-      finalizedAt: expect.any(String),
-    });
-    expect((await reopened.attest(controller)).finalReceipt).toMatchObject({
-      failureCodes: [],
-      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
-    });
-    expect(fixture.signer.calls.filter(({ action }) => action === "CreateImage")).toHaveLength(1);
-    for (const action of [
-      "DeregisterImage",
-      "DeleteSnapshot",
-      "TerminateInstances",
-      "DeleteKeyPair",
-    ]) {
-      expect(fixture.signer.calls.some((call) => call.action === action)).toBe(true);
-    }
-  });
-
-  it("retains a legacy role pin after an uncertain storage response without dispatching cleanup", async () => {
-    useImmediateTimeouts();
-    const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
-    await importKey(fixture);
-    await persistLegacyPolicy(fixture);
-    const put = fixture.storage.put.bind(fixture.storage);
-    let lost = false;
-    vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
-      await put(key, value);
-      if (!lost && key === "run" && (value as Record<string, unknown>)["legacyCleanupRoleArn"]) {
-        lost = true;
-        throw new Error("lost pin response");
-      }
-    });
-    const before = fixture.signer.calls.length;
-    await expect(fixture.run.finalize(controller)).rejects.toThrow("lost pin response");
-    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
-      "GetCallerIdentity",
-    ]);
-    expect(await fixture.storage.get("run")).toHaveProperty("legacyCleanupRoleArn");
-    const reopened = new AWSQualificationRun(
-      { storage: fixture.storage } as never,
-      fixture.env as never,
-      fixture.signer,
-    );
-    await reopened.alarm();
-    expect((await reopened.attest(controller)).finalized).toBe(true);
-  });
-
-  it.each([
-    "policy drift",
-    "hash mismatch",
-    "unknown schema",
-    "wrong role",
-    "wrong account",
-    "missing role",
-  ])("refuses an unverified legacy cleanup transition: %s", async (reason) => {
-    const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
-    await importKey(fixture);
-    const stored = await persistLegacyPolicy(fixture);
-    if (reason === "policy drift") fixture.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID = "subnet-other";
-    if (reason === "hash mismatch") stored["policyHash"] = "0".repeat(64);
-    if (reason === "unknown schema") {
-      (stored["policy"] as Record<string, unknown>)["network"] = null;
-      stored["policyHash"] = legacyPolicyHash(stored["policy"] as Record<string, unknown>);
-    }
-    if (reason === "wrong role")
-      fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
-    if (reason === "wrong account") fixture.signer.accountId = "999999999999";
-    if (reason === "missing role") fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
-    await fixture.storage.put("run", stored);
-    const before = fixture.signer.calls.length;
-    await expect(fixture.run.finalize(controller)).rejects.toThrow(/AWS qualification/);
-    expect(
-      fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
-    ).toBe(true);
-    expect(await fixture.storage.get("run")).not.toHaveProperty("legacyCleanupRoleArn");
-    expect((await fixture.run.attest(controller)).finalized).toBe(false);
-    expect(fixture.storage.alarm).toEqual(expect.any(Number));
-    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
-      "finalizing",
-    );
-  });
-
   it("revalidates the expected STS account before every mutation", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -2275,7 +2026,6 @@ describe("AWS qualification authority", () => {
   it("preserves leading-zero account and reservation owner identities", async () => {
     const fixture = authorityFixture();
     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
-    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
     fixture.signer.accountId = "001234567890";
     fixture.signer.ownerId = "001234567890";
     await fixture.run.enroll(controller, identity);
@@ -2613,423 +2363,6 @@ describe("AWS qualification candidate transport", () => {
   });
 });
 
-describe("first-walk integration with the existing authority", () => {
-  function clockClaim(firstWalk: boolean, minutes: number) {
-    const f = firstWalkAuthorityFixture();
-    const candidate = {
-      ...f.identity,
-      expiresAt: new Date(Date.now() + minutes * 60_000).toISOString(),
-    };
-    if (!firstWalk) {
-      delete candidate.firstWalk;
-      delete candidate.retainedImage;
-    }
-    const registry = new AWSQualificationRegistry(
-      { storage: new MemoryStorage() } as never,
-      {} as never,
-    );
-    return registry.claim(controller, candidate);
-  }
-
-  it.each([
-    { firstWalk: true, minutes: 150 },
-    { firstWalk: false, minutes: 120 },
-  ])("accepts only the mode's maximum window: %j", async ({ firstWalk, minutes }) => {
-    await expect(clockClaim(firstWalk, minutes)).resolves.toBeDefined();
-  });
-
-  it.each([
-    { firstWalk: true, minutes: 151 },
-    { firstWalk: false, minutes: 121 },
-  ])("rejects a window above the mode's maximum: %j", async ({ firstWalk, minutes }) => {
-    await expect(clockClaim(firstWalk, minutes)).rejects.toThrow("expiry");
-  });
-
-  it("keeps finalization pending on incomplete inventory and recovers without losing exact copy identity", async () => {
-    const f = firstWalkAuthorityFixture();
-    await f.run.enroll(controller, f.identity);
-    await importKey(f, f.identity);
-    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
-    await f.attach();
-    f.paginate(true);
-    await expect(f.run.finalize(controller)).rejects.toThrow("incomplete");
-    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(false);
-    f.paginate(false);
-    await f.run.finalize(controller);
-    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
-  });
-  it("denies raw volume APIs and the typed operation without the opt-in binding", async () => {
-    const f = authorityFixture();
-    await f.run.enroll(controller, identity);
-    await expect(f.run.execute(identity, request("CreateVolume", {}, "ec2"))).rejects.toThrow(
-      "not allowed",
-    );
-    await expect(f.run.prepareFirstWalk(identity, firstWalkRequest())).rejects.toThrow(
-      "not enabled",
-    );
-  });
-  it("bounds stock launch selection and keeps borrowed snapshot reads separate from copy deletion", async () => {
-    const f = firstWalkAuthorityFixture();
-    await f.run.enroll(controller, f.identity);
-    await importKey(f, f.identity);
-    await expect(
-      f.run.execute(
-        f.identity,
-        request(
-          "RunInstances",
-          { ...runInstancesParams(), ImageId: f.identity.retainedImage!.imageId },
-          "ec2",
-        ),
-      ),
-    ).rejects.toThrow("outside the run ledger");
-    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
-    await f.attach();
-    const proof = await f.run.firstWalkStatus(f.identity);
-    expect(proof).toMatchObject({ finalized: false, volumeID: "vol-33333333", phase: "attached" });
-    expect(await f.storage.get("ledger")).toMatchObject({
-      volumeIds: expect.arrayContaining(["vol-55555555", "vol-33333333"]),
-    });
-    await f.run.finalize(controller);
-    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
-    expect(
-      f.signer.calls
-        .filter((c) => c.action === "DeleteVolume")
-        .map((c) => c.parameters["VolumeId"]),
-    ).toEqual(["vol-33333333"]);
-    expect(
-      f.signer.calls.some((c) => c.action === "DeleteSnapshot" || c.action === "DetachVolume"),
-    ).toBe(false);
-  });
-  it.each(["CreateVolume", "AttachVolume", "DeleteVolume"])(
-    "retains ownership and pins across an uncertain %s response and restart",
-    async (fault) => {
-      const f = firstWalkAuthorityFixture();
-      await f.run.enroll(controller, f.identity);
-      await importKey(f, f.identity);
-      await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
-      f.fault(fault);
-      for (let i = 0; i < 4; i++) {
-        try {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
-          await f.run.prepareFirstWalk(f.identity, firstWalkRequest());
-        } catch {
-          /* durable retry */
-        }
-      }
-      let cleanupError: unknown;
-      try {
-        await f.run.finalize(controller);
-      } catch (error) {
-        cleanupError = error;
-      }
-      expect(Boolean(cleanupError)).toBe(fault === "DeleteVolume");
-      // Reconstruct the Durable Object; no in-memory volume ownership may be required.
-      const restarted = new AWSQualificationRun(
-        { storage: f.storage } as never,
-        f.env as never,
-        f.signer,
-      );
-      await restarted.finalize(controller);
-      expect(await restarted.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
-      expect(f.signer.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
-      expect(f.signer.calls.filter((c) => c.action === "AttachVolume")).toHaveLength(1);
-      await expect(restarted.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
-        "finalized",
-      );
-    },
-  );
-  it("a controller cancellation fences attachment and finalizes an unattached partial copy", async () => {
-    const f = firstWalkAuthorityFixture();
-    await f.run.enroll(controller, f.identity);
-    await importKey(f, f.identity);
-    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
-    f.fault("CreateVolume");
-    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow("lost");
-    await f.run.beginFinalization(controller);
-    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
-      "finalizing",
-    );
-    await f.run.finalize(controller);
-    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
-    expect(f.signer.calls.some((c) => c.action === "AttachVolume")).toBe(false);
-  });
-});
-
-describe("shared-subnet authority admission and settlement", () => {
-  it("checks network before enrollment and refuses missing permissions without allocation", async () => {
-    const f = authorityFixture();
-    const net = await sharedNetwork(f);
-    net.roots.DescribeRouteTables.nextToken = "more";
-    await expect(f.run.enroll(controller, identity)).rejects.toThrow("network admission");
-    expect(await f.storage.get("run")).toBeUndefined();
-    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
-    delete net.roots.DescribeRouteTables.nextToken;
-    net.deny = "DescribeNetworkAcls";
-    await expect(f.run.enroll(controller, identity)).rejects.toThrow(
-      "DescribeNetworkAcls http 403",
-    );
-  });
-  it("checks launch/readback and denies later forward work after network drift, while cleanup succeeds", async () => {
-    useImmediateTimeouts();
-    const f = authorityFixture();
-    const net = await sharedNetwork(f);
-    await f.run.enroll(controller, identity);
-    await importKey(f);
-    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
-    await f.run.execute(
-      identity,
-      request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
-    );
-    net.table.routeSet.item.push({
-      destinationCidrBlock: "10.0.0.0/8",
-      gatewayId: "pcx-11111111",
-      state: "active",
-    });
-    await expect(
-      f.run.execute(
-        identity,
-        request("CreateImage", { InstanceId: "i-owned", Name: "crabbox-image" }, "ec2"),
-      ),
-    ).rejects.toThrow("network admission");
-    expect(f.signer.calls.some((c) => c.action === "CreateImage")).toBe(false);
-    const before = f.signer.calls.filter((c) => c.action === "DescribeRouteTables").length;
-    await f.run.beginFinalization(controller);
-    await f.run.finalize(controller);
-    expect((await f.run.attest(controller)).finalized).toBe(true);
-    expect(f.signer.calls.filter((c) => c.action === "DescribeRouteTables")).toHaveLength(before);
-  });
-  it("keeps launch ownership when guest verification fails, rechecks receipt replays and settles after restart", async () => {
-    useImmediateTimeouts();
-    const f = authorityFixture();
-    const net = await sharedNetwork(f);
-    await f.run.enroll(controller, identity);
-    await importKey(f);
-    net.guest.iamInstanceProfile = { arn: "arn:aws:iam::123456789012:instance-profile/Unexpected" };
-    const launch = request("RunInstances", runInstancesParams(), "ec2");
-    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
-    expect(await f.storage.get("ledger")).toMatchObject({
-      instanceIds: ["i-owned"],
-      volumeIds: ["vol-owned"],
-    });
-    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
-    expect(f.signer.calls.filter((c) => c.action === "RunInstances")).toHaveLength(1);
-    net.deny = "DescribeRouteTables";
-    const reopened = new AWSQualificationRun(
-      { storage: f.storage } as never,
-      f.env as never,
-      f.signer,
-    );
-    await reopened.finalize(controller);
-    expect((await reopened.attest(controller)).finalized).toBe(true);
-  });
-  it("checks an uncertain generic launch replay without changing its idempotency token", async () => {
-    useImmediateTimeouts();
-    const f = authorityFixture({ loseAfterEffect: "RunInstances" });
-    const net = await sharedNetwork(f);
-    await f.run.enroll(controller, identity);
-    await importKey(f);
-    const launch = request("RunInstances", runInstancesParams(), "ec2");
-    await expect(f.run.execute(identity, launch)).rejects.toThrow("lost response");
-    net.guest.groupSet.item.push({ groupId: "sg-99999999" });
-    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
-    const launches = f.signer.calls.filter((c) => c.action === "RunInstances");
-    expect(launches).toHaveLength(2);
-    expect(launches[0]!.parameters["ClientToken"]).toBe(launches[1]!.parameters["ClientToken"]);
-    await f.run.finalize(controller);
-    expect((await f.run.attest(controller)).finalized).toBe(true);
-  });
-  it("checks the attachment recipient before creating a copy and cleans up despite later route denial", async () => {
-    const f = firstWalkAuthorityFixture();
-    const net = await sharedNetwork(f);
-    await f.run.enroll(controller, f.identity);
-    await importKey(f, f.identity);
-    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
-    net.guest.networkInterfaceSet.item[0].groupSet.item.push({ groupId: "sg-99999999" });
-    await expect(f.attach()).rejects.toThrow("network admission");
-    expect(f.signer.calls.some((c) => c.action === "CreateVolume")).toBe(false);
-    net.guest.networkInterfaceSet.item[0].groupSet.item.pop();
-    await f.attach();
-    net.deny = "DescribeRouteTables";
-    await f.run.beginFinalization(controller);
-    await f.run.finalize(controller);
-    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
-    expect(
-      f.signer.calls
-        .filter((c) => c.action === "DeleteVolume")
-        .map((c) => c.parameters["VolumeId"]),
-    ).toEqual(["vol-33333333"]);
-    expect(f.signer.calls.some((c) => c.action === "DeleteSnapshot")).toBe(false);
-  });
-});
-
-async function sharedNetwork(f: ReturnType<typeof authorityFixture>) {
-  const net = await fixtureNetwork({
-    accountId: f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID,
-    subnetId: f.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID,
-    securityGroupId: f.env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID,
-  });
-  Object.assign(f.env, { CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(net.network) });
-  f.signer.ownerId = f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID;
-  const original = f.signer.execute.bind(f.signer);
-  const builder = new XMLBuilder();
-  const parser = new XMLParser();
-  const state = { ...net, deny: "" };
-  f.signer.execute = async (service, action, region, parameters) => {
-    if (action in net.roots) {
-      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
-      if (state.deny === action) return new Response("<Response/>", { status: 403 });
-      return xml(builder.build({ [`${action}Response`]: net.roots[action] }));
-    }
-    const response = await original(service, action, region, parameters);
-    if (action !== "DescribeInstances" || response.status >= 300) return response;
-    const doc = parser.parse(await response.text());
-    const reservations = doc.DescribeInstancesResponse.reservationSet?.item;
-    for (const reservation of reservations
-      ? Array.isArray(reservations)
-        ? reservations
-        : [reservations]
-      : []) {
-      const entries = reservation.instancesSet?.item;
-      for (const instance of entries ? (Array.isArray(entries) ? entries : [entries]) : []) {
-        const { instanceId, instanceState } = instance;
-        Object.assign(instance, structuredClone(net.guest), { instanceId, instanceState });
-      }
-    }
-    return xml(builder.build(doc));
-  };
-  return state;
-}
-
-function firstWalkRequest() {
-  return {
-    checkpointID: "chk_capture",
-    claimHash: "a".repeat(64),
-    instanceID: "i-11111111",
-    snapshotID: "snap-22222222",
-    readinessReceiptSha256: "b".repeat(64),
-  };
-}
-function firstWalkAuthorityFixture() {
-  useImmediateTimeouts();
-  const f = authorityFixture();
-  const runIdentity = {
-    ...retainedIdentity(),
-    firstWalk: true as const,
-    expiresAt: new Date(Date.now() + 120 * 60_000).toISOString(),
-  };
-  f.signer.ownerId = f.signer.accountId;
-  const original = f.signer.execute.bind(f.signer);
-  let volume = false,
-    attached = false,
-    dot = false,
-    fault: string | undefined;
-  let paginated = false;
-  vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) => {
-    if (
-      ["CreateVolume", "AttachVolume", "ModifyInstanceAttribute", "DeleteVolume"].includes(action)
-    ) {
-      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
-      if (action === "CreateVolume") volume = true;
-      if (action === "AttachVolume") attached = true;
-      if (action === "ModifyInstanceAttribute") dot = true;
-      if (action === "DeleteVolume") volume = false;
-      if (fault === action) {
-        fault = undefined;
-        throw new Error("lost response after effect");
-      }
-      return xml(
-        `<${action}Response>${action === "CreateVolume" ? "<volumeId>vol-33333333</volumeId>" : ""}</${action}Response>`,
-      );
-    }
-    const response = await original(service, action, region, parameters);
-    let body = (await response.text())
-      .replaceAll("i-owned", "i-11111111")
-      .replaceAll("vol-owned", "vol-55555555");
-    if (action === "TerminateInstances") attached = false;
-    if (action === "DescribeInstances")
-      body = body
-        .replaceAll(
-          "<instanceType>",
-          `<placement><availabilityZone>us-east-1a</availabilityZone></placement><instanceType>`,
-        )
-        .replaceAll(
-          "</blockDeviceMapping>",
-          `${attached ? `<item><deviceName>/dev/sdf</deviceName><ebs><volumeId>vol-33333333</volumeId><deleteOnTermination>${dot}</deleteOnTermination></ebs></item>` : ""}</blockDeviceMapping>`,
-        );
-    if (action === "DescribeVolumes") {
-      if (parameters["VolumeId.1"] === "vol-33333333" && !volume)
-        return awsError("InvalidVolume.NotFound");
-      const dataOnly = parameters["VolumeId.1"] === "vol-33333333" || parameters["Filter.2.Name"];
-      if (dataOnly)
-        body = "<DescribeVolumesResponse><volumeSet></volumeSet></DescribeVolumesResponse>";
-      if (volume && parameters["VolumeId.1"] !== "vol-55555555") {
-        const labels = {
-          crabbox_qualification_run: runIdentity.runId,
-          crabbox_qualification_owner: runIdentity.owner,
-          crabbox_qualification_sha: runIdentity.candidateSha,
-          crabbox_qualification_expiry: runIdentity.expiresAt,
-          crabbox_qualification_op: "first-walk-data",
-        };
-        body = body.replace(
-          "</volumeSet>",
-          `<item><volumeId>vol-33333333</volumeId><snapshotId>snap-22222222</snapshotId><availabilityZone>us-east-1a</availabilityZone><size>400</size><volumeType>gp3</volumeType><iops>3000</iops><throughput>125</throughput><encrypted>true</encrypted><status>${attached ? "in-use" : "available"}</status><tagSet>${Object.entries(
-            labels,
-          )
-            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
-            .join(
-              "",
-            )}</tagSet><attachmentSet>${attached ? "<item><instanceId>i-11111111</instanceId><device>/dev/sdf</device><status>attached</status></item>" : ""}</attachmentSet></item></volumeSet>`,
-        );
-      }
-      if (paginated && !parameters["VolumeId.1"] && !parameters["Filter.2.Name"])
-        body = body.replace(
-          "</DescribeVolumesResponse>",
-          "<nextToken>more</nextToken></DescribeVolumesResponse>",
-        );
-    }
-    return new Response(body, { status: response.status });
-  });
-  return {
-    ...f,
-    identity: runIdentity,
-    paginate: (value: boolean) => {
-      paginated = value;
-    },
-    fault: (action: string) => {
-      fault = action;
-    },
-    attach: async () => {
-      for (let i = 0; i < 4; i++) {
-        try {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
-          await f.run.prepareFirstWalk(runIdentity, firstWalkRequest());
-        } catch (error) {
-          if (!/dispatched|readback/.test(String(error))) throw error;
-        }
-      }
-    },
-  };
-}
-
-function legacyPolicyHash(policy: Record<string, unknown>): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(
-        Object.fromEntries(Object.entries(policy).toSorted(([a], [b]) => a.localeCompare(b))),
-      ),
-    )
-    .digest("hex");
-}
-
-async function persistLegacyPolicy(fixture: ReturnType<typeof authorityFixture>) {
-  const stored = (await fixture.storage.get<Record<string, unknown>>("run"))!;
-  const policy = stored["policy"] as Record<string, unknown>;
-  delete policy["roleArn"];
-  stored["policyHash"] = legacyPolicyHash(policy);
-  await fixture.storage.put("run", stored);
-  return stored;
-}
-
 function authorityFixture(
   options: {
     borrowedInventory?: boolean;
@@ -3051,8 +2384,6 @@ function authorityFixture(
   const signer = new FakeSigner(options);
   const env = {
     CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
-    CRABBOX_AWS_QUALIFICATION_ROLE_ARN:
-      "arn:aws:iam::123456789012:role/qualification/Qualification",
     CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
     CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
     CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
@@ -3108,11 +2439,8 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
   vi.stubGlobal("fetch", fetch);
   let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
   const registryStorage = new MemoryStorage();
+  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
   const namespace = { idFromName: (name: string) => name, get: () => run };
-  const registry = new AWSQualificationRegistry(
-    { storage: registryStorage } as never,
-    { AWS_QUALIFICATION_RUNS: namespace } as never,
-  );
   const bindings = {
     AWS_QUALIFICATION_RUNS: namespace,
     AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
@@ -3231,7 +2559,6 @@ class FakeSigner {
     parameters: Record<string, unknown>;
   }> = [];
   accountId = "123456789012";
-  principalArn: string | undefined;
   ownerId: string | undefined;
   advanceNextIdentityByMs = 0;
   instanceDescribeNotFound = false;
@@ -3291,7 +2618,7 @@ class FakeSigner {
         vi.setSystemTime(new Date(Date.now() + advanceBy));
       }
       return xml(
-        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account><Arn>${this.principalArn ?? `arn:aws:sts::${this.accountId}:assumed-role/Qualification/qualification-test`}</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>`,
+        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
       );
     }
     if (action === "DescribeKeyPairs") {
@@ -3587,60 +2914,3 @@ function awsServerError(): Response {
 function xml(body: string): Response {
   return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
 }
-
-describe("pure controller binding identity", () => {
-  const version = "11111111-2222-4333-8444-555555555555";
-  const challenge = "c".repeat(64);
-  function pure(props: unknown = controller, metadata: unknown = { id: version }) {
-    // Accessing any other environment capability fails the test, including DO
-    // stubs, credentials, the signer or an expired logical authority identity.
-    const env = new Proxy(
-      { CF_VERSION_METADATA: metadata },
-      {
-        get(target, key) {
-          if (key === "CF_VERSION_METADATA") return target.CF_VERSION_METADATA;
-          throw new Error(`unexpected environment access: ${String(key)}`);
-        },
-      },
-    );
-    return new AWSQualificationController(env as never, props as never);
-  }
-  it("returns cloned actual props and executing version without state or network", async () => {
-    const network = vi.fn<() => never>(() => {
-      throw new Error("network forbidden");
-    });
-    vi.stubGlobal("fetch", network);
-    const props = { deploymentHash: "b".repeat(64) };
-    const reply = await pure(props).bindingIdentity(challenge);
-    expect(reply).toEqual({
-      protocol: 1,
-      role: "controller",
-      challenge,
-      props,
-      authorityVersion: version,
-    });
-    reply.props.deploymentHash = "a".repeat(64);
-    expect(props.deploymentHash).toBe("b".repeat(64));
-    expect(network).not.toHaveBeenCalled();
-  });
-  it.each([null, {}, { deploymentHash: "bad" }, { deploymentHash: "a".repeat(64), extra: true }])(
-    "rejects incomplete or extra bound props %j without state",
-    async (props) => {
-      await expect(pure(props).bindingIdentity(challenge)).rejects.toThrow("binding identity");
-    },
-  );
-  it.each(["", "a".repeat(65), "G".repeat(64), {}, null])(
-    "rejects malformed challenge %j",
-    async (value) => {
-      await expect(pure().bindingIdentity(value as never)).rejects.toThrow("binding identity");
-    },
-  );
-  it.each([{}, { id: "stale" }, { id: "" }])(
-    "rejects absent/invalid executing version %j",
-    async (value) => {
-      await expect(pure(controller, value).bindingIdentity(challenge)).rejects.toThrow(
-        "binding identity",
-      );
-    },
-  );
-});

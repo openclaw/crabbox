@@ -3,29 +3,13 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { XMLParser } from "fast-xml-parser";
 
 import {
-  parseQualificationNetwork,
-  verifyQualificationGuest,
-  verifyQualificationNetwork,
-  type QualificationNetwork,
-} from "../../scripts/image-qualification-network";
-import {
-  cleanupFirstWalk,
-  firstWalkKey,
-  firstWalkStatus,
-  prepareFirstWalk,
-  type FirstWalkOwner,
-  type FirstWalkState,
-} from "./aws-first-walk";
-import {
   awsQualificationAttestationVersion,
   awsQualificationCleanupReserveMs,
   awsQualificationInstanceTypes,
-  awsQualificationFirstWalkRunMs,
   awsQualificationMaxRunMs,
   awsQualificationRetainedRootGB,
   awsQualificationRetainedRunMs,
   type AWSQualificationAttestation,
-  type AWSQualificationBindingIdentity,
   type AWSQualificationControllerProps,
   type AWSQualificationFinalReceipt,
   type AWSQualificationOperationEvidence,
@@ -35,12 +19,6 @@ import {
   type AWSQualificationResponse,
   type AWSQualificationRunIdentity,
   type AWSQualificationService,
-  type AWSQualificationTransportProbe,
-  type AWSQualificationTransportProbeRequest,
-} from "./aws-qualification-contract";
-import type {
-  AWSQualificationFirstWalkRequest,
-  AWSQualificationFirstWalkStatus,
 } from "./aws-qualification-contract";
 import { requireAWSRegion } from "./aws-region";
 import { sha256Hex } from "./encoding";
@@ -83,7 +61,7 @@ const parser = new XMLParser({
   // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
   tagValueProcessor: (_tagName, _value, jPath) =>
     jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
-    _tagName === "ownerId" ||
+    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId" ||
     jPath === "DescribeImagesResponse.imagesSet.item.imageOwnerId" ||
     jPath === "DescribeSnapshotsResponse.snapshotSet.item.ownerId"
       ? undefined
@@ -145,12 +123,10 @@ const preservedTagKeys = new Set([
 ]);
 
 interface AWSQualificationAuthorityEnv {
-  CF_VERSION_METADATA?: { id: string };
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
   CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?: string;
-  CRABBOX_AWS_QUALIFICATION_ROLE_ARN?: string;
   CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
   CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
   CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
@@ -158,20 +134,17 @@ interface AWSQualificationAuthorityEnv {
   CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
   CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
   CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
-  CRABBOX_AWS_QUALIFICATION_NETWORK_JSON?: string;
   AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
   AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
 }
 
 interface AWSQualificationPolicy {
   accountId: string;
-  roleArn: string;
   baseAmiId: string;
   region: string;
   rootGB: number;
   securityGroupId: string;
   subnetId: string;
-  network?: QualificationNetwork;
 }
 
 interface AWSQualificationRunState {
@@ -183,8 +156,6 @@ interface AWSQualificationRunState {
   authorityVersion: string;
   policy: AWSQualificationPolicy;
   policyHash: string;
-  // Cleanup-only upgrade binding; never rewrite the legacy policy or its hash.
-  legacyCleanupRoleArn?: string;
   retainedRootDeviceName?: string;
   finalizationSource?: "automatic" | "controller";
   finalizingAt?: string;
@@ -240,41 +211,9 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
   AWSQualificationAuthorityEnv,
   AWSQualificationRunIdentity
 > {
-  // The candidate supplies only a nonce. Props and executing version come from
-  // this actual capability invocation, never from the HTTP relay or its reply.
-  async observeBinding(challenge: string): Promise<void> {
-    if (
-      arguments.length !== 1 ||
-      typeof challenge !== "string" ||
-      !/^[0-9a-f]{64}$/.test(challenge)
-    )
-      throw new Error("invalid transport probe arguments");
-    validateExactTransportIdentity(this.ctx.props);
-    await qualificationRegistry(this.env).observeTransport(
-      this.ctx.props,
-      challenge,
-      this.env.CF_VERSION_METADATA?.id,
-    );
-  }
-
   async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
     await qualificationRegistry(this.env).assertActive(this.ctx.props);
     return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
-  }
-
-  async prepareFirstWalk(
-    request: AWSQualificationFirstWalkRequest,
-  ): Promise<AWSQualificationFirstWalkStatus> {
-    await qualificationRegistry(this.env).assertActive(this.ctx.props);
-    return await qualificationRun(this.env, this.ctx.props.runId).prepareFirstWalk(
-      this.ctx.props,
-      request,
-    );
-  }
-
-  // Settlement reads survive the work fence; they never authorize new mutations.
-  async firstWalkStatus(): Promise<AWSQualificationFirstWalkStatus> {
-    return await qualificationRun(this.env, this.ctx.props.runId).firstWalkStatus(this.ctx.props);
   }
 }
 
@@ -284,34 +223,6 @@ export class AWSQualificationController extends WorkerEntrypoint<
   AWSQualificationAuthorityEnv,
   AWSQualificationControllerProps
 > {
-  // Intentionally independent of registry, run, signer and logical expiry. The
-  // reply describes this invocation's bound props; it grants no operation.
-  async bindingIdentity(challenge: string): Promise<AWSQualificationBindingIdentity> {
-    const props = this.ctx.props;
-    const authorityVersion = this.env.CF_VERSION_METADATA?.id;
-    if (
-      arguments.length !== 1 ||
-      typeof challenge !== "string" ||
-      !/^[0-9a-f]{64}$/.test(challenge) ||
-      !props ||
-      Object.keys(props).length !== 1 ||
-      !Object.hasOwn(props, "deploymentHash") ||
-      typeof props.deploymentHash !== "string" ||
-      !/^[0-9a-f]{64}$/.test(props.deploymentHash) ||
-      typeof authorityVersion !== "string" ||
-      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(authorityVersion)
-    ) {
-      throw new Error("AWS qualification binding identity is invalid");
-    }
-    return {
-      protocol: 1,
-      role: "controller",
-      challenge,
-      props: structuredClone(props),
-      authorityVersion,
-    };
-  }
-
   async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
     await this.claim(identity);
   }
@@ -335,34 +246,14 @@ export class AWSQualificationController extends WorkerEntrypoint<
   }
 
   async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
-    // The registry serializes probe admission against the entire enrollment hop,
-    // including AWS verification. Checking only after enrollment is too late.
-    return await qualificationRegistry(this.env).enrollAndClaim(this.ctx.props, identity);
+    // Persist the per-run cleanup owner before making this run globally active. Candidate
+    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
+    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
+    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
   }
 
   async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
     return await qualificationRegistry(this.env).discover(this.ctx.props);
-  }
-
-  async openTransportProbe(
-    request: AWSQualificationTransportProbeRequest,
-  ): Promise<AWSQualificationTransportProbe> {
-    return await qualificationRegistry(this.env).openTransportProbe(this.ctx.props, request);
-  }
-
-  async discoverTransportProbe(): Promise<AWSQualificationTransportProbe | undefined> {
-    return await qualificationRegistry(this.env).discoverTransportProbe(this.ctx.props);
-  }
-
-  async settleTransportProbe(
-    challenge: string,
-    verified: boolean,
-  ): Promise<AWSQualificationTransportProbe> {
-    return await qualificationRegistry(this.env).settleTransportProbe(
-      this.ctx.props,
-      challenge,
-      verified,
-    );
   }
 
   async retire(runId: string): Promise<void> {
@@ -373,157 +264,6 @@ export class AWSQualificationController extends WorkerEntrypoint<
 }
 
 export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
-  private serial = Promise.resolve();
-  private pending = 0;
-
-  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.pending >= maxPendingIntents) throw new Error("qualification registry queue is full");
-    this.pending++;
-    const result = this.serial.then(operation);
-    this.serial = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    try {
-      return await result;
-    } finally {
-      this.pending--;
-    }
-  }
-
-  private async noTransportProbe(identity?: AWSQualificationRunIdentity): Promise<void> {
-    const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
-    if (
-      probe?.state === "cancelled" &&
-      identity &&
-      canonicalJSON(probe.identity) === canonicalJSON(identity)
-    )
-      throw new Error("AWS qualification transport probe was cancelled");
-    if (probe && !["verified", "cancelled"].includes(probe.state)) {
-      // Expiry denies work; it is deliberately not cleanup or permission to claim.
-      throw new Error("AWS qualification transport probe is unsettled");
-    }
-  }
-
-  async openTransportProbe(
-    controller: AWSQualificationControllerProps,
-    request: AWSQualificationTransportProbeRequest,
-  ): Promise<AWSQualificationTransportProbe> {
-    return await this.serialized(async () => {
-      validateTransportProbe(request);
-      validateController(controller, request.identity.deploymentHash);
-      if (request.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
-        throw new Error("transport probe authority version differs");
-      if (await this.ctx.storage.get(registryStateKey))
-        throw new Error("qualification run is active");
-      const current = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
-      if (current) {
-        const { protocol: _protocol, state: _state, observedAt: _at, ...original } = current;
-        if (canonicalJSON(original) === canonicalJSON(request)) {
-          if (["verified", "cancelled"].includes(current.state))
-            throw new Error("transport probe is settled");
-          return current; // reconcile an uncertain open; never reset an observation
-        }
-        if (
-          !["verified", "cancelled"].includes(current.state) ||
-          Date.now() < Date.parse(current.expiresAt)
-        )
-          throw new Error("transport probe slot or replay tombstone is occupied");
-      }
-      const probe: AWSQualificationTransportProbe = {
-        protocol: 1,
-        ...structuredClone(request),
-        state: "pending",
-      };
-      await this.ctx.storage.put("transport-probe", probe);
-      return probe;
-    });
-  }
-
-  async observeTransport(
-    identity: AWSQualificationRunIdentity,
-    challenge: string,
-    authorityVersion: string | undefined,
-  ): Promise<void> {
-    return await this.serialized(async () => {
-      validateExactTransportIdentity(identity);
-      if (typeof challenge !== "string" || !/^[0-9a-f]{64}$/.test(challenge))
-        throw new Error("invalid transport challenge");
-      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
-      if (
-        !probe ||
-        probe.state !== "pending" ||
-        probe.challenge !== challenge ||
-        Date.now() >= Date.parse(probe.expiresAt) ||
-        probe.authorityVersion !== authorityVersion ||
-        authorityVersion !== this.env.CF_VERSION_METADATA?.id ||
-        canonicalJSON(probe.identity) !== canonicalJSON(identity)
-      )
-        throw new Error("transport probe observation does not match");
-      await this.ctx.storage.put("transport-probe", {
-        ...probe,
-        state: "observed",
-        observedAt: new Date().toISOString(),
-      });
-    });
-  }
-
-  async discoverTransportProbe(
-    controller: AWSQualificationControllerProps,
-  ): Promise<AWSQualificationTransportProbe | undefined> {
-    validateControllerShape(controller);
-    // Trusted discovery reveals custody, but a mismatched controller cannot mutate it.
-    return await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
-  }
-
-  async settleTransportProbe(
-    controller: AWSQualificationControllerProps,
-    challenge: string,
-    verified: boolean,
-  ): Promise<AWSQualificationTransportProbe> {
-    return await this.serialized(async () => {
-      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
-      if (!probe || probe.challenge !== challenge || typeof verified !== "boolean")
-        throw new Error("transport probe settlement mismatch");
-      validateController(controller, probe.identity.deploymentHash);
-      const state = verified ? "verified" : "cancelled";
-      if (["verified", "cancelled"].includes(probe.state)) {
-        if (probe.state !== state) throw new Error("transport probe settlement changed");
-        return probe;
-      }
-      if (
-        verified &&
-        (probe.state !== "observed" ||
-          Date.now() >= Date.parse(probe.expiresAt) ||
-          probe.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
-      )
-        throw new Error("transport probe was not observed live");
-      const settled = { ...probe, state } as AWSQualificationTransportProbe;
-      await this.ctx.storage.put("transport-probe", settled);
-      return settled;
-    });
-  }
-
-  async enrollAndClaim(
-    controller: AWSQualificationControllerProps,
-    identity: AWSQualificationRunIdentity,
-  ): Promise<AWSQualificationRegistryRecord> {
-    return await this.serialized(async () => {
-      await this.noTransportProbe(identity);
-      validateController(controller, identity.deploymentHash);
-      validateRunIdentity(identity);
-      validateRunWindow(identity);
-      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
-      if (
-        active &&
-        canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))
-      )
-        throw new Error("AWS qualification registry already has an active run");
-      await qualificationRun(this.env, identity.runId).enroll(controller, identity);
-      return await this.claimSerialized(controller, identity);
-    });
-  }
-
   async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
     validateRunIdentity(identity);
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
@@ -539,7 +279,6 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
   async discover(
     controller: AWSQualificationControllerProps,
   ): Promise<AWSQualificationRegistryRecord | undefined> {
-    await this.noTransportProbe();
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
     if (active) validateController(controller, active.deploymentHash);
     else validateControllerShape(controller);
@@ -550,14 +289,6 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
     controller: AWSQualificationControllerProps,
     identity: AWSQualificationRunIdentity,
   ): Promise<AWSQualificationRegistryRecord> {
-    return await this.serialized(() => this.claimSerialized(controller, identity));
-  }
-
-  private async claimSerialized(
-    controller: AWSQualificationControllerProps,
-    identity: AWSQualificationRunIdentity,
-  ): Promise<AWSQualificationRegistryRecord> {
-    await this.noTransportProbe(identity);
     validateController(controller, identity.deploymentHash);
     validateRunIdentity(identity);
     validateRunWindow(identity);
@@ -715,7 +446,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         return;
       }
       const policyHash = await qualificationPolicyHash(policy);
-      await this.verifySharedNetwork(policy);
       const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
       validateRunWindow(identity);
       await this.ctx.storage.put({
@@ -733,12 +463,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         [ledgerKey]: emptyLedger(),
       });
       await this.ctx.storage.setAlarm(
-        expiresAt -
-          (identity.firstWalk
-            ? 20 * 60_000
-            : identity.retainedImage
-              ? awsQualificationCleanupReserveMs
-              : 0),
+        expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
       );
       // Keep persisted ownership and its alarm if storage crossed the cutoff.
       // A refused registry claim must not orphan a run that already owns cleanup.
@@ -750,159 +475,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     identity: AWSQualificationRunIdentity,
     request: AWSQualificationRequest,
   ): Promise<AWSQualificationResponse> {
-    return await this.serialized(async () => {
-      const result = await this.executeSerialized(identity, request);
-      // Apply this to replays and reconciled launches as well. The ledger and
-      // receipt already own any effect before a failed guest check can throw.
-      if (
-        result.status >= 200 &&
-        result.status < 300 &&
-        ["RunInstances", "DescribeInstances"].includes(request.action)
-      ) {
-        const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
-        if (run && !run.finalizingAt && !run.finalizedAt) {
-          const ledger = await this.ledger();
-          await this.verifySharedNetwork(
-            run.policy,
-            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
-          );
-        }
-      }
-      return result;
-    });
-  }
-
-  async firstWalkStatus(
-    identity: AWSQualificationRunIdentity,
-  ): Promise<AWSQualificationFirstWalkStatus> {
-    return await this.serialized(async () => {
-      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
-      if (
-        !run ||
-        !run.identity.firstWalk ||
-        canonicalJSON(identity) !== canonicalJSON(run.identity)
-      )
-        throw new Error("first-walk binding is not enrolled");
-      return firstWalkStatus(
-        identity,
-        await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
-        Boolean(run.finalizedAt),
-      );
-    });
-  }
-
-  async prepareFirstWalk(
-    identity: AWSQualificationRunIdentity,
-    input: AWSQualificationFirstWalkRequest,
-  ): Promise<AWSQualificationFirstWalkStatus> {
-    return await this.serialized(async () => {
-      const run = await this.requireActiveRun(identity, "FirstWalk");
-      if (!identity.firstWalk) throw new Error("first-walk is not enabled");
-      if (
-        !isPlainRecord(input) ||
-        Object.keys(input).toSorted().join(",") !==
-          "checkpointID,claimHash,instanceID,readinessReceiptSha256,snapshotID" ||
-        !/^chk_[A-Za-z0-9_-]{1,128}$/.test(input.checkpointID) ||
-        !/^[a-f0-9]{64}$/.test(input.claimHash) ||
-        !/^[a-f0-9]{64}$/.test(input.readinessReceiptSha256) ||
-        !/^i-[a-f0-9]+$/.test(input.instanceID) ||
-        !/^snap-[a-f0-9]+$/.test(input.snapshotID)
-      )
-        throw new Error("first-walk request is malformed");
-      const ledger = await this.ledger();
-      if (
-        !ledger.instanceIds.includes(input.instanceID) ||
-        !(
-          ledger.snapshotIds.includes(input.snapshotID) ||
-          identity.retainedImage?.snapshotId === input.snapshotID
-        )
-      )
-        throw new Error("first-walk source or instance is outside the run ledger");
-      await this.verifySharedNetwork(run.policy, [input.instanceID]);
-      const pinned = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
-      // Canonicalize the request before persistence and immutable retry comparison.
-      const request = {
-        checkpointID: input.checkpointID,
-        claimHash: input.claimHash,
-        instanceID: input.instanceID,
-        snapshotID: input.snapshotID,
-        readinessReceiptSha256: input.readinessReceiptSha256,
-      };
-      if (pinned && canonicalJSON(pinned.request) !== canonicalJSON(request))
-        throw new Error("first-walk request is immutable");
-      const state = await prepareFirstWalk(this.firstWalkOwner(run, false), request);
-      if (state.volumeID) {
-        ledger.volumeIds = [...new Set([...ledger.volumeIds, state.volumeID])];
-        await this.ctx.storage.put(ledgerKey, ledger);
-      }
-      return firstWalkStatus(identity, state, false);
-    });
-  }
-
-  private firstWalkOwner(run: AWSQualificationRunState, cleanup: boolean): FirstWalkOwner {
-    return {
-      identity: run.identity,
-      accountID: run.policy.accountId,
-      read: () => this.ctx.storage.get<FirstWalkState>(firstWalkKey),
-      write: (state) => this.ctx.storage.put(firstWalkKey, state),
-      query: async (action, parameters, mutating = false) => {
-        // One existing signer/cleanup owner. No URL, credentials or raw volume API
-        // is exposed to the candidate. Check live account on every dispatch.
-        await this.ensureAccount(run.policy);
-        if (!cleanup) await this.requireActiveRun(run.identity, "FirstWalk");
-        else if (mutating && action !== "DeleteVolume")
-          throw new Error("first-walk cleanup action denied");
-        if (!cleanup && mutating) {
-          const ledger = await this.ledger();
-          await this.verifySharedNetwork(
-            run.policy,
-            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
-          );
-        }
-        let cleanupSequence: number | undefined;
-        let evidence: AWSQualificationOperationEvidence | undefined;
-        const key = `${evidencePrefix}${await sha256Hex(`first-walk:${action}:${canonicalJSON(parameters)}`)}`;
-        if (cleanup && mutating)
-          cleanupSequence = await this.beginCleanupEvidence(action, parameters);
-        if (!cleanup && mutating) {
-          const current = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
-          if (!current || current.operationCount >= maxCandidateOperations)
-            throw new Error("first-walk operation limit reached");
-          Object.assign(run, current);
-          run.operationCount += 1;
-          evidence = (await this.ctx.storage.get<AWSQualificationOperationEvidence>(key)) ?? {
-            version: awsQualificationAttestationVersion,
-            opDigest: key.slice(evidencePrefix.length),
-            requestDigest: await sha256Hex(canonicalJSON(parameters)),
-            action,
-            requestedAt: new Date().toISOString(),
-            signerDispatches: [],
-          };
-          evidence = await this.beginSignerDispatch(run, key, evidence);
-          this.assertCandidateDispatchWindow(run, "FirstWalk");
-        }
-        let response: AWSQualificationResponse;
-        try {
-          response = await boundedResponse(
-            await this.signer.execute("ec2", action, run.policy.region, parameters),
-          );
-          if (evidence) await this.finishSignerDispatch(run, key, evidence, response);
-          if (cleanupSequence !== undefined)
-            await this.finishCleanupEvidence(
-              cleanupSequence,
-              response.status < 300 ? "accepted" : "rejected",
-              response.status,
-            );
-        } catch (error) {
-          if (cleanupSequence !== undefined)
-            await this.finishCleanupEvidence(cleanupSequence, "error");
-          throw error;
-        }
-        if (response.status < 200 || response.status >= 300)
-          throw new Error(`first-walk ${action} http ${response.status}: ${response.body}`);
-        return response.body;
-      },
-    };
+    return await this.serialized(() => this.executeSerialized(identity, request));
   }
 
   async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
@@ -932,15 +505,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
       return {
         version: awsQualificationAttestationVersion,
-        ...(run.identity.firstWalk
-          ? {
-              firstWalk: firstWalkStatus(
-                run.identity,
-                await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
-                Boolean(run.finalizedAt),
-              ),
-            }
-          : {}),
         runId: run.identity.runId,
         candidateSha: run.identity.candidateSha,
         candidateWorker: run.identity.candidateWorker,
@@ -1042,13 +606,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
 
     const ledger = await this.ledger();
-    const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
-    if (
-      firstWalk &&
-      (normalizedRequest.action === "DeleteSnapshot" ||
-        normalizedRequest.action === "DeregisterImage")
-    )
-      throw new Error("first-walk source remains pinned until run finalization");
     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
     try {
       if (!priorIntent) {
@@ -1088,17 +645,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     try {
       if (normalizedRequest.service !== "sts") {
         await this.ensureAccount(policy);
-      }
-      if (
-        authorized.mutating &&
-        !["TerminateInstances", "DeleteKeyPair", "DeregisterImage", "DeleteSnapshot"].includes(
-          normalizedRequest.action,
-        )
-      ) {
-        await this.verifySharedNetwork(
-          policy,
-          ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
-        );
       }
     } catch (error) {
       await this.ctx.storage.put(evidenceKey, {
@@ -1365,57 +911,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   }
 
   private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
-    const roleArn =
-      policy.roleArn === undefined
-        ? (await this.requireLegacyCleanupRun(policy)).legacyCleanupRoleArn
-        : policy.roleArn;
-    await this.verifyAccountRole(policy, roleArn);
-  }
-
-  private async requireLegacyCleanupRun(
-    policy: AWSQualificationPolicy,
-  ): Promise<AWSQualificationRunState> {
-    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
-    if (
-      !run?.finalizingAt ||
-      run.finalizedAt ||
-      Object.keys(policy).toSorted().join(",") !==
-        "accountId,baseAmiId,region,rootGB,securityGroupId,subnetId" ||
-      canonicalJSON(run.policy) !== canonicalJSON(policy) ||
-      run.policyHash !== (await qualificationPolicyHash(policy))
-    ) {
-      throw new Error("AWS qualification legacy policy requires verified cleanup transition");
-    }
-    return run;
-  }
-
-  private async bindLegacyCleanupRole(run: AWSQualificationRunState): Promise<void> {
-    if (run.policy.roleArn !== undefined) return;
-    await this.requireLegacyCleanupRun(run.policy);
-    if (run.legacyCleanupRoleArn !== undefined) return;
-    const { roleArn, network: _network, ...legacyPolicy } = authorityPolicy(this.env);
-    if (canonicalJSON(legacyPolicy) !== canonicalJSON(run.policy)) {
-      throw new Error("AWS qualification legacy cleanup policy does not match configuration");
-    }
-    // The old schema had no role binding. Accept an operator-configured role only
-    // after verifying the unchanged resource policy and its live STS principal.
-    // Persist it on this same owner before cleanup; retries may not select another.
-    await this.verifyAccountRole(run.policy, roleArn);
-    run.legacyCleanupRoleArn = roleArn;
-    await this.ctx.storage.put(stateKey, run);
-  }
-
-  private async verifyAccountRole(
-    policy: AWSQualificationPolicy,
-    roleArn: string | undefined,
-  ): Promise<void> {
-    if (
-      !roleArn ||
-      !new RegExp(`^arn:aws:iam::${policy.accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
-      roleArn.endsWith("/")
-    ) {
-      throw new Error("AWS qualification role ARN is malformed");
-    }
     const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) {
@@ -1426,16 +921,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     );
     if (asString(identity["Account"]) !== policy.accountId) {
       throw new Error("AWS qualification authority is authenticated to the wrong account");
-    }
-    // IAM role names are unique within an account, including across IAM paths.
-    // STS assumed-role ARNs contain that name, without the IAM path.
-    const expectedPrefix = `arn:aws:sts::${policy.accountId}:assumed-role/${roleArn.split("/").at(-1)}/`;
-    const principal = asString(identity["Arn"]);
-    if (
-      !principal.startsWith(expectedPrefix) ||
-      !/^[A-Za-z0-9+=,.@_-]{2,64}$/.test(principal.slice(expectedPrefix.length))
-    ) {
-      throw new Error("AWS qualification authority is authenticated to the wrong role");
     }
   }
 
@@ -1599,7 +1084,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     run: AWSQualificationRunState,
     intentKey: string,
   ): Promise<void> {
-    if (run.identity.retainedImage || run.identity.firstWalk) {
+    if (run.identity.retainedImage) {
       const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
       this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
     }
@@ -1614,9 +1099,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const expiresAt = Date.parse(run.identity.expiresAt);
     if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
     if (
-      (run.identity.retainedImage || run.identity.firstWalk) &&
-      now >=
-        expiresAt - (run.identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs) &&
+      run.identity.retainedImage &&
+      now >= expiresAt - awsQualificationCleanupReserveMs &&
       !retainedCleanupReads.has(action) &&
       !["TerminateInstances", "DeleteKeyPair"].includes(action)
     ) {
@@ -1666,7 +1150,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const failures: string[] = [];
     await this.beginFinalReceipt(ledger);
     try {
-      await this.bindLegacyCleanupRole(run);
       await this.ensureAccount(policy);
       await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
     } catch (error) {
@@ -1685,38 +1168,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       "pre-cleanup",
     );
     await this.ctx.storage.put(ledgerKey, recoveredLedger);
-    if (run.identity.firstWalk) {
-      const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
-      if (firstWalk?.volumeID)
-        recoveredLedger.volumeIds = [
-          ...new Set([...recoveredLedger.volumeIds, firstWalk.volumeID]),
-        ];
-      for (const instanceId of ownedWithRetired(
-        recoveredLedger.instanceIds,
-        recoveredLedger.retiredInstanceIds,
-      )) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- stop all guest writers before data-volume deletion.
-        await this.cleanup(
-          run,
-          policy,
-          "TerminateInstances",
-          { "InstanceId.1": instanceId },
-          failures,
-        );
-      }
-      try {
-        const ids = await cleanupFirstWalk(this.firstWalkOwner(run, true));
-        recoveredLedger.volumeIds = [...new Set([...recoveredLedger.volumeIds, ...ids])];
-        await this.ctx.storage.put(ledgerKey, recoveredLedger);
-      } catch {
-        failures.push("first-walk volume cleanup pending");
-      }
-      if (failures.length) {
-        await this.completeFinalReceipt(recoveredLedger, failures);
-        await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
-        throw new Error("first-walk cleanup incomplete; source pin retained");
-      }
-    }
     for (const imageId of ownedWithRetired(
       recoveredLedger.imageIds,
       recoveredLedger.retiredImageIds,
@@ -2096,18 +1547,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       for (const result of [instances, images, snapshots, volumes, keys]) {
         if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
       }
-      if (run.identity.firstWalk) {
-        for (const [result, action] of [
-          [instances, "DescribeInstances"],
-          [images, "DescribeImages"],
-          [snapshots, "DescribeSnapshots"],
-          [volumes, "DescribeVolumes"],
-          [keys, "DescribeKeyPairs"],
-        ] as const) {
-          if (awsXMLRoot(result.body, action)["nextToken"])
-            throw new Error("first-walk inventory is paginated");
-        }
-      }
       ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
         .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
         .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
@@ -2142,7 +1581,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         ledger.instanceIds.length > maxActiveInstances ||
         ledger.imageIds.length > maxActiveImages ||
         ledger.snapshotIds.length > maxActiveSnapshots ||
-        (run.identity.firstWalk && ledger.volumeIds.length > 2) ||
         ledger.keyPairIds.length > 1
       ) {
         failures.push("run-tag inventory exceeds qualification resource bounds");
@@ -2224,7 +1662,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
       for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
         const volumeId = asString(record(mapping["ebs"])["volumeId"]);
-        if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
+        if (volumeId) ledger.volumeIds = [volumeId];
       }
     }
     await this.ctx.storage.put(ledgerKey, ledger);
@@ -2340,42 +1778,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         "InstanceId.1": instanceId,
       }),
     );
-  }
-
-  private async verifySharedNetwork(
-    policy: AWSQualificationPolicy,
-    instanceIds: string[] = [],
-  ): Promise<void> {
-    if (policy.network?.mode !== "shared-subnet") return;
-    await this.ensureAccount(policy);
-    const query = async (action: string, parameters: Record<string, string>) => {
-      const result = await boundedResponse(
-        await this.signer.execute("ec2", action, policy.region, parameters),
-      );
-      if (result.status < 200 || result.status >= 300)
-        throw new Error(`AWS qualification network ${action} http ${result.status}`);
-      return awsXMLRoot(result.body, action);
-    };
-    await verifyQualificationNetwork(policy.network, policy, query);
-    if (instanceIds.length > maxActiveInstances)
-      throw new Error("AWS qualification guest inventory exceeds policy");
-    const instanceId = instanceIds[0];
-    if (instanceId) {
-      const root = await query("DescribeInstances", { "InstanceId.1": instanceId });
-      const reservations = items(record(root["reservationSet"])["item"]).map(record);
-      const instances = reservations.flatMap((r) =>
-        items(record(r["instancesSet"])["item"]).map(record),
-      );
-      if (
-        asString(root["nextToken"]) ||
-        reservations.length !== 1 ||
-        asString(reservations[0]!["ownerId"]) !== policy.accountId ||
-        instances.length !== 1 ||
-        asString(instances[0]!["instanceId"]) !== instanceId
-      )
-        throw new Error("AWS qualification guest identity differs from admission");
-      verifyQualificationGuest(policy.network, policy, instances[0]!);
-    }
   }
 
   private async retireUnresolvedIntents(): Promise<void> {
@@ -2834,11 +2236,9 @@ function authorizedRunInstances(
   }
   const imageId = input["ImageId"] ?? "";
   if (
-    identity.firstWalk
-      ? imageId !== policy.baseAmiId
-      : identity.retainedImage
-        ? imageId !== identity.retainedImage.imageId
-        : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
+    identity.retainedImage
+      ? imageId !== identity.retainedImage.imageId
+      : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
   ) {
     throw new Error("AWS qualification image is outside the run ledger");
   }
@@ -2862,7 +2262,7 @@ function authorizedRunInstances(
   );
   const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
   if (
-    identity.retainedImage && !identity.firstWalk
+    identity.retainedImage
       ? rootGB !== awsQualificationRetainedRootGB
       : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
   ) {
@@ -2883,14 +2283,11 @@ function authorizedRunInstances(
     MaxCount: "1",
     MinCount: "1",
     UserData: userData,
-    "BlockDeviceMapping.1.DeviceName": identity.firstWalk
-      ? "/dev/sda1"
-      : (retainedRootDeviceName ?? "/dev/sda1"),
+    "BlockDeviceMapping.1.DeviceName": retainedRootDeviceName ?? "/dev/sda1",
     "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
     "BlockDeviceMapping.1.Ebs.Encrypted": "true",
     "BlockDeviceMapping.1.Ebs.VolumeSize": String(rootGB),
     "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
-    ...(identity.firstWalk ? { "CreditSpecification.CpuCredits": "standard" } : {}),
     "MetadataOptions.HttpEndpoint": "enabled",
     "MetadataOptions.HttpPutResponseHopLimit": "1",
     "MetadataOptions.HttpTokens": "required",
@@ -3048,7 +2445,7 @@ function updateLedgerFromResponse(
         }
         for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
           const volumeId = asString(record(mapping["ebs"])["volumeId"]);
-          if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
+          if (volumeId) ledger.volumeIds = [volumeId];
         }
       }
     }
@@ -3129,59 +2526,6 @@ function updateLedgerFromResponse(
   }
 }
 
-function validateExactTransportIdentity(identity: AWSQualificationRunIdentity): void {
-  if (
-    !isPlainRecord(identity) ||
-    !["runId", "owner", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"].every(
-      (key) => typeof identity[key] === "string",
-    ) ||
-    Object.keys(identity).some(
-      (key) =>
-        ![
-          "runId",
-          "owner",
-          "candidateSha",
-          "candidateWorker",
-          "deploymentHash",
-          "expiresAt",
-          "firstWalk",
-          "retainedImage",
-        ].includes(key),
-    )
-  )
-    throw new Error("transport identity contains unknown fields");
-  validateRunIdentity(identity);
-  if (JSON.stringify(identity).length > 2048) throw new Error("transport identity exceeds bound");
-}
-
-function validateTransportProbe(request: AWSQualificationTransportProbeRequest): void {
-  if (
-    !isPlainRecord(request) ||
-    Object.keys(request).toSorted().join(",") !==
-      "authorityVersion,candidateVersion,challenge,expiresAt,identity" ||
-    typeof request.challenge !== "string" ||
-    !/^[0-9a-f]{64}$/.test(request.challenge) ||
-    ![request.authorityVersion, request.candidateVersion].every(
-      (version) =>
-        typeof version === "string" &&
-        /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(version),
-    )
-  )
-    throw new Error("invalid transport probe request");
-  validateExactTransportIdentity(request.identity);
-  validateRunWindow(request.identity);
-  const expiresAt = Date.parse(request.expiresAt);
-  if (
-    typeof request.expiresAt !== "string" ||
-    request.expiresAt.length !== 24 ||
-    !Number.isFinite(expiresAt) ||
-    expiresAt <= Date.now() ||
-    expiresAt > Date.now() + 10 * 60_000 ||
-    expiresAt > Date.parse(request.identity.expiresAt)
-  )
-    throw new Error("invalid transport probe expiry");
-}
-
 function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
     throw new Error("AWS qualification run id is malformed");
@@ -3201,8 +2545,6 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!Number.isFinite(Date.parse(identity.expiresAt))) {
     throw new Error("AWS qualification expiry is malformed");
   }
-  if (identity.firstWalk !== undefined && identity.firstWalk !== true)
-    throw new Error("first-walk mode is malformed");
   if (identity.retainedImage !== undefined) {
     const retained = identity.retainedImage;
     if (
@@ -3221,18 +2563,11 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
 function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const expiresAt = Date.parse(identity.expiresAt);
   const now = Date.now();
-  const maximum = identity.firstWalk
-    ? awsQualificationFirstWalkRunMs
-    : identity.retainedImage
-      ? awsQualificationRetainedRunMs
-      : awsQualificationMaxRunMs;
+  const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
   if (expiresAt <= now || expiresAt > now + maximum) {
     throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
   }
-  if (
-    (identity.retainedImage || identity.firstWalk) &&
-    now >= expiresAt - (identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs)
-  ) {
+  if (identity.retainedImage && now >= expiresAt - awsQualificationCleanupReserveMs) {
     throw new Error("AWS qualification retained work window expired");
   }
 }
@@ -3336,18 +2671,11 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
 function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
   const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
   const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
-  const roleArn = env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN?.trim() ?? "";
   const region = requireAWSRegion(env.CRABBOX_AWS_QUALIFICATION_REGION ?? "");
   const securityGroupId = env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?.trim() ?? "";
   const subnetId = env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID?.trim() ?? "";
   const rootGB = Number(env.CRABBOX_AWS_QUALIFICATION_ROOT_GB ?? maxRootGB);
   if (!/^\d{12}$/.test(accountId)) throw new Error("AWS qualification account id is malformed");
-  if (
-    !new RegExp(`^arn:aws:iam::${accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
-    roleArn.endsWith("/")
-  ) {
-    throw new Error("AWS qualification role ARN is malformed");
-  }
   if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
     throw new Error("AWS qualification base AMI is malformed");
   if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
@@ -3359,19 +2687,7 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
   if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
     throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
   }
-  const networkJSON = env.CRABBOX_AWS_QUALIFICATION_NETWORK_JSON;
-  const network =
-    networkJSON === undefined ? undefined : parseQualificationNetwork(JSON.parse(networkJSON));
-  return {
-    accountId,
-    roleArn,
-    baseAmiId,
-    region,
-    rootGB,
-    securityGroupId,
-    subnetId,
-    ...(network ? { network } : {}),
-  };
+  return { accountId, baseAmiId, region, rootGB, securityGroupId, subnetId };
 }
 
 function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
@@ -3737,7 +3053,7 @@ function assertLifecycleCapacity(
     if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
       throw new Error("AWS qualification allows one active instance");
     }
-    if (ledger.launchCount >= (identity.firstWalk ? 2 : identity.retainedImage ? 1 : maxLaunches)) {
+    if (ledger.launchCount >= (identity.retainedImage ? 1 : maxLaunches)) {
       throw new Error("AWS qualification launch budget is exhausted");
     }
   }

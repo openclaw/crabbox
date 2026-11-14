@@ -1,6 +1,4 @@
 export const awsQualificationMaxRunMs = 120 * 60 * 1000;
-// Includes protected deployment/arming without borrowing executor or cleanup time.
-export const awsQualificationFirstWalkRunMs = 150 * 60 * 1000;
 export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
 export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
 export const awsQualificationRetainedRootGB = 400;
@@ -26,39 +24,11 @@ export interface AWSQualificationRunIdentity {
   deploymentHash: string;
   expiresAt: string;
   retainedImage?: AWSQualificationRetainedImage;
-  // Opt-in one-copy first-walk qualification. Normal image qualification is unchanged.
-  firstWalk?: true;
 }
 
 export interface AWSQualificationControllerProps {
   deploymentHash: string;
 }
-
-// Pure controller identity, not authorization to access a run or AWS.
-export interface AWSQualificationBindingIdentity {
-  protocol: 1;
-  role: "controller";
-  challenge: string;
-  props: AWSQualificationControllerProps;
-  authorityVersion: string;
-}
-
-// One subordinate pre-enrollment slot; never an AWS/run owner.
-export interface AWSQualificationTransportProbe {
-  protocol: 1;
-  challenge: string;
-  identity: AWSQualificationRunIdentity;
-  candidateVersion: string;
-  authorityVersion: string;
-  expiresAt: string;
-  state: "pending" | "observed" | "verified" | "cancelled";
-  observedAt?: string;
-}
-
-export type AWSQualificationTransportProbeRequest = Omit<
-  AWSQualificationTransportProbe,
-  "protocol" | "state" | "observedAt"
->;
 
 export interface AWSQualificationRequest {
   opId: string;
@@ -73,31 +43,8 @@ export interface AWSQualificationResponse {
   body: string;
 }
 
-export interface AWSQualificationFirstWalkRequest {
-  checkpointID: string;
-  claimHash: string;
-  instanceID: string;
-  snapshotID: string;
-  readinessReceiptSha256: string;
-}
-
-export interface AWSQualificationFirstWalkStatus {
-  runID: string;
-  deploymentHash: string;
-  finalized: boolean;
-  request?: AWSQualificationFirstWalkRequest;
-  phase?: "prepared" | "creating" | "created" | "attaching" | "attached";
-  volumeID?: string;
-  device?: string;
-}
-
 export interface AWSQualificationTransportBinding {
-  observeBinding?(challenge: string): Promise<void>;
   execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse>;
-  prepareFirstWalk?(
-    request: AWSQualificationFirstWalkRequest,
-  ): Promise<AWSQualificationFirstWalkStatus>;
-  firstWalkStatus?(): Promise<AWSQualificationFirstWalkStatus>;
 }
 
 export type AWSQualificationCleanupState = "claimed" | "finalizing" | "finalized";
@@ -186,7 +133,6 @@ export interface AWSQualificationFinalReceipt {
 
 export interface AWSQualificationAttestation {
   version: 1;
-  firstWalk?: AWSQualificationFirstWalkStatus;
   runId: string;
   candidateSha: string;
   candidateWorker: string;

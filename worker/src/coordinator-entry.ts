@@ -22,7 +22,6 @@ import {
   isPairingGrantRequest,
   pairingRequestBodyBytes,
 } from "./pairing";
-import { qualificationTransportProbeResponse } from "./qualification-transport-probe";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import { serveDisabledResponse, serveBodyLimit } from "./serve";
 import { timingSafeEqual } from "./timing-safe";
@@ -43,8 +42,6 @@ export async function routeCoordinatorRequest(
   if ("response" in prepared) {
     return prepared.response;
   }
-  const probe = await qualificationTransportProbeResponse(prepared.request, env);
-  if (probe) return probe;
   return fleetFetch(prepared.request);
 }
 

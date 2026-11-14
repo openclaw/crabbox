@@ -428,7 +428,7 @@ test("first-walk staging rejects missing, substituted, oversized and linked cand
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-recipe-"));
   const source = path.join(dir, "source");
   const artifact = path.join(dir, "artifact");
-  const recipeDir = path.join(source, "recipes/bootstrap/v1");
+  const recipeDir = path.join(source, "qualification/first-walk/v1");
   const file = path.join(recipeDir, "linuxOwnershipRepair.sh");
   try {
     fs.mkdirSync(recipeDir, { recursive: true });
@@ -436,14 +436,14 @@ test("first-walk staging rejects missing, substituted, oversized and linked cand
     fs.writeFileSync(file, "substituted recipe");
     assert.throws(() => stageFirstWalkRecipe(source, artifact), /protected reviewed digest/);
     fs.writeFileSync(file, Buffer.alloc(16 * 1024 + 1));
-    assert.throws(() => stageFirstWalkRecipe(source, artifact), /bounded regular file/);
+    assert.throws(() => stageFirstWalkRecipe(source, artifact), /package file is invalid/);
     fs.rmSync(file);
     fs.symlinkSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), file);
-    assert.throws(() => stageFirstWalkRecipe(source, artifact), /must not contain links/);
+    assert.throws(() => stageFirstWalkRecipe(source, artifact), /link or non-directory/);
     fs.rmSync(file);
     fs.rmdirSync(recipeDir);
     fs.symlinkSync(path.join(root, "scripts/fixtures"), recipeDir);
-    assert.throws(() => stageFirstWalkRecipe(source, artifact), /must not contain links/);
+    assert.throws(() => stageFirstWalkRecipe(source, artifact), /link or non-directory/);
     fs.unlinkSync(recipeDir);
     fs.mkdirSync(recipeDir);
     fs.writeFileSync(file, recipe);

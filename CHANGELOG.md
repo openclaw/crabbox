@@ -6,15 +6,6 @@
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
-### Added
-
-- Image qualification: support explicit shared-subnet admission with authority-verified restricted egress and guest attachment, preserving cleanup after network drift.
-- Image qualification: add an opt-in synthetic first ownership walk with one authority-owned snapshot copy, protected checkpoint claims, and independent cleanup.
-
-### Fixed
-
-- Linux bootstrap: report AWS checkpoint ownership-repair phases for Python recipes and log visited entries, ownership mismatches, successful changes, and elapsed time without another filesystem walk.
-
 ## 0.83.0 - 2026-11-10
 
 ### Added

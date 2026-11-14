@@ -201,8 +201,6 @@ import {
   finalizeCheckpointDeletion,
   findManagedCheckpointImage,
   finishCheckpointUse,
-  holdCheckpointQualificationUse,
-  settleCheckpointQualificationUse,
   markCheckpointProviderMutationStarted,
   markCheckpointProviderDeleted,
   pinCheckpointPromotion,
@@ -16991,74 +16989,6 @@ export class FleetCoordinator {
         );
         await this.scheduleCheckpointAlarm();
         return json({ checkpoint: publicCheckpointRecord(checkpoint) });
-      }
-      if (parts.length === 4 && parts[3] === "first-walk" && method === "POST") {
-        const transport = this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
-        if (!isAdminRequest(request) || !transport?.firstWalkStatus || !transport.prepareFirstWalk)
-          return notFound();
-        const body = await readJson<{
-          action?: string;
-          claim?: string;
-          leaseID?: string;
-          readinessReceiptSha256?: string;
-        }>(request);
-        if (typeof body.claim !== "string" || !body.claim)
-          throw new CheckpointError("checkpoint_claim_invalid", "claim required");
-        const status = await transport.firstWalkStatus();
-        if (body.action === "settle") {
-          await settleCheckpointQualificationUse(
-            this.state.storage,
-            checkpointID,
-            body.claim,
-            principal,
-            status,
-          );
-          await this.scheduleCheckpointAlarm();
-          return json({ settled: true });
-        }
-        if (body.action !== "prepare" || !/^[a-f0-9]{64}$/.test(body.readinessReceiptSha256 ?? ""))
-          throw new CheckpointError(
-            "invalid_checkpoint_use",
-            "exact stock readiness receipt required",
-          );
-        const lease = await this.state.storage.get<LeaseRecord>(`lease:${body.leaseID}`);
-        const snapshots = current.image?.snapshotIDs ?? [];
-        if (
-          current.provider !== "aws" ||
-          current.target !== "linux" ||
-          snapshots.length !== 1 ||
-          !lease ||
-          lease.state !== "active" ||
-          lease.provider !== "aws" ||
-          lease.target !== "linux" ||
-          lease.checkpointID ||
-          lease.cleanupStartedAt ||
-          lease.cleanupRetryAt ||
-          lease.owner !== principal.owner ||
-          !sameOrgIdentityKey(lease.org, principal.org)
-        )
-          throw new CheckpointError(
-            "checkpoint_source_mismatch",
-            "one AWS capture and an owned stock lease are required",
-          );
-        await holdCheckpointQualificationUse(
-          this.state.storage,
-          checkpointID,
-          body.claim,
-          principal,
-          { runID: status.runID, deploymentHash: status.deploymentHash },
-        );
-        await this.scheduleCheckpointAlarm();
-        // Retain the claim after every error/uncertain response. The authority's
-        // finalized readback is the only path that can release it.
-        const result = await transport.prepareFirstWalk({
-          checkpointID,
-          claimHash: await sha256Hex(body.claim),
-          instanceID: lease.cloudID,
-          snapshotID: snapshots[0]!,
-          readinessReceiptSha256: body.readinessReceiptSha256!,
-        });
-        return json(result);
       }
       if (parts.length === 4 && parts[3] === "use" && method === "POST") {
         const body = await readJson<{ action?: unknown; claim?: unknown }>(request);

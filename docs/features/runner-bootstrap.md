@@ -63,19 +63,6 @@ waiting for `multi-user.target` or cloud-final. An ordinary reboot does not reru
 the instance bootstrap. Output remains available in the systemd journal and
 `/var/log/cloud-init-output.log`; cloud-final also observes the unit's result.
 
-The ownership repair walks the work root and shared cache without following
-symlinks, changing only mismatched numeric ownership. It logs start and completion
-or failure, with elapsed seconds and counts of successfully inspected entries
-(`visited`), observed ownership mismatches (`mismatched`), and successful ownership
-updates (`changed`). These counters come from the existing walk; they do not run
-another inventory or establish readiness. Abrupt termination may leave only the
-start line. Used disk space alone does not predict this metadata work.
-
-Fixed AWS checkpoint waits recognize the labelled ownership Python child, older
-unlabelled invocations with the fixed cache root, and legacy `chown` children of
-the bootstrap unit. Other Python work remains generic bootstrap status. The
-observer reports phases only; the existing readiness checks remain authoritative.
-
 The direct GCP expiry timer is armed in the early unit. Desktop, browser,
 Tailscale, and other optional setup retains cloud-final
 ordering. The `bootstrapped` marker is published only after every required phase

@@ -73,7 +73,6 @@ Configure these authority variables:
 
 ```text
 CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID
-CRABBOX_AWS_QUALIFICATION_ROLE_ARN
 CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA
 CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION
 CRABBOX_AWS_QUALIFICATION_REGION
@@ -228,83 +227,6 @@ authorize paid execution.
 
 ## Enrollment and binding
 
-### Single-copy first ownership walk
-
-`mode=first-walk` is an opt-in **synthetic qualification**, not a bootstrap
-optimization or a representative checkpoint import API. It reuses this controller,
-authority, registry, Fleet, relay, alarm and protected finalizer. Normal image
-qualification and bootstrap rendering are unchanged. A client update alone cannot
-enable it: both the private candidate and the qualification authority must include
-the typed first-walk transport, and the protected executor must include its runner.
-
-The credentialless executor boots one stock `t3.small`, writes a small mixed-owner
-fixture under its saved work root and `/var/cache/crabbox`, and verifies those roots
-share one filesystem. It creates one managed image checkpoint and releases the
-source guest before booting a second stock guest. Only after successful stock
-readiness does it hold an existing checkpoint-use claim and ask the authority to
-create and attach one encrypted gp3 copy in the target's AZ. Restored data is never
-present during boot. Launching the captured image as root is denied in this mode.
-
-The existing run object persists the exact request before dispatch. Create intent
-has one deterministic client token; uncertain create/attach responses reconcile by
-reads and never authorize a replacement. The authority checks exact snapshot,
-account, instance, AZ, volume, attachment and ownership tags. It sets and reads back
-DeleteOnTermination. No raw CreateVolume, AttachVolume or DeleteVolume capability
-is exposed to the candidate. The initial scope is one data copy, at most 400 GiB,
-3000 IOPS and 125 MiB/s; no FSR, initialization request or force detach is admitted.
-The synthetic source is limited by the existing 20 GiB stock-root policy.
-
-The claim remains bound to the immutable qualification run/deployment through
-attachment, execution, failures and cleanup, even past ordinary claim expiry.
-Provisioning, abort, completion and checkpoint deletion cannot consume that claim.
-Only an authority `finalized` readback can explicitly release it; a crash before
-the first RPC is handled by the same proof. The private namespace is deleted only
-after authority finalization. It may then discard its synthetic checkpoint and
-held claim records; it is not an external source registry. Importing a checkpoint
-from another Fleet is not supported by this mode.
-
-The guest resolves **the exact copy volume ID** through its unique NVMe serial,
-requires partition 1, rejects a mounted copy or active automounter, and mounts it
-explicitly in a private mount namespace. It never chooses UUID/label or scans the
-tree before the routine. An exclusive stock-root marker prohibits warm replay.
-It runs the unchanged serial diagnostic recipe once for both roots, with a
-45-minute walk bound inside a one-hour transient unit (2 GiB, 32 tasks, 65536 FDs).
-Afterward one verification pass checks ownership and records fanout/depth. The
-result retains elapsed time, counters, wait4 CPU and block I/O, last sampled
-`/proc/PID/io`, diskstats and mount/replay observations. Sampled proc I/O may omit
-the final interval; wait4 totals are complete. Mount/ancestor metadata reads and
-`noatime` are recorded limitations, as is omission of original root-boot contention.
-
-At most two sequential stock launches and one active instance are permitted.
-First-walk admission starts a 150-minute absolute clock with work fenced at
-minute 130, reserving 20 minutes for cleanup. Source capture, approvals and
-deployment all consume that clock. An expired window cannot be extended or replaced in the same
-run. The authority terminates writers first, explicitly deletes any surviving
-unattached copy, inventories root **and** data volumes and verifies exact absence.
-Uncertain/failed cleanup, unexpected volume identity, pagination or incomplete
-inventory retain the finalization fence and retry alarm. Originals borrowed under
-the existing retained-source contract are never deletion-owned. Synthetic images
-and snapshots are run-owned and deleted only by ordinary finalization.
-
-Before live qualification, the infrastructure owner must deploy the reviewed
-authority through the existing private-Worker credential-custody route and approve
-the protected workflow. The current workflow does **not** establish that custody.
-Its sandbox role additionally needs scoped `ec2:CreateVolume`, `ec2:AttachVolume`,
-`ec2:ModifyInstanceAttribute` (only the DeleteOnTermination operation at the
-authority), and `ec2:DeleteVolume`; retain the regional, creation-tag and existing
-resource-tag constraints above. Scope attachment to this run's instance and copy,
-snapshot reads to the admitted source, and KMS use/grants to the selected source
-and destination keys. Do not grant PassRole, DetachVolume or FSR. IAM alone cannot
-express every request-field constraint; the reviewed authority enforces the fixed
-size, performance and attachment policy. Credentials go only to the authority,
-never the candidate, relay, executor or artifacts.
-
-Passing synthetic tests proves this bounded lifecycle, not an improvement in a
-historical restore. Representative use additionally requires the capture owner to
-admit one exact preserved snapshot containing both roots and hold its authoritative
-use pin until final zero residue. Cross-owner capture admission/custody is an
-explicit remaining dependency; this synthetic workflow must not bypass it.
-
 The protected workflow separates preparation from deployment. After the candidate
 bundle is built, approve **Prepare protected qualification handoff** to start the
 absolute clock. This job admits the bundle without AWS, Cloudflare API, or
@@ -413,167 +335,6 @@ proof records without blocking teardown. The attestation never returns raw
 tokens, keys, user data, URLs, account IDs, network addresses, or AWS resource
 IDs.
 
-## First-walk source admission
-
-First-walk requires a tooling prerequisite on the protected default branch and
-an open same-repository candidate PR. The prerequisite changes only the
-qualification workflow, protected scripts and inert test fixtures. Keep the
-ownership instrumentation, reporting fix, generated bootstrap consumers,
-Linux qualification tests, Worker capability and documentation in the unmerged
-candidate, with the reporting fix separately identifiable.
-
-The prerequisite must avoid every production coordinator and Pages push path.
-Changes under `worker/` (except `worker/test/`) automatically deploy the
-production coordinator on main; changes under `docs/` or `skills/` automatically
-publish Pages. Review the complete current workflow filters before any future
-merge. Do not change production deployment controls to make the split work.
-The existing qualification reaper definition consumes protected main tooling;
-all modes and the reaper require the same admitted isolation record and do not
-dispatch a qualification on merge. Confirm an enabled independent recovery route before live
-admission; source merge does not enable a disabled workflow. No merge or deployment is authorized by this preparation.
-
-At dispatch, `candidate_sha` must equal the open candidate PR's exact head. The
-protected workflow SHA must equal both the current default-branch SHA and the
-PR's base SHA; select `first-walk` from that default-branch workflow. Candidate
-build inputs must match protected Go modules, Worker dependencies and Wrangler
-configuration. Candidate Worker source is data for the protected build.
-
-The diagnostic ownership recipe remains in the candidate. Protected build
-staging reads it as bounded regular-file data without executing it, rejects
-symlink ancestors, and requires the reviewed SHA256
-`eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4`.
-The immutable candidate manifest seals it at
-`candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh`. Protected admission
-verifies that artifact, and the credentialless executor checks the same pin
-before relay or guest activity. The executor and guest helper come from the
-protected checkout; the recipe executes only in the synthetic guest. Protected
-finalization requires the same recipe pin and protected runner digest. The
-copy under `scripts/fixtures/` is inert test data, never the live recipe source.
-A future diagnostic recipe change requires review and a new protected pin.
-
-Keep the candidate PR open through execution and finalization. After the
-prerequisite is eventually merged with separate authorization, reconcile the
-candidate onto the actual new main SHA, refresh all source/build identities,
-and obtain any required review. If the PR head, protected workflow, or default
-branch changes, repeat identity verification before admission. A branch
-workflow dispatch, raw Worker upload, locally rebuilt binary or closed PR cannot
-substitute for this contract. Source merge, authority deployment and credential
-custody, and one finite synthetic run each require their own authorization.
-
-## Shared-account isolation admission
-
-Resource-level isolation may use shared accounts. Before cloud-writing jobs can
-operate, the protected `image-qualification` environment must carry a reviewed
-`CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON` record and its canonical SHA256 in
-`CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256`. Candidate inputs cannot select
-this record. Missing admission, drift, or overlap fails before mutation.
-
-The record binds the Cloudflare account, fixed private qualification authority,
-its single active Cloudflare version, source revision, logical version, policy
-hash, full public binding digest, and exact run/registry namespace IDs with their
-owning script and class. It also binds the AWS account, qualification role ARN,
-Region, subnet, security group, base AMI and root-volume bound. Explicit production
-Worker, namespace, role and security-group exclusion inventories must be
-disjoint. Exclusive-subnet admission also requires disjoint subnet identities.
-Operators must verify and admit actual live identities; credential
-availability or discovery alone does not admit a deployment configuration.
-
-### Explicit shared-subnet admission
-
-Version 1 records retain their exclusive-subnet behavior. Version 2 requires an
-explicit `aws.network` object: `{ "mode": "exclusive" }` keeps those exclusions,
-or `mode: "shared-subnet"` selects bounded network verification. Shared mode does
-not assert a complete exclusive production inventory: `production.inventoryVerified`
-must be `false`, and `production.observation` must contain `verified: true`,
-`scope: "qualification-identities-and-network"`, an `observedAt` timestamp and
-the reviewed observation's `receiptSha256`. All existing identity arrays remain
-required; only subnet overlap is allowed. These are protected operator assertions,
-not permissions for candidates to choose or edit network policy.
-
-A shared network object binds `vpcId`, `vpcCidr`, `subnetCidr`, `routeTableId`,
-`internetGatewayId`, `networkAclId`, `securityGroupSha256` and `aclSha256`. Set the
-private authority's nonsecret `CRABBOX_AWS_QUALIFICATION_NETWORK_JSON` binding to
-the canonical JSON of that exact object. The protected admission digest, authority
-binding digest and enrolled authority policy hash all cover it. An omitted binding
-retains the old policy hash and behavior; it cannot satisfy a shared record.
-
-The supported shared topology is deliberately narrow: one IPv4 VPC CIDR, one
-main route table with only its local route and an internet-gateway default route,
-one exact available subnet without IPv6 assignment, and the bound ACL and dedicated
-group. Additional tables, associations, local CIDRs, private routes, truncated
-inventories, denied reads and malformed responses stop admission. No shared route
-or ACL is changed. The authority needs regional `DescribeSubnets`,
-`DescribeRouteTables`, `DescribeNetworkAcls` and `DescribeSecurityGroups` reads;
-unavailable permissions are a deployment dependency, never a reason to skip a check.
-
-The group may allow IPv4 SSH on TCP22 only. Egress must cover exactly IPv4 outside
-the local VPC CIDR on separate TCP80 and TCP443 permissions, with no IPv6, group
-references, prefix lists or additional groups. Security groups are allow-only:
-remove broad rules rather than adding a narrower rule alongside them. The
-`qualificationEgress` helper in `scripts/image-qualification-network.ts` generates
-the positive CIDR complement, capped at 60 single-CIDR/single-port allowances.
-A `/16` needs 16 CIDRs on each port, or 32 rules. Verify the effective quota and
-actual installed rules before dispatch; source preparation does not install them.
-
-Use that same module's `qualificationGroupShape`, `qualificationAclShape` and
-`networkDigest` on the authority's parsed EC2 Query response records to calculate
-the two hashes. They bind security coordinates, sort unordered sets, and exclude
-tags, descriptions and request IDs. Do not hash differently shaped CLI JSON and
-assume it is interchangeable. The protected Node tooling imports this module with
-Node 24's type stripping; keep it with the protected checkout, never candidate code.
-The helper lives outside `worker/src`, which the build overlays with candidate
-source. It is an immutable protected build input: a candidate changing it is
-rejected before overlay, and subsequent protected commands import only the
-protected copy. Shared admission therefore needs these tooling changes on the
-protected workflow revision before qualification; a runtime PR alone is insufficient.
-
-The authority checks the network at enrollment and before forward mutations,
-including first-walk copy/attachment operations. Successful launch and instance
-discovery responses, including cached replays, require an exact guest readback:
-account, VPC, subnet, one interface, the dedicated group only, no IPv6 or IAM
-profile, and the required IMDS settings. Effects enter the existing durable ledger
-before a post-launch refusal. Cleanup, cancellation and finalization do not depend
-on the shared network checks passing; ordinary ownership and account checks remain.
-
-This permits shared-subnet use by trusted maintainers running reviewed synthetic
-code without guest cloud credentials. It does not isolate the guest from public
-HTTP/HTTPS endpoints, AWS DNS or platform services. Other private destinations have
-no admitted forwarding route; network drift requires reassessment. Reads and
-dispatch are not atomic with independent administrator changes: coordinate those
-writers during the bounded run. No claim of permanent future subnet non-use is
-required, and a different subnet in the same VPC is not itself isolation.
-
-Protected tooling reads all namespace inventory pages and checks each bound
-namespace ID against its owning script and class. The authority is private and
-may have no service or production broker binding. Candidates have only their
-own Fleet namespace, the fixed qualification transport, ephemeral run tokens,
-and the reviewed bounded settings. Relays target only their run-derived
-candidate. Their names and the controller name must be absent before creation;
-existing or uncertain names cannot be adopted. Cloudflare creation is a
-read-then-write operation, not an atomic exclusion of independent account
-administrators; coordinate administrative writers during admitted operations.
-
-Created resources carry admission and binding ownership markers. The reaper
-requires the same protected admission record, validates the controller's source
-and authority entrypoint before enabling or invoking it, and rejects changed
-versions, unowned resources, external namespaces, extra broker bindings and
-mismatched run-derived names. Recovery preserves the transport identity through
-candidate tombstoning, so a lost deletion response can be retried without
-replaying its namespace migration. Unmarked legacy resources require operator
-review rather than automatic adoption. The scheduled workflow remains subject
-to its separately managed enabled/disabled state.
-
-Build and execution runners receive no cloud administration credentials.
-First-walk CLI children receive a narrow environment and a private HOME,
-configuration directory and working directory, with only the qualification relay
-and ephemeral executor token. The trusted authority retains signing credentials;
-its policy and ownership ledger constrain candidate requests and cleanup to the
-admitted resource identities and run-owned IDs. Qualification credential custody,
-private authority deployment, infrastructure admission and one finite synthetic
-execution remain separate approval steps. Production bootstrap changes remain
-in the unmerged candidate, whose eventual merge also triggers coordinator and
-documentation publication workflows.
-
 ## Replay and teardown
 
 Each run has one Durable Object. Before a mutation, it persists the operation ID,
@@ -606,12 +367,9 @@ base AMI and security group. Lifecycle deletes remove current ledger ownership
 instead of accumulating stale IDs; terminating instances remain active until a
 single-ID read confirms `terminated` or absent. Before and after teardown, bounded
 eventual-consistency inventory scans find resources that appeared after an
-ambiguous response. The authority revalidates both the configured STS account and the exact
-qualification assumed-role principal before every mutation, reconciliation and
-cleanup. The required `CRABBOX_AWS_QUALIFICATION_ROLE_ARN` participates in the
-enrolled policy hash. A production role in the same account is rejected. A
-replacement credential must resolve to the enrolled role, account and fixed
-Region policy. This is an immediate identity
+ambiguous response. The authority revalidates the configured STS account before
+every mutation, so a replacement credential is accepted only when it resolves
+to the enrolled account and fixed Region policy. This is an immediate identity
 check around each protected qualification operation, not a promise that the
 qualification signer retains one immutable credential object. Separately,
 managed public AWS release through `AWSProvider.releaseLease` waits for
@@ -630,19 +388,6 @@ cleanup and retries incomplete teardown. Protected teardown fences candidate
 mutations, deletes the public relay, deletes the private candidate Worker and
 its Fleet Durable Object namespace, verifies their absence, repeats authority
 finalization idempotently, and retires the registry record.
-
-Authority upgrades can settle unfinished runs whose persisted policy predates
-the required role ARN. These runs cannot resume candidate work. Cleanup first
-persists the finalization fence, verifies the exact six-field legacy policy and
-its original hash, and requires the configured account, Region, base AMI, root
-size, subnet and security group to match. It then verifies the explicitly
-configured role with STS and pins that role on the existing run before any EC2
-cleanup. Every later cleanup or reconciliation call rechecks the pinned role;
-restarts and changed configuration cannot substitute another role. The original
-policy, hash and enrollment identity remain unchanged. A mismatch leaves the
-run fenced with its cleanup alarm pending; restore the matching configuration
-and pinned-role credentials before retrying. This transition grants no new
-resource ownership or permission to resume the old run.
 
 Cloud setup, enrollment, candidate deployment, and paid execution remain
 explicit maintainer actions. Merging this seam creates no Worker, secret,

@@ -100,6 +100,13 @@ jobs:
           ref: ${{ needs.authorize.outputs.candidate_sha }}
           path: candidate
           persist-credentials: false
+      - name: Check out pinned private diagnostic baseline
+        if: inputs.mode == 'first-walk'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: c75e9323c8ecf36b8cb4b6da1a524a046e26538c
+          path: private-baseline
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -119,7 +126,12 @@ jobs:
           node-version: 24.22.1
           package-manager-cache: false
       - name: Install protected Worker toolchain
-        run: npm ci --prefix harness/worker --ignore-scripts
+        run: |
+          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+            npm ci --prefix private-baseline/worker --ignore-scripts
+          else
+            npm ci --prefix harness/worker --ignore-scripts
+          fi
       - name: Build and seal with protected tooling
         env:
           ARTIFACT: ${{ runner.temp }}/image-qualification-candidate
@@ -131,8 +143,13 @@ jobs:
             [[ -z "${!name+x}" ]]
           done
           mkdir -p "$ARTIFACT/bin" "$ARTIFACT/worker" "$ARTIFACT/candidate/scripts"
-          node harness/scripts/image-qualification-control.mjs prepare-build \
-            harness candidate "$ARTIFACT/build-inputs.json"
+          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+            node harness/scripts/image-qualification-control.mjs prepare-build \
+              harness candidate "$ARTIFACT/build-inputs.json" private-baseline
+          else
+            node harness/scripts/image-qualification-control.mjs prepare-build \
+              harness candidate "$ARTIFACT/build-inputs.json"
+          fi
           if [[ "$QUALIFICATION_MODE" == retained ]]; then
             node harness/scripts/image-qualification-control.mjs retained-capsule \
               retained candidate "$ARTIFACT/retained-capsule.json"
@@ -142,14 +159,20 @@ jobs:
               candidate "$ARTIFACT"
           fi
           (
-            cd candidate
+            if [[ "$QUALIFICATION_MODE" == first-walk ]]; then cd private-baseline; else cd candidate; fi
             GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly \
               go build -trimpath -ldflags='-s -w' -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox
           )
           (
-            cd harness/worker
-            ./node_modules/.bin/wrangler deploy --dry-run \
-              --outdir "$ARTIFACT/worker" --config wrangler.jsonc
+            if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+              cd private-baseline/worker
+              ./node_modules/.bin/wrangler deploy --dry-run \
+                --outdir "$ARTIFACT/worker" --config wrangler.qualification.json
+            else
+              cd harness/worker
+              ./node_modules/.bin/wrangler deploy --dry-run \
+                --outdir "$ARTIFACT/worker" --config wrangler.jsonc
+            fi
           )
           # The deployer uploads executable modules only; omit unused debug maps
           # before sealing so the combined CLI/Worker stays within the 128 MiB cap.
