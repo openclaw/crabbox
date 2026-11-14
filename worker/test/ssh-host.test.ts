@@ -90,19 +90,47 @@ describe("managed host allocation", () => {
     expect((await f.route([hostID], { enabled: false }, undefined, true, "PATCH")).ok).toBe(true);
     expect((await f.create()).status).toBe(409);
   });
-  it("allocates exclusively across competing borrowers and retries", async () => {
-    const f = fixture();
-    await f.setup();
-    const results = await Promise.all(
-      Array.from({ length: 12 }, (_, i) =>
-        f.create(`cbx_${(i + 1).toString(16).padStart(12, "0")}`, `borrower-${i}@example.com`),
-      ),
-    );
-    expect(results.filter((r) => r.status === 202)).toHaveLength(1);
-    expect(results.filter((r) => r.status === 409)).toHaveLength(11);
-    expect((await f.create("cbx_000000000001", "borrower-0@example.com")).status).toBe(202);
-    expect((await f.create("cbx_000000000001", "other@example.com")).status).toBe(409);
-  });
+  it.each([false, true])(
+    "allocates exclusively across competing borrowers and retries (defer first hash=%s)",
+    async (deferFirstHash) => {
+      const f = fixture();
+      await f.setup();
+      const borrowers = Array.from({ length: 12 }, (_, i) => ({
+        id: `cbx_${(i + 1).toString(16).padStart(12, "0")}`,
+        owner: `borrower-${i}@example.com`,
+      }));
+      const release = Promise.withResolvers<void>();
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      let firstHash = true;
+      const spy = deferFirstHash
+        ? vi.spyOn(crypto.subtle, "digest").mockImplementation(async (...args) => {
+            if (firstHash) {
+              firstHash = false;
+              await release.promise;
+            }
+            return digest(...args);
+          })
+        : undefined;
+      const pending = borrowers.map(({ id, owner }) => f.create(id, owner));
+      try {
+        if (deferFirstHash) await Promise.all(pending.slice(1));
+        release.resolve();
+        const results = await Promise.all(pending);
+        expect(results.filter((r) => r.status === 202)).toHaveLength(1);
+        expect(results.filter((r) => r.status === 409)).toHaveLength(11);
+        expect(results[0]!.status).toBeOneOf(deferFirstHash ? [409] : [202, 409]);
+        const winner = borrowers[results.findIndex((r) => r.status === 202)]!;
+        const loser = borrowers[results.findIndex((r) => r.status === 409)]!;
+        expect((await f.create(winner.id, winner.owner)).status).toBe(202);
+        expect((await f.create(loser.id, loser.owner)).status).toBe(409);
+        expect((await f.create(winner.id, "other@example.com")).status).toBe(409);
+      } finally {
+        release.resolve();
+        await Promise.allSettled(pending);
+        spy?.mockRestore();
+      }
+    },
+  );
   it("matches organization, platform, architecture, and capability", async () => {
     const f = fixture();
     await f.setup();

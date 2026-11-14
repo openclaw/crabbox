@@ -16,6 +16,30 @@ const adapter = read("scripts/image-qualification-crabbox-adapter.sh");
 const relaySource = read("scripts/image-qualification-relay-worker.mjs");
 const controllerSource = read("scripts/image-qualification-controller-worker.mjs");
 
+test("every protected control job pins Node24 before importing the TypeScript helper", () => {
+  for (const source of [workflow, reaper]) {
+    for (const block of source.split(/(?=^  [a-z][a-z-]*:\n)/m)) {
+      if (!block.includes("scripts/image-qualification-control.mjs")) continue;
+      const setup = block.indexOf("uses: actions/setup-node@");
+      const command = block.indexOf("scripts/image-qualification-control.mjs");
+      assert.ok(setup >= 0 && setup < command);
+      assert.match(block.slice(setup, command), /node-version: 24\.22\.1/);
+    }
+  }
+});
+
+test("all protected control phases and the reaper receive the same opt-in transport profile", () => {
+  const selector =
+    "QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}";
+  for (const name of ["admit", "deploy-enroll", "arm", "finalize"]) {
+    const block = workflow.split(new RegExp(`^  ${name}:`, "m"))[1]?.split(/^  [a-z][a-z-]*:/m)[0];
+    assert.ok(block, name);
+    assert.equal(block.split(selector).length - 1, 1, name);
+  }
+  assert.equal(reaper.split(selector).length - 1, 1);
+  assert.doesNotMatch(workflow + reaper, /QUALIFICATION_TRANSPORT_PROFILE: candidate-transport-v2/);
+});
+
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.equal(
     fs.existsSync(path.join(root, ".github/workflows/image-qualification-candidate.yml")),
@@ -40,6 +64,10 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(buildJob, /\.\/node_modules\/\.bin\/wrangler deploy --dry-run/);
   assert.match(buildJob, /image-qualification-control\.mjs manifest/);
   assert.match(buildJob, /build-inputs\.json/);
+  assert.match(
+    buildJob,
+    /if \[\[ "\$QUALIFICATION_MODE" == first-walk \]\]; then\n            node harness\/scripts\/image-qualification-control\.mjs first-walk-recipe \\\n              candidate "\$ARTIFACT"\n          fi/,
+  );
   const setupGo = buildJob.slice(
     buildJob.indexOf("      - name: Set up Go"),
     buildJob.indexOf("      - name: Set up Node"),
@@ -60,8 +88,10 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.doesNotMatch(workflow, /seal-candidate|image-qualification-candidate-raw/);
   const buildOrder = [
     "image-qualification-control.mjs prepare-build",
+    "image-qualification-control.mjs first-walk-recipe",
     "go build -trimpath -ldflags='-s -w'",
     "./node_modules/.bin/wrangler deploy --dry-run",
+    'find "$ARTIFACT/worker"',
     "image-qualification-control.mjs manifest",
     "Upload immutable candidate bundle",
   ].map((marker) => buildJob.indexOf(marker));
@@ -86,7 +116,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /image-qualification-control\.mjs arm/);
   assert.match(
     workflow,
-    /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll, arm\]/,
+    /execute:[\s\S]*needs: \[authorize, build-candidate, admit, deploy-enroll, arm\]/,
   );
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
@@ -97,7 +127,20 @@ test("workflow isolates candidate execution from protected credentials", () => {
     /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
   );
   assert.match(executeJob, /QUALIFICATION_RELAY_URL/);
-  assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN/);
+  assert.match(executeJob, /environment: image-qualification-executor/);
+  assert.match(
+    executeJob,
+    /QUALIFICATION_EXECUTOR_CREDENTIAL: \$\{\{ secrets\.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL \}\}/,
+  );
+  assert.match(executeJob, /image-qualification-executor-token\.mjs/);
+  assert.match(executeJob, /node-version: 24\.22\.1/);
+  assert.doesNotMatch(workflow, /id-token: write|outputs\.executor_token \}\}|executor_token:/);
+  assert.doesNotMatch(control, /appendOutput\("executor_token"/);
+  assert.doesNotMatch(relaySource, /EXECUTOR_OIDC|executor-token|well-known\/jwks/);
+  assert.deepEqual(
+    [...executeJob.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL"],
+  );
   assert.doesNotMatch(executeJob, /QUALIFICATION_ADMIN_TOKEN|QUALIFICATION_SHARED_TOKEN/);
   assert.doesNotMatch(executeJob, /QUALIFICATION_EXPECTED_CANDIDATE_VERSION/);
   const protectedJobs = workflow.slice(workflow.indexOf("  deploy-enroll:"));
@@ -117,9 +160,8 @@ test("candidate downloads extract the artifact at the canonical path", () => {
 
   assert.equal(candidateDownloads.length, 3);
   assert.equal(
-    downloadSteps.filter(([, inputs]) =>
-      inputs.includes("needs.admit.outputs.handoff_artifact_id"),
-    ).length,
+    downloadSteps.filter(([, inputs]) => inputs.includes("needs.admit.outputs.handoff_artifact_id"))
+      .length,
     2,
   );
   for (const [, inputs] of candidateDownloads) {
@@ -145,24 +187,38 @@ test("finalization skips protected approval when deployment never started", () =
 });
 
 test("protected preparation exports immutable identity before the separate deployment approval", () => {
-  const admitJob = workflow.slice(workflow.indexOf("  admit:"), workflow.indexOf("  deploy-enroll:"));
+  const admitJob = workflow.slice(
+    workflow.indexOf("  admit:"),
+    workflow.indexOf("  deploy-enroll:"),
+  );
   assert.match(admitJob, /environment: image-qualification/);
   assert.match(admitJob, /QUALIFICATION_HANDOFF_DIR:/);
   assert.match(admitJob, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/);
   assert.match(admitJob, /QUALIFICATION_SUBNET_ID: \$\{\{ vars\./);
   assert.match(admitJob, /QUALIFICATION_SECURITY_GROUP_ID: \$\{\{ vars\./);
   assert.match(admitJob, /QUALIFICATION_AUTHORITY_SHA: \$\{\{ vars\./);
-  assert.doesNotMatch(admitJob, /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
+  assert.doesNotMatch(
+    admitJob,
+    /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/,
+  );
   assert.match(admitJob, /image-qualification-handoff-\$\{\{ github\.run_id \}\}-1/);
   assert.match(admitJob, /overwrite: false/);
   assert.match(admitJob, /handoff_sha256: \$\{\{ steps\.admit\.outputs\.handoff_sha256 \}\}/);
-  assert.ok(admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"));
-  const deployJob = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  assert.ok(
+    admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"),
+  );
+  const deployJob = workflow.slice(
+    workflow.indexOf("  deploy-enroll:"),
+    workflow.indexOf("  arm:"),
+  );
   const armJob = workflow.slice(workflow.indexOf("  arm:"), workflow.indexOf("  execute:"));
   for (const job of [deployJob, armJob]) {
     assert.match(job, /environment: image-qualification/);
     assert.match(job, /artifact-ids: \$\{\{ needs\.admit\.outputs\.handoff_artifact_id \}\}/);
-    assert.match(job, /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/);
+    assert.match(
+      job,
+      /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/,
+    );
     assert.match(job, /QUALIFICATION_HANDOFF_ARTIFACT_DIGEST:/);
   }
 });
@@ -186,10 +242,16 @@ test("reaper is protected, serialized, and artifact-independent", () => {
 
 test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /instanceTypes: \["t3\.small", "t3a\.small"\]/);
-  assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
+  assert.match(
+    control,
+    /maxMinutes: process\.env\.QUALIFICATION_MODE === "first-walk" \? 150 : retainedImage \? 38 : 120/,
+  );
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
-  assert.match(control, /maxLaunches: retainedImage \? 1 : 3/);
+  assert.match(
+    control,
+    /maxLaunches: process\.env\.QUALIFICATION_MODE === "first-walk" \? 2 : retainedImage \? 1 : 3/,
+  );
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
   assert.match(control, /AWSQualificationController/);
@@ -198,8 +260,8 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /candidate changed protected build inputs/);
   assert.match(control, /candidate build-input receipt mismatch/);
   assert.match(control, /deleted_classes: \["FleetDurableObject"\]/);
-  assert.match(control, /controllerCall\(controllerURL, token, "finalize"/);
-  assert.match(control, /controllerCall\(controllerURL, token, "retire"/);
+  assert.match(control, /controllerCall\(cf, controllerURL, token, "finalize"/);
+  assert.match(control, /controllerCall\(cf, controllerURL, token, "retire"/);
   assert.match(control, /workers\/scripts/);
   assert.match(control, /candidate Worker version changed after protected deployment/);
   assert.match(control, /await preparePrivateCandidate\(cf, candidateWorker, stagingBindings\)/);
@@ -213,7 +275,7 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   );
   assert.match(
     control,
-    /controllerCall\(controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(controllerURL, token, "finalize"/,
+    /controllerCall\(cf, controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(cf, controllerURL, token, "finalize"/,
   );
   assert.match(
     control,
@@ -253,7 +315,11 @@ test("protected build prep binds source, rejects substitution, and seals exact b
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?test=${Date.now()}`
   );
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-"));
+  // Resolve macOS temporary-directory aliases so the subprocess's argv path
+  // matches its module URL and actually enters the CLI.
+  const temp = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-")),
+  );
   try {
     const harness = path.join(temp, "harness");
     const candidate = path.join(temp, "candidate");
@@ -261,6 +327,16 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     const initialize = (directory, source) => {
       fs.mkdirSync(path.join(directory, "worker", "src"), { recursive: true });
       fs.mkdirSync(path.join(directory, "worker", "test"), { recursive: true });
+      fs.mkdirSync(path.join(directory, "scripts"), { recursive: true });
+      for (const file of [
+        "image-qualification-control.mjs",
+        "image-qualification-isolation.mjs",
+        "image-qualification-transport.mjs",
+        "image-qualification-journal.mjs",
+        "image-qualification-executor-token.mjs",
+        "image-qualification-network.ts",
+      ])
+        fs.copyFileSync(path.join(root, "scripts", file), path.join(directory, "scripts", file));
       fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");
       fs.writeFileSync(path.join(directory, "go.sum"), "");
       fs.writeFileSync(path.join(directory, "worker", "package.json"), "{}\n");
@@ -268,6 +344,12 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       fs.writeFileSync(path.join(directory, "worker", "wrangler.jsonc"), "{}\n");
       fs.writeFileSync(path.join(directory, "worker", "tsconfig.json"), "{}\n");
       fs.writeFileSync(path.join(directory, "worker", "src", "index.ts"), source);
+      // A candidate may add this formerly imported Worker source. A later
+      // protected command must not import it after the source overlay.
+      fs.writeFileSync(
+        path.join(directory, "worker", "src", "aws-qualification-network.ts"),
+        'throw new Error("candidate network module executed");\n',
+      );
       fs.writeFileSync(path.join(directory, "worker", "test", "index.test.ts"), "test\n");
       execFileSync("git", ["init", "-q"], { cwd: directory });
       execFileSync("git", ["config", "user.name", "Qualification Test"], { cwd: directory });
@@ -301,26 +383,134 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     fs.mkdirSync(path.join(artifact, "bin"), { recursive: true });
     fs.mkdirSync(path.join(artifact, "worker"), { recursive: true });
     fs.writeFileSync(path.join(artifact, "bin", "crabbox"), "candidate-cli");
-    fs.truncateSync(path.join(artifact, "bin", "crabbox"), 65 * 1024 * 1024);
+    fs.truncateSync(path.join(artifact, "bin", "crabbox"), 123 * 1024 * 1024);
     fs.writeFileSync(path.join(artifact, "worker", "index.js"), "export default {};");
+    fs.truncateSync(path.join(artifact, "worker", "index.js"), 3 * 1024 * 1024);
+    fs.writeFileSync(path.join(artifact, "worker", "index.js.map"), "debug-map");
+    fs.truncateSync(path.join(artifact, "worker", "index.js.map"), 6 * 1024 * 1024);
+    fs.mkdirSync(path.join(artifact, "worker", "nested debug"));
+    fs.writeFileSync(path.join(artifact, "worker", "nested debug", "extra.js.map"), "map");
+    fs.writeFileSync(path.join(artifact, "worker", "module.wasm"), "wasm-fixture");
+    const executableBefore = module.digest(
+      fs.readFileSync(path.join(artifact, "worker", "index.js")),
+    );
+    assert.throws(
+      () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
+      /candidate artifact exceeds the file or byte limit/,
+    );
+    // Run the producer's actual pruning command, not a mirrored implementation.
+    const prune = workflow.match(/^          (find "\$ARTIFACT\/worker"[^\n]+)$/m)?.[1];
+    assert.ok(prune);
+    execFileSync("bash", ["-c", prune], { env: { ...process.env, ARTIFACT: artifact } });
+    assert.equal(fs.existsSync(path.join(artifact, "worker", "index.js.map")), false);
+    assert.equal(
+      fs.existsSync(path.join(artifact, "worker", "nested debug", "extra.js.map")),
+      false,
+    );
+    assert.equal(
+      module.digest(fs.readFileSync(path.join(artifact, "worker", "index.js"))),
+      executableBefore,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(artifact, "worker", "module.wasm"), "utf8"),
+      "wasm-fixture",
+    );
     const manifest = module.createManifest(candidate, artifact, candidateSha, workflowSha);
+    // Exercise the actual post-overlay command in a fresh process; the parent
+    // process's pre-overlay module cache must not hide candidate execution.
+    // Require that process to create the manifest rather than reuse our copy.
+    fs.rmSync(path.join(artifact, "manifest.json"));
+    execFileSync(
+      process.execPath,
+      [
+        path.join(harness, "scripts/image-qualification-control.mjs"),
+        "manifest",
+        candidate,
+        artifact,
+      ],
+      {
+        env: {
+          ...process.env,
+          QUALIFICATION_CANDIDATE_SHA: candidateSha,
+          QUALIFICATION_WORKFLOW_SHA: workflowSha,
+        },
+      },
+    );
     assert.equal(
       manifest.files.find((entry) => entry.path === "bin/crabbox")?.bytes,
-      65 * 1024 * 1024,
+      123 * 1024 * 1024,
     );
-    assert.equal(
-      module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
-      manifest.manifestSha256,
-    );
+    const regenerated = module.verifyManifest(artifact, candidateSha, workflowSha);
+    // Each generation includes its own timestamp and therefore its own digest.
+    // verifyManifest checks that digest; compare the stable build contents here.
+    assert.deepEqual(regenerated.files, manifest.files);
+    assert.equal(regenerated.mainModule, manifest.mainModule);
     fs.writeFileSync(path.join(artifact, "unexpected"), "nope");
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
     fs.rmSync(path.join(artifact, "unexpected"));
+    const priorMode = process.env.QUALIFICATION_MODE;
+    try {
+      process.env.QUALIFICATION_MODE = "first-walk";
+      assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /ENOENT/);
+      const recipeDir = path.join(candidate, "recipes/bootstrap/v1");
+      fs.mkdirSync(recipeDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"),
+        path.join(recipeDir, "linuxOwnershipRepair.sh"),
+      );
+      module.stageFirstWalkRecipe(candidate, artifact);
+      const sealed = module.createManifest(candidate, artifact, candidateSha, workflowSha);
+      assert.equal(
+        sealed.files.find(
+          (f) => f.path === "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
+        ).sha256,
+        module.firstWalkRecipeSha256,
+      );
+      assert.equal(
+        module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
+        sealed.manifestSha256,
+      );
+      assert.throws(
+        () => module.verifyManifest(artifact, "f".repeat(40), workflowSha),
+        /identity mismatch/,
+      );
+      const staged = path.join(artifact, "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh");
+      fs.appendFileSync(staged, "tampered");
+      assert.throws(
+        () => module.verifyManifest(artifact, candidateSha, workflowSha),
+        /digest mismatch/,
+      );
+      assert.throws(
+        () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
+        /protected reviewed digest/,
+      );
+      fs.copyFileSync(path.join(recipeDir, "linuxOwnershipRepair.sh"), staged);
+    } finally {
+      if (priorMode === undefined) delete process.env.QUALIFICATION_MODE;
+      else process.env.QUALIFICATION_MODE = priorMode;
+    }
     fs.truncateSync(path.join(artifact, "worker", "index.js"), 64 * 1024 * 1024);
     assert.throws(
       () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
       /candidate artifact exceeds the file or byte limit/,
     );
 
+    const protectedNetwork = path.join(candidate, "scripts/image-qualification-network.ts");
+    const networkSource = fs.readFileSync(protectedNetwork);
+    fs.appendFileSync(protectedNetwork, '\nthrow new Error("substituted protected helper");\n');
+    execFileSync("git", ["add", "scripts/image-qualification-network.ts"], { cwd: candidate });
+    execFileSync("git", ["commit", "-qm", "candidate helper substitution"], { cwd: candidate });
+    candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: candidate,
+      encoding: "utf8",
+    }).trim();
+    assert.throws(
+      () =>
+        module.prepareCandidateBuild(harness, candidate, receiptFile, candidateSha, workflowSha),
+      /candidate changed protected build inputs/,
+    );
+    fs.writeFileSync(protectedNetwork, networkSource);
+    execFileSync("git", ["add", "scripts/image-qualification-network.ts"], { cwd: candidate });
     fs.writeFileSync(
       path.join(candidate, "worker", "package.json"),
       '{"scripts":{"build":"write-substituted-artifact"}}\n',

@@ -1,6 +1,7 @@
 import {
   psQuote,
   sharedLinuxSSHRestart,
+  sharedLinuxOwnershipRepair,
   sharedLinuxBootstrapStart,
   sharedLinuxAptQuiesce,
   sharedLinuxAptWait,
@@ -98,9 +99,8 @@ export function cloudInit(
   let core = `    #!/bin/bash
     exec > >(tee -a /var/log/cloud-init-output.log) 2>&1
 ${indentRuncmdScript(sharedLinuxBootstrapPrelude())}${sshRestart}${indentRuncmdScript(linuxMinimalReadinessBootstrap)}
-    mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
-    install -d /var/lib/crabbox
+    mkdir -p ${shellQuote(config.workRoot)} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
+${indentRuncmdScript(sharedLinuxOwnershipRepair(config.sshUser, [config.workRoot, "/var/cache/crabbox"]))}    install -d /var/lib/crabbox
 ${sshRestart}`;
   let final = "    systemctl start crabbox-bootstrap.service\n";
   let workspaceAfter = "crabbox-bootstrap.service cloud-config.service";
