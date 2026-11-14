@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Tailscale: use coordinator default tags for lease API requests that omit tags while preserving explicit-tag validation. [PR 3110](https://github.com/openclaw/crabbox/pull/3110). Thanks @KrasimirKralev.
+
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
