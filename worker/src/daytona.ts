@@ -665,7 +665,7 @@ function daytonaMachine(sandbox: DaytonaSandbox): ProviderMachine {
   };
 }
 
-function stableMachineID(value: string): number {
+export function stableMachineID(value: string): number {
   let hash = 2_166_136_261;
   for (const byte of new TextEncoder().encode(value)) {
     hash ^= byte;

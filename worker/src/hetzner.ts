@@ -595,7 +595,7 @@ function reusableHetznerSSHKey(
   return keys.find((entry) => sshPublicKeyIdentity(entry.public_key) === identity);
 }
 
-function eurToUSD(env: Env): number {
+export function eurToUSD(env: Env): number {
   const parsed = Number.parseFloat(env.CRABBOX_EUR_TO_USD ?? "");
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1.08;
 }
