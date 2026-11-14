@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ type sshScriptTestBackend struct {
 	lease                             LeaseTarget
 	activityPath                      string
 	activityErr                       error
+	activityLease                     LeaseTarget
 	requests                          []RunRequest
 	warmups, acquired, starts, joined int
 }
@@ -52,6 +54,7 @@ func (b *sshScriptTestBackend) Status(context.Context, StatusRequest) (StatusVie
 }
 func (b *sshScriptTestBackend) Stop(context.Context, StopRequest) error { return nil }
 func (b *sshScriptTestBackend) BeginSSHRunActivity(ctx context.Context, lease LeaseTarget) (func(), error) {
+	b.activityLease = lease
 	if claim, err := ReadLeaseClaim(lease.LeaseID); err != nil || claim.Provider != b.spec.Name {
 		return nil, fmt.Errorf("activity started before admission: %v", err)
 	}
@@ -454,5 +457,67 @@ func TestHybridSSHScriptActivityFailureStopsBeforeSetup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ssh.log")); !os.IsNotExist(err) {
 		t.Fatal("setup ran after activity admission failed")
+	}
+}
+
+func TestRunCanonicalizesLeaseTargetBeforeActivity(t *testing.T) {
+	for _, platform := range []struct {
+		name, targetOS, windowsMode, rawTargetOS string
+		emptyEnvironment                         bool
+	}{
+		{name: "default Linux", targetOS: targetLinux, windowsMode: windowsModeNormal},
+		{name: "native Linux", targetOS: targetLinux, windowsMode: windowsModeNormal, rawTargetOS: targetLinux, emptyEnvironment: true},
+		{name: "recorded macOS", targetOS: targetMacOS, windowsMode: windowsModeNormal},
+		{name: "recorded Windows", targetOS: targetWindows, windowsMode: windowsModeNormal},
+		{name: "recorded WSL2", targetOS: targetWindows, windowsMode: windowsModeWSL2},
+	} {
+		for _, reused := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reused=%t", platform.name, reused), func(t *testing.T) {
+				p, b, dir := setupSSHScriptRun(t)
+				p.spec.Targets = append(p.spec.Targets, TargetSpec{OS: platform.targetOS, WindowsMode: platform.windowsMode})
+				workRoot := filepath.Join(dir, "recorded-root")
+				b.lease.Server.ServerType.Name = "fixture-large"
+				b.lease.Server.Labels = map[string]string{"work_root": workRoot}
+				if platform.targetOS != targetLinux {
+					b.lease.Server.Labels["target"] = platform.targetOS
+					b.lease.Server.Labels["windows_mode"] = platform.windowsMode
+				}
+				b.lease.SSH.TargetOS = platform.rawTargetOS
+				if !platform.emptyEnvironment {
+					b.lease.SSH.ChildEnv = map[string]string{"FIXTURE_TRANSPORT": "synthetic-context"}
+					b.lease.SSH.ChildEnvDenylist = []string{"FIXTURE_PRIVATE"}
+				}
+				stopped := errors.New("stop after lease admission")
+				b.activityErr = stopped
+				args := []string{"--provider", p.Spec().Name, "--no-sync", "--keep", "--script-stdin"}
+				if reused {
+					args = append(args, "--id", b.lease.LeaseID)
+				}
+				err := (App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("exit 0\n")}).runCommand(t.Context(), args)
+				if !errors.Is(err, stopped) || b.starts != 1 {
+					t.Fatalf("admission error=%v activity starts=%d", err, b.starts)
+				}
+				target := b.activityLease.SSH
+				claim, err := ReadLeaseClaim(b.lease.LeaseID)
+				if err != nil || claim.Provider != p.Spec().Name || b.activityLease.Server.ServerType.Name != "fixture-large" || claim.Labels["work_root"] != workRoot {
+					t.Fatalf("recorded lease=%+v error=%v", claim, err)
+				}
+				cfg := defaultConfig()
+				cfg.Provider, cfg.TargetOS, cfg.WindowsMode = claim.Provider, platform.targetOS, platform.windowsMode
+				hydrationTarget := targetWithConfigDefaults(target, cfg)
+				if nativeRuntimeRouteKey(target) != nativeRuntimeRouteKey(hydrationTarget) {
+					t.Fatal("Actions hydration changed the admitted runtime route")
+				}
+				if target.TargetOS != platform.targetOS || target.WindowsMode != platform.windowsMode || target.User != b.lease.SSH.User {
+					t.Fatalf("activity target=%+v, want platform=%s/%s and provider user", target, platform.targetOS, platform.windowsMode)
+				}
+				if !reflect.DeepEqual(target.ChildEnv, b.lease.SSH.ChildEnv) || !slices.Equal(target.ChildEnvDenylist, b.lease.SSH.ChildEnvDenylist) {
+					t.Fatal("lease admission changed the provider environment boundary")
+				}
+				if _, err := os.Stat(filepath.Join(dir, "ssh.log")); !os.IsNotExist(err) {
+					t.Fatal("SSH ran after the activity refusal")
+				}
+			})
+		}
 	}
 }

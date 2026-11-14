@@ -38,6 +38,29 @@ describe("lease lifetime policy", () => {
       idleTimeoutSeconds: 1800,
     });
   });
+  it("scopes a twelve-hour ceiling without changing ordinary defaults or idle expiration", () => {
+    const owner = "github:1000000001";
+    const env = {
+      CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+        owners: { [owner]: { maxTTLSeconds: 43200 } },
+      }),
+    };
+    expect(resolveLeasePolicy(env, owner)).toEqual({
+      ...resolveLeasePolicy({}),
+      maxTTLSeconds: 43200,
+    });
+    expect(resolveLeasePolicy(env, "github:1000000002")).toEqual(resolveLeasePolicy({}));
+    expect(
+      clampLeaseDurations(
+        { ttlSeconds: 86400, idleTimeoutSeconds: 1800 },
+        resolveLeasePolicy(env, owner),
+      ),
+    ).toMatchObject({
+      ttlSeconds: 43200,
+      idleTimeoutSeconds: 1800,
+      policyNotice: expect.any(String),
+    });
+  });
   it("resolves owner over org over global independently per field", () => {
     const env = {
       CRABBOX_LEASE_MAX_TTL_SECONDS: "7200",

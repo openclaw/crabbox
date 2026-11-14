@@ -97,7 +97,10 @@
           "pattern": "^[a-f0-9]{40}$"
         },
         "configuration": {
-          "const": "crabbox-wasmtime-fuel/v1"
+          "enum": [
+            "crabbox-wasmtime-fuel/v1",
+            "crabbox-wasmtime-fuel/v2"
+          ]
         },
         "wasiConfiguration": {
           "const": "crabbox-deterministic-wasi/v1"

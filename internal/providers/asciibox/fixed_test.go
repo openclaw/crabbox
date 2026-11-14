@@ -117,7 +117,7 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	if replay, err := other.Acquire(t.Context(), req); err != nil || replay.Server.CloudID != first.Server.CloudID || len(f.keys) != 1 {
 		t.Fatalf("explicit default did not resume the old lease: %+v %v", replay, err)
 	}
-	for _, change := range []string{"ttl", "size", "class", "no-env", "slug", "workdir", "scope", "generation", "id"} {
+	for _, change := range []string{"ttl", "size", "class", "no-env", "no-snapshots", "slug", "workdir", "scope", "generation", "id"} {
 		t.Run(change, func(t *testing.T) {
 			cfg, changed := b.cfg, req
 			original := f.box
@@ -126,6 +126,8 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 				changed.Options.TTL = time.Hour
 			case "no-env":
 				cfg.AsciiBox.NoEnv = true
+			case "no-snapshots":
+				cfg.AsciiBox.NoSnapshots = true
 			case "size":
 				cfg.ServerType, cfg.ServerTypeExplicit = "large", true
 			case "class":

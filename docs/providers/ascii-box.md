@@ -207,6 +207,8 @@ asciiBox:
   baseUrl: https://ascii.dev
   cliPath: box
   noEnv: false
+  noSnapshots: false
+  visibility: "" # organization default; or private/shared
   workdir: /home/user/crabbox
 ```
 
@@ -216,6 +218,8 @@ Provider flags (legacy compatibility names):
 --ascii-box-base-url
 --ascii-box-cli
 --ascii-box-no-env
+--ascii-box-no-snapshots
+--ascii-box-visibility
 --ascii-box-workdir
 ```
 
@@ -248,6 +252,30 @@ This option does not remove secrets subsequently copied into the sandbox or
 prove that its current disk or snapshots are secretless. Build reusable snapshots
 from a clean sandbox, control what is synchronized, and do not treat no-env as a
 snapshot sanitization operation.
+
+## Snapshot and visibility controls
+
+Set `asciiBox.noSnapshots: true` or pass `--ascii-box-no-snapshots` to disable
+Boat snapshots at creation. Stopping such a sandbox erases it; it cannot be
+resumed, forked, or saved as a snapshot. `false` leaves the provider default
+unchanged. `--ascii-box-no-snapshots=false` overrides a configured true value.
+
+Set `asciiBox.visibility: private` or `--ascii-box-visibility private` to limit
+an organization sandbox to its creator. `shared` permits organization members;
+an empty value leaves the organization default unchanged. These controls are
+independent of `noEnv`, which only controls account environment attachment.
+Select the organization with `BOX_ORG`. Omit visibility for personal sandboxes,
+which are already private; Crabbox rejects an explicit visibility before
+allocating a personal sandbox.
+See Boat's [creation contract](https://docs.boat.dev/api/reference/sandboxes/create-sandbox.md).
+
+Both ordinary and fixed-ID creation carry the selected controls. Before SSH
+access, Crabbox checks fresh provider metadata for explicitly requested settings;
+missing or mismatched metadata is an error. The local claim records the requested
+policy for reuse, not an attestation that the current sandbox is private.
+Changing that policy requires a new lease. Claims from earlier releases remain
+usable with the new settings omitted. Status and owned cleanup remain available even
+when the requested policy or current metadata does not match.
 
 ## Lifecycle
 

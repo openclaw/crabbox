@@ -1692,6 +1692,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
+		applyResolvedLeaseConfig(&cfg, server, &target)
 		envSelection.remove(target.ChildEnvDenylist...)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
@@ -2312,7 +2313,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, err
 		}
 		applyResolvedServerConfig(&cfg, server)
-		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		envSelection.remove(target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
@@ -5213,6 +5215,13 @@ func coordinatorLeaseStillActive(ctx context.Context, coord *CoordinatorClient, 
 			fmt.Fprintf(stderr, "warning: lease watch failed for %s: %v\n", leaseID, err)
 		}
 		return true
+	}
+	if _, fixedWait := checkpointReadinessFromContext(ctx); fixedWait {
+		server, _, _ := leaseToServerTarget(lease, Config{})
+		if err := CheckCheckpointReadinessLifetime(ctx, server); err != nil {
+			cancel(err)
+			return false
+		}
 	}
 	if lease.State != "" && lease.State != "active" {
 		cancel(Exit(5, "lease %s became %s while waiting for SSH; another process may have released it", leaseID, lease.State))
