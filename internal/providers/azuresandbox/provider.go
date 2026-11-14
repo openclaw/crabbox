@@ -3,6 +3,7 @@ package azuresandbox
 import (
 	"flag"
 	"fmt"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -36,6 +37,9 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, fmt.Errorf("ACA Sandbox supports Linux only")
 	}
+	if _, err := machineForConfig(cfg); err != nil {
+		return nil, err
+	}
 	return &backend{cfg: cfg, rt: rt}, nil
 }
 
@@ -46,11 +50,31 @@ func (Provider) ClaimScope(cfg core.Config) string {
 	return "azure-sandbox:" + c.Region + ":" + c.Subscription + ":" + c.ResourceGroup + ":" + c.Group
 }
 
-// All generic classes currently resolve to the one configured initial shape.
-// This follows the common fixed-shape catalog contract; it claims no larger SKU.
+// Generic classes retain their original shape, including the default beast.
+// Larger disk-based allocations use the native --type selector.
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	cpu := 2
 	return core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "2cpu-4gib", Architecture: core.ProviderClassArchitectureAMD64, VCPU: &cpu, Memory: &core.ProviderMemory{Value: 4, Unit: core.ProviderMemoryUnitGiB}})
 }
 
-func (Provider) ServerTypeForConfig(core.Config) string { return "2cpu-4gib" }
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		return cfg.ServerType
+	}
+	return "2cpu-4gib"
+}
+
+func machineForConfig(cfg core.Config) (map[string]string, error) {
+	typ := (Provider{}).ServerTypeForConfig(cfg)
+	switch typ {
+	case "2cpu-4gib":
+		return map[string]string{"cpu": "2000m", "memory": "4096Mi"}, nil
+	case "4cpu-8gib":
+		if cfg.AzureSandbox.SnapshotID != "" {
+			return nil, fmt.Errorf("ACA Sandbox snapshot restore inherits captured compute size; --type 4cpu-8gib requires a disk image")
+		}
+		return map[string]string{"cpu": "4000m", "memory": "8192Mi"}, nil
+	default:
+		return nil, fmt.Errorf("ACA Sandbox unsupported type %q; choose 2cpu-4gib or 4cpu-8gib", typ)
+	}
+}

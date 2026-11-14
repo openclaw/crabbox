@@ -130,6 +130,10 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 }
 
 func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (core.LeaseTarget, error) {
+	resources, err := machineForConfig(b.cfg)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	retention, err := b.retentionPolicy()
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -167,11 +171,20 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 		// Read-only prerequisites must not consume the attempt's create admission.
 		DeferredAdmission: true,
 		DescribeIntent: func(_ context.Context, _ *core.LeaseClaim, _ bool) (core.FixedLeaseBinding, error) {
-			fingerprint, err := core.FixedIntentFingerprint("aca-sandbox-v1", struct {
+			intent := struct {
 				Config    core.AzureSandboxConfig
 				TTL, Idle time.Duration
 				Slug      string
-			}{cfg, b.cfg.TTL, b.cfg.IdleTimeout, req.RequestedSlug})
+			}{cfg, b.cfg.TTL, b.cfg.IdleTimeout, req.RequestedSlug}
+			// Preserve the original small-shape fingerprint byte-for-byte so
+			// existing leases and uncertain creates can still be replayed.
+			fingerprint, err := core.FixedIntentFingerprint("aca-sandbox-v1", intent)
+			if resources["cpu"] != "2000m" {
+				fingerprint, err = core.FixedIntentFingerprint("aca-sandbox-v2", struct {
+					Intent    any
+					Resources map[string]string
+				}{intent, resources})
+			}
 			return core.FixedLeaseBinding{ProviderScope: (Provider{}).ClaimScope(b.cfg), Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
@@ -201,7 +214,7 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 					return sandbox{}, err
 				}
 			}
-			body := createRequest{Resources: map[string]string{"cpu": "2000m", "memory": "4096Mi"}, Labels: maps.Clone(tx.Claim.Labels), Lifecycle: map[string]any{
+			body := createRequest{Resources: maps.Clone(resources), Labels: maps.Clone(tx.Claim.Labels), Lifecycle: map[string]any{
 				"autoSuspendPolicy": map[string]any{"enabled": true, "interval": int(b.cfg.IdleTimeout.Seconds()), "mode": "Disk"},
 				"autoDeletePolicy":  map[string]any{"enabled": retention == nil, "deleteIntervalInSeconds": int(b.cfg.TTL.Seconds())},
 			}}

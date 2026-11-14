@@ -33,8 +33,27 @@ crabbox stop --provider azure-sandbox --id cbx_012345abcdef
 ```
 
 The initial shape is 2 CPU / 4 GiB, using the public `ubuntu` disk by default.
-The common class catalog maps every generic class to this one shape; larger
-class names do not provision larger machines. `--azure-sandbox-disk` selects a
+The common class catalog maps every generic class (including the default
+`beast`) to this shape. For a new disk-based Sandbox with 4 vCPU / 8 GiB, use
+`--type 4cpu-8gib`; `--type 2cpu-4gib` explicitly selects the original shape.
+The generic `serverType` config key and `CRABBOX_SERVER_TYPE` environment
+variable also accept these values. Other native types
+are rejected. For example:
+
+```sh
+crabbox warmup --provider azure-sandbox --type 4cpu-8gib \
+  --ttl 4h --idle-timeout 15m --keep
+```
+
+The adapter sends `resources.cpu=4000m` and `resources.memory=8192Mi` for
+the larger shape, matching Azure's documented
+[XL resource tier](https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers)
+and [create resource quantities](https://sandboxes.azure.com/docs/sandboxes/sandboxes/).
+Size is bound into the allocation intent; changing size on an existing lease
+fails rather than resizing or allocating a replacement. Region availability,
+active-core quota and the selected image still require operator qualification.
+
+`--azure-sandbox-disk` selects a
 public disk name. `--azure-sandbox-disk-id` (or
 `CRABBOX_AZURE_SANDBOX_DISK_ID`) instead selects a prepared private disk image
 in the configured group. Its immutable ID is bound into the allocation intent;
@@ -75,6 +94,13 @@ until resource cleanup settles. Live acceptance must qualify deletion, idle
 behavior, token renewal and Gateway recovery before production activation.
 
 ## Prepared snapshot restore (opt-in)
+
+Snapshots capture compute size. Restore inherits that size and sends no
+resource overrides; `--type 4cpu-8gib` with snapshot selection is rejected.
+The default or `--type 2cpu-4gib` does not resize a restored snapshot. To use
+a larger restored Sandbox, the image owner must separately prepare and qualify
+a snapshot captured from a 4 vCPU / 8 GiB source. See Azure's
+[snapshot contract](https://sandboxes.azure.com/docs/sandboxes/snapshots/).
 
 Select an exact group-scoped snapshot with `--azure-sandbox-snapshot-id`, its
 trusted binding file with `--azure-sandbox-snapshot-receipt`, and the SHA256 of
