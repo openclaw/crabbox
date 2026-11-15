@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Boat: confirm absence and release the local lease when a snapshot-disabled sandbox disappears during native stop, while retaining claims if inventory or ownership is uncertain.
+
 ## 0.83.1 - 2026-11-14
 
 ### Fixed
