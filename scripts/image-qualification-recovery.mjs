@@ -306,6 +306,7 @@ export async function recoverTransition(
             "QUALIFICATION_TRANSPORT_IDENTITY",
           ].includes(b.name),
         );
+        const retained = bindingShape(existing.bindings.filter((b) => b.type === "secret_text"));
         if (
           entries.length !== 2 ||
           typeof module === "string" ||
@@ -316,18 +317,19 @@ export async function recoverTransition(
             {
               main_module: "tombstone.mjs",
               compatibility_date: "2026-09-03",
+              keep_bindings: ["secret_text"],
               bindings: expectedBindings,
               migrations: {
                 old_tag: "qualification-v1",
                 new_tag: "qualification-delete",
                 deleted_classes: ["FleetDurableObject"],
               },
-              tags: ownershipTags(callerCF, name, expectedBindings).sort(),
+              tags: ownershipTags(callerCF, name, [...expectedBindings, ...retained]).sort(),
             },
           )
         )
           fail();
-        state.uploadIntents[name] = { bindings: meta.bindings, tags: meta.tags };
+        state.uploadIntents[name] = { bindings: [...meta.bindings, ...retained], tags: meta.tags };
         await persist(); // arm before effect, including an uncertain upload response
       } else if (method === "POST" && match[2]) {
         const value = JSON.parse(init.body);

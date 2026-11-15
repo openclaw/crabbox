@@ -82,6 +82,8 @@ function fixture() {
     },
     [binding.candidateWorker]: {
       settings: ownedSettings(original.admission, binding.candidateWorker, [
+        { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text" },
+        { name: "CRABBOX_SHARED_TOKEN", type: "secret_text" },
         {
           name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
           type: "service",
@@ -143,7 +145,8 @@ function fixture() {
   let loseUpload = false,
     loseDelete = false,
     loseRetire = false,
-    loseControllerDelete = false;
+    loseControllerDelete = false,
+    blockCandidateDelete = false;
   const attestation = () => ({
     version: 1,
     ...binding,
@@ -173,7 +176,18 @@ function fixture() {
         const metadata = JSON.parse(await init.body.get("metadata").text()),
           module = init.body.get(metadata.main_module);
         workers[name] = {
-          settings: { bindings: metadata.bindings, tags: metadata.tags },
+          settings: {
+            // The script upload endpoint preserves existing secrets omitted
+            // from metadata. Model the observed response, not a replacement.
+            bindings: [
+              ...metadata.bindings,
+              ...w.settings.bindings.filter(
+                (b) =>
+                  b.type === "secret_text" && !metadata.bindings.some((n) => n.name === b.name),
+              ),
+            ],
+            tags: metadata.tags,
+          },
           version: "33333333-3333-4333-8333-333333333333",
           module: {
             module: metadata.main_module,
@@ -188,9 +202,11 @@ function fixture() {
         return {};
       }
       if (init.method === "DELETE") {
+        if (blockCandidateDelete && name === binding.candidateWorker)
+          throw Error("referenced Worker cannot be deleted");
         delete workers[name];
         if (loseControllerDelete && name === controllerName) {
-          loseControllerDelete = false;
+          ((loseControllerDelete = false), (blockCandidateDelete = false));
           throw Error("lost last deletion reply");
         }
         if (loseDelete) {
@@ -300,6 +316,9 @@ function fixture() {
     },
     loseUpload: () => {
       loseUpload = true;
+    },
+    blockCandidateDelete: (value) => {
+      blockCandidateDelete = value;
     },
     loseDelete: () => {
       loseDelete = true;
@@ -414,6 +433,63 @@ test("uncertain tombstone upload resumes exact original owner and settles", asyn
   assert.ok(f.state.uploadIntents[f.plan.binding.candidateWorker]);
   await local(f, () => recoverTransition(f.plan, f.state, f.options()));
   assert.equal(f.state.settled, true);
+  assert.equal(
+    f.events.filter((e) => e === `PUT /workers/scripts/${f.plan.binding.candidateWorker}`).length,
+    1,
+  );
+});
+
+for (const [label, change] of [
+  ["added", (bindings) => bindings.push({ name: "UNEXPECTED_SECRET", type: "secret_text" })],
+  [
+    "removed",
+    (bindings) =>
+      bindings.splice(
+        bindings.findIndex((b) => b.type === "secret_text"),
+        1,
+      ),
+  ],
+  [
+    "changed",
+    (bindings) => {
+      bindings.find((b) => b.type === "secret_text").type = "plain_text";
+    },
+  ],
+])
+  test(`${label} secret metadata after an uncertain upload blocks all further mutations`, async () => {
+    const f = fixture();
+    f.loseUpload();
+    await local(f, () => assert.rejects(recoverTransition(f.plan, f.state, f.options())));
+    const name = f.plan.binding.candidateWorker;
+    assert.deepEqual(
+      f.state.uploadIntents[name].bindings.filter((b) => b.type === "secret_text"),
+      [
+        { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text" },
+        { name: "CRABBOX_SHARED_TOKEN", type: "secret_text" },
+      ],
+    );
+    change(f.workers[name].settings.bindings);
+    const count = f.events.length;
+    await local(f, () => assert.rejects(recoverTransition(f.plan, f.state, f.options())));
+    assert.ok(f.events.slice(count).every((e) => e.startsWith("GET ")));
+    assert.ok(f.workers[name]);
+    assert.equal(f.state.settled, false);
+  });
+
+test("ordinary deletion dependency failure preserves custody and resumes without force", async () => {
+  const f = fixture();
+  f.blockCandidateDelete(true);
+  await local(f, () => assert.rejects(recoverTransition(f.plan, f.state, f.options())));
+  assert.ok(f.workers[f.plan.binding.candidateWorker]);
+  assert.equal(f.state.settled, false);
+  assert.ok(!f.events.some((e) => e.includes("force")));
+  f.blockCandidateDelete(false);
+  await local(f, () => recoverTransition(f.plan, f.state, f.options()));
+  assert.equal(f.state.settled, true);
+  assert.equal(
+    f.events.filter((e) => e === `PUT /workers/scripts/${f.plan.binding.candidateWorker}`).length,
+    1,
+  );
 });
 
 test("uncertain relay deletion reconciles absence without replacement", async () => {
@@ -506,4 +582,31 @@ test("fresh finalization gets five minutes while the original deadline still cli
   );
   assert.ok(!limits.includes(300_000));
   assert.ok(limits.includes(45_000));
+});
+
+for (const keep of [["service"], ["secret_text", "service"]])
+  test(`upload rejects unsupported retention ${keep.join("+")} before network`, async () => {
+    const f = fixture();
+    await assert.rejects(
+      f.options().callerCF.upload(f.plan.binding.candidateWorker, "/unused", {
+        keep_bindings: keep,
+        bindings: [],
+      }),
+      /retain only verified secret bindings/,
+    );
+    assert.equal(f.events.length, 0);
+  });
+
+test("upload cannot replace a verified retained secret name", async () => {
+  const f = fixture(),
+    cf = f.options().callerCF;
+  cf.admission = fixtureAdmission().admission;
+  await assert.rejects(
+    cf.upload(f.plan.binding.candidateWorker, "/unused", {
+      keep_bindings: ["secret_text"],
+      bindings: [{ name: "CRABBOX_ADMIN_TOKEN", type: "plain_text", text: "replacement" }],
+    }),
+    /cannot replace a retained secret/,
+  );
+  assert.ok(f.events.every((e) => e.startsWith("GET ")));
 });

@@ -59,6 +59,8 @@ function installAPI(file) {
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(input);
     const method = init.method ?? "GET";
+    if (url.hostname === "api.cloudflare.com" && method === "DELETE")
+      assert.equal(url.search, "", "all deletion must preserve dependency checks");
     const route = url.pathname;
     state.events.push(`${method} ${url.hostname}${route}`);
     if (url.hostname === "api.github.com") {
@@ -191,6 +193,8 @@ function installAPI(file) {
             new_sqlite_classes: ["FleetDurableObject"],
           });
         } else if (metadata.main_module === "tombstone.mjs") {
+          assert.deepEqual(metadata.keep_bindings, ["secret_text"]);
+          assert.ok(!metadata.bindings.some((b) => b.type === "secret_text"));
           assert.deepEqual(metadata.migrations, {
             old_tag: "qualification-v1",
             new_tag: "qualification-delete",
@@ -216,11 +220,29 @@ function installAPI(file) {
           });
         }
         state.workers[name] = {
-          metadata,
+          metadata: {
+            ...metadata,
+            bindings: [
+              ...metadata.bindings.map((b) => {
+                if (b.type !== "secret_text") return b;
+                const { text, ...shape } = b;
+                return shape;
+              }),
+              ...(state.workers[name]?.metadata.bindings ?? []).filter(
+                (b) =>
+                  b.type === "secret_text" && !metadata.bindings.some((n) => n.name === b.name),
+              ),
+            ],
+          },
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
         if (metadata.main_module === "private-bootstrap.mjs" && state.failPrivateUpload === "after")
           throw new Error("private upload response lost after create");
+        if (state.tombstoneDrift && metadata.main_module === "tombstone.mjs")
+          state.workers[name].metadata.bindings.push({
+            name: "UNEXPECTED_SECRET",
+            type: "secret_text",
+          });
         if (state.tombstoneLoss && metadata.main_module === "tombstone.mjs") {
           state.tombstoneLoss = false;
           throw new Error("tombstone upload response lost");
@@ -891,9 +913,37 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.match(first.stderr, /tombstone upload response lost/);
     const partial = f.state().workers["crabbox-image-qualification-42-1"].metadata;
     assert.equal(partial.main_module, "tombstone.mjs");
+    assert.deepEqual(
+      partial.bindings.filter((b) => b.type === "secret_text"),
+      [
+        { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text" },
+        { name: "CRABBOX_SHARED_TOKEN", type: "secret_text" },
+      ],
+    );
     assert.equal(partial.bindings[0].props.deploymentHash, f.outputs.deployment_hash);
     const recovered = f.invoke("reap");
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.deepEqual(f.state().workers, {});
+  });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("normal cleanup refuses binding drift returned by tombstone upload", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneDrift: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /unowned or changed Worker/);
+    assert.ok(f.state().workers["crabbox-image-qualification-42-1"]);
+    assert.ok(
+      !f
+        .state()
+        .events.includes(
+          "DELETE api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/workers/scripts/crabbox-image-qualification-42-1",
+        ),
+    );
   });
 }

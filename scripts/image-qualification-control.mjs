@@ -1008,7 +1008,21 @@ export class Cloudflare {
   }
 
   async upload(name, moduleFile, metadata, extraModules = []) {
-    metadata = { ...metadata, tags: ownershipTags(this, name, metadata.bindings) };
+    let retained = [];
+    if (metadata.keep_bindings !== undefined) {
+      if (canonical(metadata.keep_bindings) !== canonical(["secret_text"]))
+        throw new Error("qualification upload may retain only verified secret bindings");
+      const existing = await verifyOwned(this, name);
+      retained = bindingShape(existing.bindings.filter((b) => b.type === "secret_text"));
+      if (retained.some((b) => metadata.bindings.some((n) => n.name === b.name)))
+        throw new Error("qualification upload cannot replace a retained secret binding");
+    }
+    // Secrets are retained by type without reading or resending their values.
+    // Bind ownership to the effective returned settings, including those names.
+    metadata = {
+      ...metadata,
+      tags: ownershipTags(this, name, [...metadata.bindings, ...retained]),
+    };
     const form = new FormData();
     form.set("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
     form.set(
@@ -1088,13 +1102,8 @@ export class Cloudflare {
   }
 
   async deleteScript(name) {
-    // References to the recovery controller must block its deletion.
-    const query = name === controllerName ? "" : "?force=true";
-    await this.request(
-      `/workers/scripts/${name}${query}`,
-      { method: "DELETE" },
-      { allow404: true },
-    );
+    // References to any owned caller must block ordinary deletion.
+    await this.request(`/workers/scripts/${name}`, { method: "DELETE" }, { allow404: true });
     if (
       (await this.request(`/workers/scripts/${name}/settings`, {}, { allow404: true })) !==
       undefined
@@ -2083,6 +2092,7 @@ async function deleteCandidate(cf, worker) {
       await cf.upload(worker, tombstone, {
         main_module: "tombstone.mjs",
         compatibility_date: "2026-09-03",
+        keep_bindings: ["secret_text"],
         bindings: existing.bindings.filter((binding) =>
           [
             "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
@@ -2096,6 +2106,7 @@ async function deleteCandidate(cf, worker) {
           deleted_classes: ["FleetDurableObject"],
         },
       });
+    await verifyOwned(cf, worker);
     await cf.deleteScript(worker);
   } finally {
     fs.rmSync(tombstone, { force: true });
