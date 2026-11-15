@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Managed SSH hosts: prepare public enrollment descriptors and install per-host expiring credentials, with admin-only revocation, reissue and exact-custody cleanup recovery, pinned host identity, and heartbeat/relay-only authorization. [PR 3169](https://github.com/openclaw/crabbox/pull/3169). Thanks @vincentkoc.
+
 ### Fixed
 
 - Boat: confirm absence and release the local lease when a snapshot-disabled sandbox disappears during native stop, while retaining claims if inventory or ownership is uncertain. [PR 3168](https://github.com/openclaw/crabbox/pull/3168). Thanks @vincentkoc.

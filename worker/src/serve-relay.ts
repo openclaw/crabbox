@@ -192,7 +192,8 @@ export class CloudflareServeRelayBackend implements ServeRelayBackend {
     return (await this.call(id, "alive")).ok;
   }
   async close(id: string): Promise<void> {
-    await this.call(id, "close", { method: "POST" });
+    const response = await this.call(id, "close", { method: "POST" });
+    if (!response.ok) throw new Error("serve_relay_close_failed");
   }
   async attach(id: string, role: "client" | "agent", _request: Request): Promise<Response> {
     return this.call(id, role, { headers: { upgrade: "websocket" } });

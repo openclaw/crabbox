@@ -23,34 +23,146 @@ network access remain available according to OS permissions. Do not grant the
 lease account sudo, Docker access, or host secrets. macOS enrollment is not
 supported by this runtime; direct macOS SSH remains supported.
 
-Use the existing coordinator login and organization authorization. Enrollment
-and eligibility changes require coordinator admin authentication. Host state is
-bound to the enrolling operator identity and coordinator URL. Keep credentials
-in the existing protected login store or trusted process environment, never in
-repository YAML. On Linux the default private state directory is
-`/var/lib/crabbox-host`; do not copy it between machines or delete it to recover
-capacity. One process lock fences agents across state directories on a machine.
+Prepare the machine without an operator login, then enroll its public descriptor
+from an administrator's workstation. The host receives a revocable credential
+that can only heartbeat for that host and attach its assigned SSH relays.
+It cannot list inventory, borrow leases, or perform admin operations.
+
+On the Linux host:
+
+```sh
+sudo crabbox host prepare --coordinator https://broker.example.com \
+  --name linux-builder --template tools-v1 --capabilities gpu,build > host.json
+```
+
+`prepare` persists a machine UUID and Ed25519 front-door key in protected local
+state before writing the public descriptor to stdout. The descriptor contains
+no credential or private key. Transfer only `host.json` to the admin workstation.
+On that workstation, choose an existing private directory outside repositories:
 
 ```sh
 crabbox login --url https://broker.example.com
-sudo --preserve-env=CRABBOX_COORDINATOR,CRABBOX_COORDINATOR_TOKEN,CRABBOX_OWNER \
-  crabbox host enroll --name linux-builder --template tools-v1 --capabilities gpu,build
-crabbox host list
-# Substitute the enrolled UUID; inventory starts disabled.
-crabbox host enable --id <host-uuid>
-sudo --preserve-env=CRABBOX_COORDINATOR,CRABBOX_COORDINATOR_TOKEN,CRABBOX_OWNER \
-  crabbox host serve
+crabbox host enroll --descriptor host.json \
+  --credential-out /secure/operator/host.credential.json
 ```
 
-Run the agent under an operator-managed service with the same protected state
-and identity. Credentials must be available in that service's context; a
-non-root user's login store is not automatically the root service's store.
-Only outbound coordinator HTTPS/WebSocket access is required. Enrollment alone
-is not a connectivity check: `host list` must report the agent online.
+Enrollment generates a random 256-bit secret locally and writes the protected
+credential file **before** sending its SHA-256 hash to the coordinator. A lost
+response is safe to retry with the same descriptor and output path. A changed
+hash, key, or enrollment metadata conflicts; an existing output file is never
+silently replaced with a new secret. Inventory starts disabled. Owner and
+organization come from the administrator's authenticated identity.
+
+Transfer the credential file through a private channel to the prepared host,
+then install it through stdin:
+
+```sh
+sudo crabbox host install --credential-stdin < /secure/operator/host.credential.json
+sudo crabbox host serve
+```
+
+Installation checks the UUID, public key, coordinator URL, credential generation,
+and the coordinator's authenticated enrollment receipt. It refuses replacement
+while local runtime or assignment custody remains. The credential file is
+sensitive; remove transferred copies when installation is verified. Keep the
+admin workstation's copy only while enrollment retries need it.
+
+From the admin workstation, verify the host is online before enabling it:
+
+```sh
+crabbox host list
+crabbox host enable --id <host-uuid>
+```
+
+Run the agent under an operator-managed service using the same protected state.
+Scoped hosts use only the installed host credential and bound coordinator URL;
+ambient user/admin login and token commands are not fallbacks. The default
+credential lifetime is 90 days; `--credential-ttl` accepts up to `8760h` (365 days).
+Expiry stops placement and relay access, and bounds the agent's local access
+deadline. The UUID and key binding identifies the prepared state; copying that
+entire private state can copy its authority, so it is not hardware attestation.
+
+On Linux the default private state directory is `/var/lib/crabbox-host`. Do not
+copy it between machines or delete it to recover capacity. One process lock
+fences agents across state directories. Only outbound coordinator HTTPS/WebSocket
+access is required. Enrollment alone is not a connectivity check.
+
+### Existing operator-authenticated hosts
+
+Existing `host enroll --name ... --template ...` and `host serve` deployments
+remain supported with their existing protected operator login. They do not gain
+scoped credentials automatically. A scoped host never accepts operator auth for
+heartbeat or relay attachment, including after expiry or revocation. Prepare a
+new clean enrollment to adopt the scoped flow; do not delete state that retains
+custody.
+
 `--template` is an operator-attested toolchain/environment revision, not a
 snapshot or containment attestation. Drain and remove/re-enroll a clean host to
 change its immutable enrollment metadata. Capabilities are exact-match labels,
 not automatically measured hardware claims.
+
+## Revocation and renewal
+
+`host revoke --id <host-uuid>` requires admin authorization. It immediately
+invalidates the host credential, disables placement, marks the host offline,
+and closes coordinator relays. A relay backend failure returns an incomplete
+result (503): the credential is already invalid, and exact relay IDs remain
+recorded so the same admin operation can retry closure. It preserves allocation, quarantine, and
+cleanup custody. Revocation does not claim that workload cleanup succeeded.
+
+For planned renewal, drain the host, end its leases, and wait for cleanup receipts
+until inventory is available. Then disable it and stop the agent. Reissue requires
+a disabled, drained host with no allocation or quarantine and the current
+credential generation from `host list`:
+
+```sh
+crabbox host drain --id <host-uuid>
+# Stop outstanding leases and wait for confirmed cleanup before continuing.
+crabbox host disable --id <host-uuid>
+crabbox host reissue --descriptor host.json --expected-generation 1 \
+  --credential-out /secure/operator/host-next.credential.json
+```
+
+Install the new file on the stopped host with `host install --credential-stdin`,
+restart `host serve`, verify online, then `host resume --id ...` and
+`host enable --id ...`. Reissue invalidates the previous generation immediately;
+retry a lost response with the same output file and expected generation.
+
+If revocation or expiry happened with outstanding custody, retain the private
+host state. On the admin workstation, `host revoke` returns the retained custody
+triple: lease ID, allocation generation, and access generation. Drain and disable
+the host, then stop that exact lease. A pending-cleanup result from `stop` means
+the coordinator has requested cleanup but still retains custody.
+
+```sh
+crabbox host revoke --id <host-uuid>
+crabbox host drain --id <host-uuid>
+crabbox stop <lease-id>
+crabbox host recover --descriptor host.json --expected-generation 1 \
+  --lease-id <lease-id> --allocation-generation 1 --access-generation 0 \
+  --credential-out /secure/operator/host-cleanup.credential.json
+```
+
+Use the exact generations from the revocation response. `recover` requires a
+disabled, drained host and an already-stopped lease whose cleanup is pending.
+Its credential lasts one hour by default (at most 24 hours), can only reconcile
+that exact cleanup assignment, and cannot prepare workloads, borrow, or attach
+relays. Issuing it does not settle custody or clear quarantine.
+
+Stop the host agent, install this credential through stdin, and restart the agent
+with its existing state. This is the only credential-install path that permits
+retained local custody: the lease ID and both generations must match, and local
+runtime, assignment, and report records remain unchanged. Native cleanup retries
+produce the normal exact-generation receipt. Successful cleanup alone settles
+custody; the cleanup credential can only replay that exact completed acknowledgement
+until expiry or reissue, so a lost response or failed local save can be retried.
+If that acknowledgement credential expires, repeat `recover` with the same lease
+and allocation/access generations and the current credential generation. The
+coordinator must still prove that exact completed cleanup, with no new allocation.
+Failed or stale receipts keep custody
+reserved. Then stop the agent and use normal `reissue` with the cleanup credential's
+generation to install a normal host credential. Missing or mismatched local state
+requires operator investigation; never delete state to manufacture a clean host.
 
 ## Borrowing
 
@@ -126,11 +238,14 @@ The Windows adapter requires the pinned MXC 0.8.0 executor and an agent running
 in the logged-in **interactive desktop context**:
 
 ```powershell
-crabbox host enroll --name windows-builder --template windows-tools-v1 --capabilities build
+cmd /c "crabbox host prepare --coordinator https://broker.example.com --name windows-builder --template windows-tools-v1 --capabilities build > host.json"
+# Enroll host.json on the admin workstation, then transfer the private credential.
+cmd /c "crabbox host install --credential-stdin < C:\Secure\host.credential.json"
 crabbox host serve --mxc-executable C:\Tools\mxc\wxc-exec.exe
 ```
 
-The agent validates the executable hash and `isolationSessionAvailable` before
+The `cmd /c` redirections preserve the JSON bytes on both Windows PowerShell and
+PowerShell 7. The agent validates the executable hash and `isolationSessionAvailable` before
 polling. Ordinary SSH network logon is not an MXC activation bridge; failed
 activation never falls back to host execution. Commands and sync terminate at
 an SSH endpoint started **inside** the MXC isolation session. Deprovision receipts settle the exact session/account; typed `stale_id`

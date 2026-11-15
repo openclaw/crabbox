@@ -38,3 +38,18 @@ func lockMachine() (func(), error) {
 	}
 	return func() { _ = lock.Close() }, nil
 }
+
+func verifyPrivateHostFile(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("host credential/state must be private")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("host credential/state owner mismatch")
+	}
+	return nil
+}
