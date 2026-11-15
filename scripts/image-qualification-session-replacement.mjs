@@ -54,7 +54,28 @@ export const replacementInitialState = (plan) =>
     sequence: 0,
   });
 
-export function validateReplacementPlan(plan) {
+// Only this known predecessor needs the provenance reconciliation correction.
+// Every other effect-bearing dependency must still match the current source.
+const recoveryPredecessor = "cecdf9b2a5e7a70fb7c2ff6e6dc6598db85b17900635fff5f52eb1d69ccdb994";
+export function replacementRecoverySources(plan, recovery) {
+  const expected = {
+    ...replacementSources(),
+    "image-qualification-session-replacement.mjs": recoveryPredecessor,
+  };
+  if (
+    !recovery ||
+    !/^[0-9a-f]{40}$/.test(recovery.sourceSha ?? "") ||
+    recovery.sourceSha === plan.sourceSha ||
+    recovery.originalSourceSha !== plan.sourceSha ||
+    !path.isAbsolute(recovery.originalRoot ?? "") ||
+    !equal(recovery.sources, expected) ||
+    !equal(plan.sources, expected)
+  )
+    fail();
+  return expected;
+}
+
+export function validateReplacementPlan(plan, sources = replacementSources()) {
   if (
     !plan ||
     plan.profile !== "idle-session-replacement/v1" ||
@@ -64,7 +85,7 @@ export function validateReplacementPlan(plan) {
     !/^[0-9a-f]{40}$/.test(plan.sourceSha ?? "") ||
     !/^[0-9a-f]{32}$/.test(plan.tokenId ?? "") ||
     !path.isAbsolute(plan.recoveryDirectory ?? "") ||
-    !equal(plan.sources, replacementSources()) ||
+    !equal(plan.sources, sources) ||
     !sha.test(plan.preCustodySha256 ?? "") ||
     !sha.test(plan.authoritySettingsSha256 ?? "") ||
     !sha.test(plan.authorityModule?.sha256 ?? "") ||
@@ -159,7 +180,14 @@ function custody(plan, value, now, version, before) {
   // This is an explicitly trusted operator assertion, not authenticated history.
 }
 
-export function verifyReplacementIdle(plan, proof, isolation, now, after = false) {
+export function verifyReplacementIdle(
+  plan,
+  proof,
+  isolation,
+  now,
+  after = false,
+  settingsSha256 = plan.authoritySettingsSha256,
+) {
   const { ownerPlan, state } = proof ?? {};
   validateIdlePlan(ownerPlan);
   if (
@@ -167,7 +195,8 @@ export function verifyReplacementIdle(plan, proof, isolation, now, after = false
     ownerPlan.tokenId !== plan.tokenId ||
     !equal(ownerPlan.isolation, isolation) ||
     !equal(ownerPlan.authorityModule, plan.authorityModule) ||
-    ownerPlan.authoritySettingsSha256 !== plan.authoritySettingsSha256 ||
+    !sha.test(settingsSha256 ?? "") ||
+    ownerPlan.authoritySettingsSha256 !== settingsSha256 ||
     (after && ownerPlan.attemptId !== plan.postIdleAttemptId) ||
     state?.profile !== ownerPlan.profile ||
     state?.planHash !== digest(canonical(ownerPlan)) ||
@@ -294,9 +323,13 @@ export async function replaceIdleSession(
     signal,
     workdir,
     claimIssuance = claimSessionIssuance,
+    recovery,
   },
 ) {
-  const admission = validateReplacementPlan(plan);
+  const admission = validateReplacementPlan(
+    plan,
+    recovery ? replacementRecoverySources(plan, recovery) : replacementSources(),
+  );
   const initialWall = now(),
     initialMono = performance.now(),
     wall = now;
@@ -310,6 +343,11 @@ export async function replaceIdleSession(
     state.integrity !== recordHash(state) ||
     !Number.isSafeInteger(state.sequence) ||
     state.sequence < 0 ||
+    (state.afterSettingsSha256 !== undefined && !sha.test(state.afterSettingsSha256)) ||
+    (state.recoverySourceSha !== undefined && state.recoverySourceSha !== recovery?.sourceSha) ||
+    (recovery &&
+      (mode === "deliver" ||
+        !["delivery-confirmed", "reseal-candidate", "resealed"].includes(state.phase))) ||
     ![
       "prepared",
       "issuance-intent",
@@ -383,7 +421,7 @@ export async function replaceIdleSession(
       fail();
     return time(value.expires_on);
   };
-  const fence = async (isolation) => {
+  const fence = async (isolation, after = false) => {
     api.admission = readAdmission({
       CLOUDFLARE_ACCOUNT_ID: isolation.accountId,
       QUALIFICATION_ISOLATION_JSON: JSON.stringify(isolation),
@@ -391,8 +429,19 @@ export async function replaceIdleSession(
     });
     await verifyAuthority(api);
     const settings = await api.settings(authorityName);
+    const settingsSha256 = digest(canonical(settings));
+    // Bulk-secret delivery can change this Cloudflare provenance annotation.
+    // Reconstruct ONLY the observed version_upload -> secret transition, then
+    // compare the entire original settings digest. No other metadata is ignored.
+    const beforeSettings = structuredClone(settings);
+    if (after && beforeSettings.annotations?.["workers/triggered_by"] === "secret")
+      beforeSettings.annotations["workers/triggered_by"] = "version_upload";
     if (
-      digest(canonical(settings)) !== plan.authoritySettingsSha256 ||
+      (settingsSha256 !== plan.authoritySettingsSha256 &&
+        (!after || digest(canonical(beforeSettings)) !== plan.authoritySettingsSha256)) ||
+      (after &&
+        state.phase !== "delivery-confirmed" &&
+        settingsSha256 !== (state.afterSettingsSha256 ?? plan.authoritySettingsSha256)) ||
       new Set(settings.bindings.map((b) => b.name)).size !== settings.bindings.length ||
       secretNames.some(
         (name) =>
@@ -439,6 +488,7 @@ export async function replaceIdleSession(
       (await api.latestVersion(authorityName)) !== isolation.authority.version
     )
       fail();
+    return settingsSha256;
   };
   const run = async (argv, childEnv, input) => {
     clock(mode === "deliver");
@@ -581,6 +631,8 @@ export async function replaceIdleSession(
     await persist("delivery-confirmed", { deliveryConfirmedAt: new Date(now()).toISOString() });
     return state;
   }
+  if (recovery && state.recoverySourceSha === undefined)
+    await persist(state.phase, { recoverySourceSha: recovery.sourceSha });
   // Reconciliation never issues credentials or repeats a delivery, even after a
   // lost successful response. Unknown delivery stays permanently unadmitted.
   await token();
@@ -601,22 +653,26 @@ export async function replaceIdleSession(
     fail();
   const isolation = structuredClone(plan.isolation);
   isolation.authority.version = observedVersion;
-  await fence(isolation);
+  const afterSettingsSha256 = await fence(isolation, true);
   if (state.phase === "delivery-confirmed")
     await persist("reseal-candidate", {
       afterVersion: observedVersion,
+      afterSettingsSha256,
       candidateIsolation: isolation,
     });
   if (mode === "inspect") return state;
   const proof = await readProof("post");
-  const observed = verifyReplacementIdle(plan, proof, isolation, now(), true);
+  const observed = verifyReplacementIdle(plan, proof, isolation, now(), true, afterSettingsSha256);
   if (observed < time(state.deliveryConfirmedAt)) fail();
   custody(plan, await readCustody("post"), now(), observedVersion, false);
   const recoveryStartedAt = now();
   await run(
     [
       plan.tools.node.path,
-      path.join(directory, "image-qualification-control.mjs"),
+      path.join(
+        recovery ? path.join(recovery.originalRoot, "scripts") : directory,
+        "image-qualification-control.mjs",
+      ),
       "idle-controller-recover",
       path.join(workdir, "post-idle"),
     ],
@@ -629,17 +685,18 @@ export async function replaceIdleSession(
     },
   );
   const recovered = await readProof("post");
-  verifyReplacementIdle(plan, recovered, isolation, now(), true);
+  verifyReplacementIdle(plan, recovered, isolation, now(), true, afterSettingsSha256);
   if (
     !equal(recovered.ownerPlan, proof.ownerPlan) ||
     recovered.state.sequence <= proof.state.sequence ||
     !(time(recovered.state.events.at(-1)?.at) >= recoveryStartedAt)
   )
     fail();
-  await fence(isolation);
+  await fence(isolation, true);
   await token();
   await persist("resealed", {
     afterVersion: observedVersion,
+    afterSettingsSha256,
     candidateIsolation: isolation,
     postIdleProofSha256: digest(canonical(proof)),
     recoveryProofSha256: digest(canonical(recovered)),
@@ -649,17 +706,58 @@ export async function replaceIdleSession(
 }
 
 export async function replacementCommand(args, env = process.env) {
-  if (args.length !== 2 || !["deliver", "inspect", "reseal"].includes(args[0])) fail();
+  if (
+    !["deliver", "inspect", "reseal"].includes(args[0]) ||
+    (args.length !== 2 &&
+      !(args.length === 4 && args[0] !== "deliver" && args[2] === "--original-source"))
+  )
+    fail();
   const workdir = path.resolve(args[1]);
   const plan = readPrivateJSON(path.join(workdir, "session-replacement-plan.json"));
-  validateReplacementPlan(plan);
   if (workdir !== plan.recoveryDirectory) fail();
   const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: root,
     encoding: "utf8",
   }).trim();
+  let recovery;
+  if (args.length === 4) {
+    const originalRoot = args[3];
+    if (!path.isAbsolute(originalRoot) || fs.realpathSync(originalRoot) !== originalRoot) fail();
+    const git = (cwd, argv) => execFileSync("git", argv, { cwd, encoding: "utf8" }).trim();
+    recovery = {
+      sourceSha,
+      originalRoot,
+      originalSourceSha: git(originalRoot, ["rev-parse", "HEAD"]),
+      sources: Object.fromEntries(
+        sourceFiles.map((name) => [
+          name,
+          digest(fs.readFileSync(path.join(originalRoot, "scripts", name))),
+        ]),
+      ),
+    };
+    replacementRecoverySources(plan, recovery);
+    if (
+      git(originalRoot, ["status", "--porcelain", "--untracked-files=all"]) ||
+      git(root, [
+        "diff",
+        "--name-only",
+        plan.sourceSha,
+        sourceSha,
+        "--",
+        ".",
+        ":(exclude)scripts/image-qualification-session-replacement.mjs",
+        ":(exclude)scripts/image-qualification-session-replacement.test.mjs",
+        ":(exclude)qualification/idle-session/README.md",
+      ])
+    )
+      fail();
+  }
+  validateReplacementPlan(
+    plan,
+    recovery ? replacementRecoverySources(plan, recovery) : replacementSources(),
+  );
   if (
-    plan.sourceSha !== sourceSha ||
+    (!recovery && plan.sourceSha !== sourceSha) ||
     env.QUALIFICATION_SESSION_SOURCE_SHA !== sourceSha ||
     env.QUALIFICATION_SESSION_PLAN_SHA256 !== digest(canonical(plan)) ||
     env.CLOUDFLARE_ACCOUNT_ID !== plan.isolation.accountId ||
@@ -692,6 +790,7 @@ export async function replacementCommand(args, env = process.env) {
           env,
           signal: stop.signal,
           workdir,
+          recovery,
           readCustody: (stage) => readPrivateJSON(path.join(workdir, `${stage}-custody.json`)),
           readProof: (stage) => ({
             ownerPlan: readPrivateJSON(

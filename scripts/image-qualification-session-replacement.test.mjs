@@ -24,13 +24,14 @@ import {
   verifyReplacementIdle,
   claimSessionIssuance,
   sessionChild,
+  replacementRecoverySources,
 } from "./image-qualification-session-replacement.mjs";
 
 const newVersion = "33333333-3333-4333-8333-333333333333";
 const hashState = ({ integrity: _integrity, ...value }) => digest(canonical(value));
 const sealed = (value) => ({ ...value, integrity: hashState(value) });
 
-function fixture(t) {
+function fixture(t, { secretProvenance = false } = {}) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "qualification-session-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const start = Date.now();
@@ -43,7 +44,10 @@ function fixture(t) {
     })),
   );
   f.record.authority.bindingDigest = digest(canonical(bindingShape(f.bindings)));
-  const settings = { bindings: f.bindings };
+  const settings = {
+    bindings: f.bindings,
+    ...(secretProvenance ? { annotations: { "workers/triggered_by": "version_upload" } } : {}),
+  };
   const model = {
     now: start + 1000,
     version,
@@ -138,6 +142,7 @@ function fixture(t) {
         assert.ok(!init.signal.aborted);
         model.delivery = JSON.parse(init.body);
         model.version = newVersion;
+        if (secretProvenance) settings.annotations["workers/triggered_by"] = "secret";
         if (model.lostDelivery) throw new Error("fake-secret-in-raw-error");
         return { success: true };
       }
@@ -249,7 +254,33 @@ function fixture(t) {
     const isolation = structuredClone(plan.isolation);
     isolation.authority.version = newVersion;
     post = makeProof(isolation, true);
+    post.ownerPlan.authoritySettingsSha256 = digest(canonical(settings));
+    post.state = sealed({
+      ...post.state,
+      planHash: digest(canonical(post.ownerPlan)),
+    });
     return post;
+  };
+  const prepareRecovery = () => {
+    plan.sources["image-qualification-session-replacement.mjs"] =
+      "cecdf9b2a5e7a70fb7c2ff6e6dc6598db85b17900635fff5f52eb1d69ccdb994";
+    context.recovery = {
+      sourceSha: "9".repeat(40),
+      originalSourceSha: plan.sourceSha,
+      originalRoot: dir,
+      sources: structuredClone(plan.sources),
+    };
+    state = sealed({
+      ...replacementInitialState(plan),
+      phase: "delivery-confirmed",
+      sequence: 3,
+      beforeVersion: version,
+      sessionExpiresAt: new Date(start + 12 * 3600_000).toISOString(),
+      deliveryConfirmedAt: new Date(model.now).toISOString(),
+    });
+    claimSessionIssuance(plan);
+    model.version = newVersion;
+    if (secretProvenance) settings.annotations["workers/triggered_by"] = "secret";
   };
   return {
     plan,
@@ -264,6 +295,7 @@ function fixture(t) {
     reset,
     authorizeEarlyReplacement,
     preparePost,
+    prepareRecovery,
     get state() {
       return state;
     },
@@ -272,6 +304,185 @@ function fixture(t) {
     },
   };
 }
+
+test("exact predecessor recovery preserves original plan/intent/clock and uses its idle owner", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  f.prepareRecovery();
+  const before = canonical(f.plan);
+  const intent = fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8");
+  await f.run("inspect");
+  assert.equal(f.state.recoverySourceSha, f.context.recovery.sourceSha);
+  assert.equal(f.state.phase, "reseal-candidate");
+  f.preparePost();
+  await f.run("reseal");
+  assert.equal(f.state.phase, "resealed");
+  assert.equal(f.state.enrollmentAdmitted, false);
+  assert.equal(canonical(f.plan), before);
+  assert.equal(fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8"), intent);
+  assert.equal(f.state.planHash, digest(before));
+  assert.equal(f.model.calls.filter((c) => c.method !== "GET").length, 0);
+  assert.equal(f.model.commands.length, 1);
+  assert.equal(
+    f.model.commands[0].argv[1],
+    path.join(f.dir, "scripts/image-qualification-control.mjs"),
+  );
+  assert.equal(f.model.commands[0].env.QUALIFICATION_IDLE_SOURCE_SHA, f.plan.sourceSha);
+});
+
+for (const [label, mutate] of Object.entries({
+  unknownPredecessor: (f) => {
+    f.plan.sources["image-qualification-session-replacement.mjs"] = "0".repeat(64);
+    f.context.recovery.sources = structuredClone(f.plan.sources);
+  },
+  changedOwner: (f) => {
+    f.context.recovery.sources["image-qualification-idle-controller.mjs"] = "0".repeat(64);
+  },
+  changedPlanDependency: (f) => {
+    f.plan.sources["image-qualification-control.mjs"] = "0".repeat(64);
+  },
+  unknownOriginal: (f) => {
+    f.context.recovery.originalSourceSha = "0".repeat(40);
+  },
+  sameSource: (f) => {
+    f.context.recovery.sourceSha = f.plan.sourceSha;
+  },
+  relativeOwner: (f) => {
+    f.context.recovery.originalRoot = "relative";
+  },
+})) {
+  test(`predecessor reconciliation rejects ${label} before effects`, async (t) => {
+    const f = fixture(t, { secretProvenance: true });
+    f.prepareRecovery();
+    mutate(f);
+    assert.throws(() => replacementRecoverySources(f.plan, f.context.recovery));
+    await assert.rejects(f.run("inspect"));
+    assert.equal(f.model.calls.length, 0);
+    assert.equal(f.model.commands.length, 0);
+  });
+}
+
+for (const phase of ["prepared", "issuance-intent", "delivery-intent"]) {
+  test(`predecessor reconciliation cannot promote ${phase} or issue a session`, async (t) => {
+    const f = fixture(t, { secretProvenance: true });
+    f.prepareRecovery();
+    await assert.rejects(f.run("deliver"));
+    Object.assign(f.state, sealed({ ...f.state, phase }));
+    await assert.rejects(f.run("inspect"));
+    assert.equal(f.model.calls.length, 0);
+    assert.equal(f.model.commands.length, 0);
+  });
+}
+
+test("predecessor reconciliation binds the recovery executor and preserves deadline refusal", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  f.prepareRecovery();
+  await f.run("inspect");
+  f.context.recovery.sourceSha = "8".repeat(40);
+  await assert.rejects(f.run("inspect"));
+  f.context.recovery.sourceSha = "9".repeat(40);
+  f.model.now = Date.parse(f.plan.recoveryStopsAt);
+  await assert.rejects(f.run("inspect"));
+  assert.equal(f.model.commands.length, 0);
+  assert.equal(f.model.calls.filter((c) => c.method !== "GET").length, 0);
+});
+
+test("confirmed secret provenance transition pins all raw post settings through recovery", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  await f.run("deliver");
+  assert.equal(f.settings.annotations["workers/triggered_by"], "secret");
+  const after = digest(canonical(f.settings));
+  assert.notEqual(after, f.plan.authoritySettingsSha256);
+  await f.run("inspect");
+  assert.equal(f.state.afterSettingsSha256, after);
+  assert.equal(f.plan.authoritySettingsSha256, f.pre.ownerPlan.authoritySettingsSha256);
+  f.preparePost();
+  await f.run("reseal");
+  assert.equal(f.state.phase, "resealed");
+  assert.equal(f.state.afterSettingsSha256, after);
+  assert.equal(f.state.enrollmentAdmitted, false);
+  assert.equal(f.model.commands.filter((c) => c.argv.includes("assume-role")).length, 1);
+  assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 1);
+  await assert.rejects(f.run("deliver"));
+});
+
+for (const [label, mutate] of Object.entries({
+  unexpectedProvenance: (f) => {
+    f.settings.annotations["workers/triggered_by"] = "upload";
+  },
+  anotherAnnotation: (f) => {
+    f.settings.annotations["workers/message"] = "changed";
+  },
+  removedAnnotations: (f) => {
+    delete f.settings.annotations;
+  },
+  logpush: (f) => {
+    f.settings.logpush = true;
+  },
+  compatibility: (f) => {
+    f.settings.compatibility_date = "2099-01-01";
+  },
+  secretShape: (f) => {
+    f.settings.bindings.find((b) => b.type === "secret_text").text = "fake-value";
+  },
+  module: (f) => {
+    f.model.module = { ...f.plan.authorityModule, sha256: "0".repeat(64) };
+  },
+  incomingClient: (f) => {
+    f.model.client = true;
+  },
+  publicExposure: (f) => {
+    f.model.exposure = { enabled: true };
+  },
+})) {
+  test(`secret provenance exception still refuses ${label} without replay`, async (t) => {
+    const f = fixture(t, { secretProvenance: true });
+    await f.run("deliver");
+    mutate(f);
+    await assert.rejects(f.run("inspect"));
+    assert.equal(f.state.phase, "delivery-confirmed");
+    assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 1);
+  });
+}
+
+test("provenance exception is unavailable before delivery", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  f.settings.annotations["workers/triggered_by"] = "secret";
+  await assert.rejects(f.run("deliver"));
+  assert.equal(f.model.commands.length, 0);
+  assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 0);
+});
+
+test("post idle evidence must bind full raw post settings, not the pre-delivery digest", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  await f.run("deliver");
+  await f.run("inspect");
+  f.preparePost();
+  f.post.ownerPlan.authoritySettingsSha256 = f.plan.authoritySettingsSha256;
+  f.post.state = sealed({ ...f.post.state, planHash: digest(canonical(f.post.ownerPlan)) });
+  await assert.rejects(f.run("reseal"));
+  assert.equal(f.state.phase, "reseal-candidate");
+});
+
+test("raw post settings stay pinned even if provenance reverts to original value", async (t) => {
+  const f = fixture(t, { secretProvenance: true });
+  await f.run("deliver");
+  await f.run("inspect");
+  f.settings.annotations["workers/triggered_by"] = "version_upload";
+  assert.equal(digest(canonical(f.settings)), f.plan.authoritySettingsSha256);
+  await assert.rejects(f.run("inspect"));
+  assert.equal(f.state.phase, "reseal-candidate");
+});
+
+test("unchanged legacy reseal state without a post digest remains exact", async (t) => {
+  const f = fixture(t);
+  await f.run("deliver");
+  await f.run("inspect");
+  delete f.state.afterSettingsSha256;
+  Object.assign(f.state, sealed(f.state));
+  f.preparePost();
+  await f.run("reseal");
+  assert.equal(f.state.phase, "resealed");
+});
 
 test("one scoped issuance/delivery, exact new version, independent owner recovery and resealing", async (t) => {
   const f = fixture(t);
