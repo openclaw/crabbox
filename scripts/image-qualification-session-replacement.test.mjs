@@ -667,7 +667,23 @@ ${mode === "success" ? "process.exit(0)" : "setInterval(()=>{},1000)"}`;
       const outcome = await observed;
       assert.equal(outcome.ok, mode === "success");
       if (!outcome.ok) assert.match(outcome.error.message, /refused/);
-      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      // Group absence is established by sessionChild. On macOS the killed
+      // orphan PID can briefly remain visible while the kernel finishes reaping;
+      // a successful existence check followed by an absent ps sample reproduced
+      // this race. Require bounded eventual PID absence, without another signal.
+      const reapBy = performance.now() + 1000;
+      let reaped = false;
+      do {
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          assert.equal(error.code, "ESRCH");
+          reaped = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      } while (performance.now() < reapBy);
+      assert.ok(reaped, `${mode}: killed descendant did not reap within one second`);
     }
   },
 );
