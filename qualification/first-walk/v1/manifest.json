@@ -34,12 +34,12 @@
     {
       "path": "worker/src/aws-qualification-authority.ts",
       "beforeSha256": "f2fdb23770dc47c0168b14195ab69f80fba62924ccc9edd9b724d354f163c1de",
-      "afterSha256": "f44bb73efd6a5b223a6c4d33b3d530ed541035cfe2947a088879973ef5e90ee5"
+      "afterSha256": "fe280557dc1ffa723d3540c5b0d59a071ae0f3d2b7dee4e0f85a365609def9d4"
     },
     {
       "path": "worker/src/aws-qualification-contract.ts",
       "beforeSha256": "51b712db3cb0fab331310370b6d71f508795156792c233b895394bc5efa7c763",
-      "afterSha256": "d7e814d1dd82254302bd8a031be9decaf62bb1aa794a08e3c24b874998f917b2"
+      "afterSha256": "714b2f48a81c49fffc9c34383e56ed1b3c4b44e94f27924a69cdae01595c9068"
     },
     {
       "path": "worker/src/bootstrap.generated.ts",
@@ -79,7 +79,7 @@
     {
       "path": "worker/test/aws-qualification-authority.test.ts",
       "beforeSha256": "50c0c7f751f0c7cd9b4211655f515d3593826c332dda35be2bb807e75b49f31c",
-      "afterSha256": "a504c1cbfb159a37fe62d0cd51a4736e885f3029789243b814b8e86993ff8425"
+      "afterSha256": "47d2f661059f29fcd8ce4906d4b74978978e02a20fe6f65c57cc92dfef8e87ad"
     },
     {
       "path": "worker/test/bootstrap-ownership.test.ts",
@@ -99,10 +99,10 @@
   ],
   "baselineCommit": "2ffcb1b97b92909020722fa61e4a5373ab1b8576",
   "baselineTree": "8e14b5d9b169525504443c0383c7eff49be6c82b",
-  "overlaySha256": "ae90bb74e894d2b6cbcf2ba1454701d3fb6aa371c7090e082d3754742c57a52c",
+  "overlaySha256": "18bdf87d0d7fb748a41bd885fd50aa15762671e124bfb259a48eb2ed7c84f111",
   "preservedCandidate": "7033f4a72d1494ade990e7d7af913c829da5fe18",
   "privateConfigSha256": "ce68fd010139528843b250d9d7acd1c6c55fb8a063c3cefa38c874dd4c1fc2bb",
   "recipeSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4",
-  "workerSourceSha256": "929e0d1ab0ccacbbecacf09727b06816b9c07ba640618a4b7df5edc86b5788b5",
+  "workerSourceSha256": "c1ab341e6ff820859f68f91718a52f4bf57957054a578b891898d71070186d9f",
   "authorityConfigSha256": "fdc03224a2c52aa95d1b3cfd2be70d7bd7db08afe9fd5f61ce63c22ec47b990d"
 }

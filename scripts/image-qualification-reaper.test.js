@@ -438,7 +438,8 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.result.result, "finalized");
     assert.equal(result.state.run, null);
     assert.equal(result.state.candidate, false);
-    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}?force=true`));
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}`));
+    assert.ok(result.state.deleteURLs.every((url) => !url.includes("?")));
     assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${controller}`));
     assert.deepEqual(calls(result.state), [
       "POST /discover",

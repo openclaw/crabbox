@@ -1008,7 +1008,21 @@ export class Cloudflare {
   }
 
   async upload(name, moduleFile, metadata, extraModules = []) {
-    metadata = { ...metadata, tags: ownershipTags(this, name, metadata.bindings) };
+    let retained = [];
+    if (metadata.keep_bindings !== undefined) {
+      if (canonical(metadata.keep_bindings) !== canonical(["secret_text"]))
+        throw new Error("qualification upload may retain only verified secret bindings");
+      const existing = await verifyOwned(this, name);
+      retained = bindingShape(existing.bindings.filter((b) => b.type === "secret_text"));
+      if (retained.some((b) => metadata.bindings.some((n) => n.name === b.name)))
+        throw new Error("qualification upload cannot replace a retained secret binding");
+    }
+    // Secrets are retained by type without reading or resending their values.
+    // Bind ownership to the effective returned settings, including those names.
+    metadata = {
+      ...metadata,
+      tags: ownershipTags(this, name, [...metadata.bindings, ...retained]),
+    };
     const form = new FormData();
     form.set("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
     form.set(
@@ -1041,7 +1055,9 @@ export class Cloudflare {
   async verifyController() {
     const version = await this.latestVersion(controllerName);
     await verifyOwned(this, controllerName);
+    if (this.beforeRecoveryCall) await this.beforeRecoveryCall("controller-content");
     const response = await fetch(`${this.base}/workers/scripts/${controllerName}/content/v2`, {
+      ...(this.recoverySignal ? { signal: this.recoverySignal(), redirect: "error" } : {}),
       headers: { authorization: `Bearer ${this.token}` },
     });
     if (!response.ok) throw new Error("controller source unavailable");
@@ -1086,13 +1102,8 @@ export class Cloudflare {
   }
 
   async deleteScript(name) {
-    // References to the recovery controller must block its deletion.
-    const query = name === controllerName ? "" : "?force=true";
-    await this.request(
-      `/workers/scripts/${name}${query}`,
-      { method: "DELETE" },
-      { allow404: true },
-    );
+    // References to any owned caller must block ordinary deletion.
+    await this.request(`/workers/scripts/${name}`, { method: "DELETE" }, { allow404: true });
     if (
       (await this.request(`/workers/scripts/${name}/settings`, {}, { allow404: true })) !==
       undefined
@@ -1581,11 +1592,13 @@ async function verifyExecutionDeployment(cf, expected) {
   };
 }
 
-async function controllerCall(cf, url, token, action, value = {}) {
-  await verifyAuthority(cf);
+async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
+  await verifyAuthority(authorityCF);
   await cf.verifyController();
+  if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
   const response = await fetch(`${url}/${action}`, {
     method: "POST",
+    ...(cf.recoverySignal ? { signal: cf.recoverySignal(action), redirect: "error" } : {}),
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
@@ -2079,6 +2092,7 @@ async function deleteCandidate(cf, worker) {
       await cf.upload(worker, tombstone, {
         main_module: "tombstone.mjs",
         compatibility_date: "2026-09-03",
+        keep_bindings: ["secret_text"],
         bindings: existing.bindings.filter((binding) =>
           [
             "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
@@ -2092,6 +2106,7 @@ async function deleteCandidate(cf, worker) {
           deleted_classes: ["FleetDurableObject"],
         },
       });
+    await verifyOwned(cf, worker);
     await cf.deleteScript(worker);
   } finally {
     fs.rmSync(tombstone, { force: true });
@@ -2303,9 +2318,12 @@ async function cleanupRun({
   requireProof = false,
   expected,
   initialQualificationFailure,
+  recovery,
 } = {}) {
-  const cf = await cloudflareFromEnv();
-  const token = required("QUALIFICATION_CONTROLLER_TOKEN");
+  const cf = recovery?.callerCF ?? (await cloudflareFromEnv());
+  const token = recovery?.token ?? required("QUALIFICATION_CONTROLLER_TOKEN");
+  const call = (url, action, value = {}) =>
+    controllerCall(cf, url, token, action, value, recovery?.authorityCF ?? cf);
   let controllerURL;
   let discovered;
   let idleProbe = false;
@@ -2318,10 +2336,20 @@ async function cleanupRun({
     if (settings !== undefined) {
       await cf.verifyController();
       controllerURL = await cf.enableSubdomain(controllerName);
-      if (transportProfile(settings.bindings ?? [])?.profile === "controller-v2")
+      if (!recovery && transportProfile(settings.bindings ?? [])?.profile === "controller-v2")
         await recoverTransportProbe(cf, controllerURL, token);
-      discovered = await controllerCall(cf, controllerURL, token, "discover");
+      discovered = await call(controllerURL, "discover");
     } else {
+      if (recovery) {
+        if (!recovery.state.retired)
+          throw new Error("original controller unavailable before verified retirement");
+        await recovery.verifyAbsentCallers();
+        return {
+          result: "finalized",
+          runId: expected.runId,
+          attestation: recovery.state.attestation,
+        };
+      }
       if (!reaper) throw new Error("qualification controller is unavailable");
       const candidates = await qualificationCandidates(cf);
       for (const candidate of candidates) {
@@ -2386,6 +2414,21 @@ async function cleanupRun({
     };
   }
   if (discovered.run === null) {
+    if (recovery) {
+      if (!recovery.state.attestation)
+        throw new Error("idle registry without original finalization proof");
+      await recovery.checkpoint("retired", recovery.state.attestation);
+      await deleteRelay(cf, relayNameForRun(expected.runId));
+      await deleteCandidate(cf, expected.candidateWorker);
+      await cf.verifyController();
+      await cf.deleteScript(controllerName);
+      await recovery.verifyAbsentCallers();
+      return {
+        result: "finalized",
+        runId: expected.runId,
+        attestation: recovery.state.attestation,
+      };
+    }
     try {
       for (const relay of await qualificationRelays(cf)) {
         await deleteRelay(cf, relay.worker);
@@ -2417,6 +2460,13 @@ async function cleanupRun({
     return { result: "idle", reason: "registry has no active run" };
   }
   const run = discovered.run;
+  if (recovery) {
+    for (const key of ["runId", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"])
+      if (run[key] !== expected[key]) throw new Error("recovery registry owner differs");
+    const original = await call(controllerURL, "attest", { runId: run.runId });
+    verifyAttestationIdentity(original, expected);
+    if (!original.finalizingAt) throw new Error("recovery owner is not already finalizing");
+  }
   const relayWorker = relayNameForRun(run.runId);
   let failure;
   let firstAttestation;
@@ -2448,10 +2498,10 @@ async function cleanupRun({
     // Persist the authority fence before revoking ingress. Requests already admitted
     // by the relay can then reach neither the signer nor a reopened run.
     await cf.verifyController();
-    await controllerCall(cf, controllerURL, token, "begin-finalization", { runId: run.runId });
+    await call(controllerURL, "begin-finalization", { runId: run.runId });
     await deleteRelay(cf, relayWorker);
-    await controllerCall(cf, controllerURL, token, "finalize", { runId: run.runId });
-    firstAttestation = await controllerCall(cf, controllerURL, token, "attest", {
+    await call(controllerURL, "finalize", { runId: run.runId });
+    firstAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
     });
     if (requireProof) {
@@ -2468,8 +2518,8 @@ async function cleanupRun({
       }
     }
     await deleteCandidate(cf, run.candidateWorker);
-    await controllerCall(cf, controllerURL, token, "finalize", { runId: run.runId });
-    const finalAttestation = await controllerCall(cf, controllerURL, token, "attest", {
+    await call(controllerURL, "finalize", { runId: run.runId });
+    const finalAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
     });
     if (
@@ -2478,6 +2528,16 @@ async function cleanupRun({
     ) {
       throw new Error("authority did not attest zero AWS residue");
     }
+    if (recovery) {
+      verifyAttestationIdentity(finalAttestation, expected, { finalized: true });
+      if (
+        canonical(finalAttestation.finalReceipt?.finalCounts) !==
+          canonical({ images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 }) ||
+        finalAttestation.finalReceipt?.failureCodes?.length
+      )
+        throw new Error("recovery final receipt is incomplete");
+      await recovery.checkpoint("finalized", finalAttestation);
+    }
     if (requireProof) {
       try {
         verifyAttestationIdentity(finalAttestation, expected, { finalized: true });
@@ -2485,11 +2545,13 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
-    await controllerCall(cf, controllerURL, token, "retire", { runId: run.runId });
-    const after = await controllerCall(cf, controllerURL, token, "discover");
+    await call(controllerURL, "retire", { runId: run.runId });
+    const after = await call(controllerURL, "discover");
     if (after.run !== null) throw new Error("authority registry still has an active run");
+    if (recovery) await recovery.checkpoint("retired", finalAttestation);
     await cf.verifyController();
     await cf.deleteScript(controllerName);
+    if (recovery) await recovery.verifyAbsentCallers();
     if (qualificationFailure) {
       return {
         result: "failed",
@@ -2515,6 +2577,12 @@ async function cleanupRun({
       attestation: firstAttestation,
     };
   }
+}
+
+// Only the dedicated transition owner supplies this dependency; normal reaper,
+// deployment and candidate paths never admit a second identity record.
+export async function recoverActiveQualification(recovery, expected) {
+  return await cleanupRun({ recovery, expected });
 }
 
 function readExecutionProof() {

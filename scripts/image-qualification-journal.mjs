@@ -2,9 +2,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
-export function readPrivateJSON(file) {
+export function readPrivateJSON(file, expectedSha256) {
   if (fs.realpathSync(path.dirname(file)) !== path.resolve(path.dirname(file)))
     throw new Error("qualification journal: symlink ancestry");
   const fd = fs.openSync(
@@ -21,7 +21,14 @@ export function readPrivateJSON(file) {
       stat.size > 1024 * 1024
     )
       throw new Error("qualification journal: invalid private file");
-    return JSON.parse(fs.readFileSync(fd, "utf8"));
+    const bytes = fs.readFileSync(fd);
+    if (
+      expectedSha256 !== undefined &&
+      (!/^[a-f0-9]{64}$/.test(expectedSha256) ||
+        createHash("sha256").update(bytes).digest("hex") !== expectedSha256)
+    )
+      throw new Error("qualification journal: receipt digest mismatch");
+    return JSON.parse(bytes.toString("utf8"));
   } finally {
     fs.closeSync(fd);
   }
