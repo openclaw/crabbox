@@ -118,7 +118,10 @@ for (const [name, change] of [
   test(`first-walk rejects ${name} before artifact admission`, async (t) => {
     const state = fixture(t);
     change(state);
-    await assert.rejects(verifyCandidateIdentity({ artifact: true }), /source admission/);
+    await assert.rejects(
+      verifyCandidateIdentity({ artifact: true }),
+      /source admission.*accepted ancestor SHA.*cleanup.*fresh dispatch.*current protected main/,
+    );
     assert.ok(state.requests.every((p) => !p.includes("/actions/") && !p.includes("/pulls/")));
   });
 }

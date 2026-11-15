@@ -449,7 +449,12 @@ export async function verifyCandidateIdentity({ artifact = false, cleanup = fals
         source.head?.repo?.full_name === repository &&
         source.head?.sha === candidateSha &&
         source.base?.sha === workflowSha);
-  if (!exact) throw new Error("source admission or protected workflow SHA changed");
+  if (!exact)
+    throw new Error(
+      firstWalk
+        ? "first-walk source admission failed: select a compatible accepted ancestor SHA; finish any existing-run cleanup before a fresh dispatch from current protected main"
+        : "pull request, candidate SHA, or protected workflow SHA changed",
+    );
   const identity = { candidateSha, ...(firstWalk ? {} : { number }), repository, workflowSha };
   if (!artifact) return identity;
   const candidate = await candidateArtifact(repository, workflowSha, defaultBranch);
