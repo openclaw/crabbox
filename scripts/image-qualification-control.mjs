@@ -8,25 +8,9 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
-  transportMarkers,
-  transportProfile,
-  transportBindingShape,
-  proveCandidateTransport,
-  settleCandidateTransport,
-} from "./image-qualification-transport.mjs";
-import { withQualificationJournal } from "./image-qualification-journal.mjs";
-import {
-  packageFile,
-  qualificationPackagePath,
-  qualificationIdentity,
-  prepareQualificationBuild,
-} from "./image-qualification-package.mjs";
-
-import {
   executorCredentialIdentity,
   readExecutorCredential,
 } from "./image-qualification-executor-token.mjs";
-
 import {
   readAdmission,
   bindingShape,
@@ -37,6 +21,20 @@ import {
   ownershipTags,
   verifyOwned,
 } from "./image-qualification-isolation.mjs";
+import { withQualificationJournal } from "./image-qualification-journal.mjs";
+import {
+  packageFile,
+  qualificationPackagePath,
+  qualificationIdentity,
+  prepareQualificationBuild,
+} from "./image-qualification-package.mjs";
+import {
+  transportMarkers,
+  transportProfile,
+  transportBindingShape,
+  proveCandidateTransport,
+  settleCandidateTransport,
+} from "./image-qualification-transport.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
@@ -417,8 +415,11 @@ async function candidateArtifact(repository, workflowSha, defaultBranch) {
 
 export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
   retainedImageFromEnv();
+  const firstWalk = process.env.QUALIFICATION_MODE === "first-walk";
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
-  const number = required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
+  const number = firstWalk ? undefined : required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
+  if (firstWalk && process.env.QUALIFICATION_PULL_REQUEST?.trim())
+    throw new Error("first-walk selects an accepted source commit, not a pull request");
   const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
   const workflowSha = required("QUALIFICATION_WORKFLOW_SHA", sha40);
   const workflowRef = required("GITHUB_WORKFLOW_REF");
@@ -430,20 +431,34 @@ export async function verifyCandidateIdentity({ artifact = false, cleanup = fals
     if (workflowRef !== expectedRef)
       throw new Error("workflow is not the protected default-branch copy");
   }
-  const [pull, branch] = await Promise.all([
-    github(`/repos/${repository}/pulls/${number}`),
+  const [source, branch] = await Promise.all([
+    github(
+      firstWalk
+        ? `/repos/${repository}/compare/${candidateSha}...${workflowSha}`
+        : `/repos/${repository}/pulls/${number}`,
+    ),
     github(`/repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`),
   ]);
   const exact =
-    pull.state === "open" &&
-    pull.head?.repo?.full_name === repository &&
-    pull.head?.sha === candidateSha &&
-    pull.base?.sha === workflowSha &&
-    branch.sha === workflowSha;
-  if (!exact) throw new Error("pull request, candidate SHA, or protected workflow SHA changed");
-  if (!artifact) return { candidateSha, number, repository, workflowSha };
+    branch.sha === workflowSha &&
+    (firstWalk
+      ? source.base_commit?.sha === candidateSha &&
+        source.merge_base_commit?.sha === candidateSha &&
+        source.status === (candidateSha === workflowSha ? "identical" : "ahead")
+      : source.state === "open" &&
+        source.head?.repo?.full_name === repository &&
+        source.head?.sha === candidateSha &&
+        source.base?.sha === workflowSha);
+  if (!exact)
+    throw new Error(
+      firstWalk
+        ? "first-walk source admission failed: select a compatible accepted ancestor SHA; finish any existing-run cleanup before a fresh dispatch from current protected main"
+        : "pull request, candidate SHA, or protected workflow SHA changed",
+    );
+  const identity = { candidateSha, ...(firstWalk ? {} : { number }), repository, workflowSha };
+  if (!artifact) return identity;
   const candidate = await candidateArtifact(repository, workflowSha, defaultBranch);
-  return { candidateSha, number, repository, workflowSha, ...candidate };
+  return { ...identity, ...candidate };
 }
 
 function filesUnder(directory, label = "artifact") {

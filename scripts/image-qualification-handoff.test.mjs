@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
+
 import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
 
@@ -69,6 +70,13 @@ function installAPI(file) {
         });
       }
       if (route.endsWith("/commits/main")) return json({ sha: workflowSha });
+      if (route === `/repos/example/repo/compare/${candidateSha}...${workflowSha}`) {
+        return json({
+          status: "ahead",
+          base_commit: { sha: candidateSha },
+          merge_base_commit: { sha: state.rejectSource ? "0".repeat(40) : candidateSha },
+        });
+      }
       if (route.endsWith("/actions/runs/42")) {
         return json({
           id: 42,
@@ -368,7 +376,7 @@ function fixture(t, mode = "retained") {
     GITHUB_RUN_ID: "42",
     GITHUB_RUN_ATTEMPT: "1",
     GITHUB_WORKFLOW_REF: "example/repo/.github/workflows/image-qualification.yml@refs/heads/main",
-    QUALIFICATION_PULL_REQUEST: "7",
+    QUALIFICATION_PULL_REQUEST: mode === "first-walk" ? "" : "7",
     QUALIFICATION_CANDIDATE_SHA: candidateSha,
     QUALIFICATION_WORKFLOW_SHA: workflowSha,
     QUALIFICATION_DEFAULT_BRANCH: "main",
@@ -467,6 +475,22 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
+  test("first-walk source-admission failure still fences and settles the admitted run", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    assert.equal(f.invoke("deploy").status, 0);
+    assert.equal(f.invoke("arm", f.armEnv()).status, 0);
+    assert.ok(f.state().events.every((event) => !event.includes("/pulls/")));
+    f.update({ rejectSource: true });
+    const result = f.invoke("finalize", f.armEnv());
+    assert.equal(result.status, 1, "admission drift must remain qualification failure");
+    assert.match(result.stderr, /source admission/);
+    assert.equal(f.state().finalized, true);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
+    assert.ok(f.state().events.some((event) => event.endsWith("/begin-finalization")));
+  });
+
   for (const phase of ["before", "after"])
     test(`failed private upload ${phase} create settles with empty deploy outputs`, (t) => {
       const f = fixture(t, "first-walk");

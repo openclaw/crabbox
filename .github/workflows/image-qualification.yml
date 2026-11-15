@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       pull_request:
-        description: Open same-repository pull request number
-        required: true
+        description: Mint/retained only, open same-repository pull request number; leave blank for first-walk
+        required: false
         type: string
       candidate_sha:
-        description: Exact 40-character candidate commit SHA
+        description: Exact 40-character source SHA; first-walk requires an ancestor of protected main
         required: true
         type: string
       mode:
@@ -72,7 +72,7 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Validate protected workflow and open pull request
+      - name: Validate protected workflow and exact source admission
         id: authorize
         env:
           GH_TOKEN: ${{ github.token }}
