@@ -90,6 +90,7 @@ function fixture(t) {
     noActiveWorkflowWriters: true,
     previousRunsSettled: true,
     fallbackReady: true,
+    ...(plan.allowUnexpiredSessionReplacement === true ? { previousSessionUseStopped: true } : {}),
   });
   const preCustody = makeCustody(version);
   plan.preCustodySha256 = digest(canonical(preCustody));
@@ -235,6 +236,13 @@ function fixture(t) {
   const reset = () => {
     state = replacementInitialState(plan);
   };
+  const authorizeEarlyReplacement = () => {
+    plan.previousSessionExpiresAt = new Date(start + 5 * 3600_000).toISOString();
+    plan.allowUnexpiredSessionReplacement = true;
+    preCustody.previousSessionUseStopped = true;
+    plan.preCustodySha256 = digest(canonical(preCustody));
+    reset();
+  };
   const run = (mode) => replaceIdleSession(plan, state, { ...context, mode });
   const preparePost = () => {
     model.now += 1000;
@@ -254,6 +262,7 @@ function fixture(t) {
     start,
     run,
     reset,
+    authorizeEarlyReplacement,
     preparePost,
     get state() {
       return state;
@@ -304,12 +313,106 @@ test("one scoped issuance/delivery, exact new version, independent owner recover
   }
 });
 
+test("authorized idle replacement completes while the old session may remain valid", async (t) => {
+  const f = fixture(t);
+  f.authorizeEarlyReplacement();
+  await f.run("deliver");
+  assert.equal(f.state.previousSessionExpiresAt, f.plan.previousSessionExpiresAt);
+  assert.equal(f.state.unexpiredSessionReplacement, true);
+  assert.equal(
+    f.model.saves.find((s) => s.phase === "issuance-intent").unexpiredSessionReplacement,
+    true,
+  );
+  assert.ok(Date.parse(f.state.previousSessionExpiresAt) > f.model.now);
+  await assert.rejects(f.run("deliver"));
+  await f.run("inspect");
+  f.preparePost();
+  await f.run("reseal");
+  assert.equal(f.state.phase, "resealed");
+  assert.equal(f.state.enrollmentAdmitted, false);
+  assert.equal(f.state.candidateIsolation.authority.version, newVersion);
+  assert.deepEqual(
+    f.state.candidateIsolation.authority.namespaces,
+    f.plan.isolation.authority.namespaces,
+  );
+  assert.equal(f.model.commands.filter((c) => c.argv.includes("assume-role")).length, 1);
+  assert.equal(
+    f.model.commands.filter((c) => c.argv.includes("idle-controller-recover")).length,
+    1,
+  );
+  assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 1);
+});
+
+for (const [label, mutate] of Object.entries({
+  missingAuthorization: (f) => {
+    delete f.plan.allowUnexpiredSessionReplacement;
+  },
+  deniedAuthorization: (f) => {
+    f.plan.allowUnexpiredSessionReplacement = false;
+  },
+  malformedAuthorization: (f) => {
+    f.plan.allowUnexpiredSessionReplacement = "true";
+  },
+  missingStoppedUse: (f) => {
+    delete f.preCustody.previousSessionUseStopped;
+  },
+  ongoingUse: (f) => {
+    f.preCustody.previousSessionUseStopped = false;
+  },
+  activeCaller: (f) => {
+    f.model.client = true;
+  },
+  activeRun: (f) => {
+    f.pre.state = sealed({ ...f.pre.state, discovery: "active-or-unknown" });
+  },
+}))
+  test(`early replacement refuses ${label} before issuance`, async (t) => {
+    const f = fixture(t);
+    f.authorizeEarlyReplacement();
+    mutate(f);
+    f.plan.preCustodySha256 = digest(canonical(f.preCustody));
+    f.reset();
+    await assert.rejects(f.run("deliver"));
+    assert.equal(f.model.commands.length, 0);
+    assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 0);
+  });
+
+test("early replacement rechecks stopped previous-session use before delivery and resealing", async (t) => {
+  for (const stage of ["before-delivery", "before-reseal"]) {
+    const f = fixture(t);
+    f.authorizeEarlyReplacement();
+    if (stage === "before-delivery") {
+      f.model.command = async (argv) => {
+        if (argv.includes("get-caller-identity")) delete f.preCustody.previousSessionUseStopped;
+      };
+      await assert.rejects(f.run("deliver"));
+      assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 0);
+    } else {
+      await f.run("deliver");
+      f.preparePost();
+      const read = f.context.readCustody;
+      f.context.readCustody = async (name) => ({
+        ...(await read(name)),
+        previousSessionUseStopped: false,
+      });
+      await assert.rejects(f.run("reseal"));
+      assert.notEqual(f.state.phase, "resealed");
+      assert.equal(f.state.enrollmentAdmitted, undefined);
+      assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 1);
+    }
+  }
+});
+
 for (const [label, mutate] of Object.entries({
   source: (f) => {
     f.plan.sources["image-qualification-control.mjs"] = "0".repeat(64);
   },
   futureOldSession: (f) => {
     f.plan.previousSessionExpiresAt = new Date(f.start + 60000).toISOString();
+  },
+  invalidOldSessionExpiry: (f) => {
+    f.plan.previousSessionExpiresAt = "invalid";
+    f.plan.allowUnexpiredSessionReplacement = true;
   },
   namespace: (f) => {
     f.plan.isolation.authority.namespaces[0].id = "0".repeat(32);
@@ -397,26 +500,28 @@ test("exclusive issuance marker prevents minting after state loss or a fresh pro
   assert.match(child.stderr, /EEXIST/);
 });
 
-for (const stage of ["issuance", "delivery", "confirmed-save"])
-  test(`uncertain ${stage} cannot reissue/redeliver/admit`, async (t) => {
-    const f = fixture(t);
-    if (stage === "issuance")
-      f.model.command = async (argv) => {
-        if (argv.includes("assume-role")) throw new Error("lost STS response");
-      };
-    if (stage === "delivery") f.model.lostDelivery = true;
-    if (stage === "confirmed-save")
-      f.model.save = async (next) => {
-        if (next.phase === "delivery-confirmed") throw new Error("lost durable acknowledgement");
-      };
-    await assert.rejects(f.run("deliver"));
-    await assert.rejects(f.run("deliver"));
-    const count = f.model.commands.length;
-    await f.run("inspect");
-    assert.equal(f.state.admissionDenied, true);
-    assert.equal(f.state.candidateIsolation, undefined);
-    assert.equal(f.model.commands.length, count);
-  });
+for (const early of [false, true])
+  for (const stage of ["issuance", "delivery", "confirmed-save"])
+    test(`uncertain ${stage} cannot reissue/redeliver/admit${early ? " during early replacement" : ""}`, async (t) => {
+      const f = fixture(t);
+      if (early) f.authorizeEarlyReplacement();
+      if (stage === "issuance")
+        f.model.command = async (argv) => {
+          if (argv.includes("assume-role")) throw new Error("lost STS response");
+        };
+      if (stage === "delivery") f.model.lostDelivery = true;
+      if (stage === "confirmed-save")
+        f.model.save = async (next) => {
+          if (next.phase === "delivery-confirmed") throw new Error("lost durable acknowledgement");
+        };
+      await assert.rejects(f.run("deliver"));
+      await assert.rejects(f.run("deliver"));
+      const count = f.model.commands.length;
+      await f.run("inspect");
+      assert.equal(f.state.admissionDenied, true);
+      assert.equal(f.state.candidateIsolation, undefined);
+      assert.equal(f.model.commands.length, count);
+    });
 
 for (const [label, mutate] of Object.entries({
   principal: (f) => {

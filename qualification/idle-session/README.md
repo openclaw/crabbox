@@ -1,4 +1,4 @@
-# Idle qualification authority: replace an expired AWS session
+# Idle qualification authority: replace an AWS session
 
 This operator-only adapter changes no production runtime, bootstrap recipe,
 workflow or automatic deployment path. It is not a performance repair. It uses
@@ -49,9 +49,14 @@ records; do not commit or upload them as public artifacts.
 - `tools` with exactly `aws` and `node`, each `{path,sha256}`. Paths must be
   canonical absolute regular files. Pin the actual Node executable;
 - ISO timestamps `startsAt`, `deliveryStopsAt` (start +20 minutes),
-  `recoveryStopsAt` (start +60 minutes), `previousSessionExpiresAt` (no later
-  than start), `cycleRecoveryBy` (after recovery, no later than start +8 hours),
-  `authorityRetentionEndsAt` (at least cycle recovery).
+  `recoveryStopsAt` (start +60 minutes), `previousSessionExpiresAt`,
+  `cycleRecoveryBy` (after recovery, no later than start +8 hours),
+  `authorityRetentionEndsAt` (at least cycle recovery);
+- optional boolean `allowUnexpiredSessionReplacement`. Unless explicitly `true`,
+  `previousSessionExpiresAt` must be no later than `startsAt`. Early replacement
+  additionally requires stopped-use confirmation in both custody records below.
+  Replacing the installed credentials does not revoke the previous session; it
+  remains valid until its recorded expiry.
 
 The plan hash is `digest(canonical(plan))`, not the serialized file hash. Node and
 AWS CLI installations, their dependencies, the operator host and its administrators
@@ -66,6 +71,10 @@ writer.
 (no older than 15 minutes), and all of these true:
 `continuousExclusiveCustody`, `noConcurrentWritersOrCallers`,
 `noActiveWorkflowWriters`, `previousRunsSettled`, `fallbackReady`.
+When `previousSessionExpiresAt` is later than `startsAt`, both records must also
+set `previousSessionUseStopped: true`, confirming previous-session consumers have
+stopped. This is required in addition to the plan's explicit opt-in and all idle,
+settlement and exclusive-custody checks.
 The pre record is frozen by `preCustodySha256`. These are explicitly trusted
 operator assertions. They require exclusive writer/caller custody throughout;
 management readbacks cannot provide an atomic concurrency lock. The operator must
