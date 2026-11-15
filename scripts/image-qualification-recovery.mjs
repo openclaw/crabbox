@@ -223,7 +223,15 @@ export async function recoverTransition(
       ...(signal ? [signal] : []),
     ]);
   const moduleIdentity = (cf, name) =>
-    cf.request(`/workers/scripts/${name}/content/v2`, {}, { contentIdentityBytes: 1024 * 1024 });
+    cf.request(
+      `/workers/scripts/${name}/content/v2`,
+      {},
+      {
+        // The original bundled candidate is larger than 1MiB. Other owned modules
+        // retain their smaller bound; the shared reader still defaults to 64KiB.
+        contentIdentityBytes: (name === plan.binding.candidateWorker ? 4 : 1) * 1024 * 1024,
+      },
+    );
   const fence = async () => {
     check();
     await verifyAuthority(authorityCF);

@@ -45,7 +45,7 @@ export async function readProbeResponse(response, maximum = 8192) {
 }
 
 export async function probeContentIdentity(response, maximum = 64 * 1024) {
-  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 1024 * 1024)
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 4 * 1024 * 1024)
     fail("invalid content bound");
   const body = await responseBytes(response, maximum);
   const form = await new Response(body, {

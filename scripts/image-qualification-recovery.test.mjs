@@ -214,7 +214,13 @@ function fixture() {
         ];
       if (route === "/workers/subdomain") return { subdomain: "example" };
       if (tail === "/settings") return w?.settings;
-      if (tail === "/content/v2") return w.module;
+      if (tail === "/content/v2") {
+        assert.equal(
+          options.contentIdentityBytes,
+          (name === binding.candidateWorker ? 4 : 1) * 1024 * 1024,
+        );
+        return w.module;
+      }
       if (tail === "/deployments")
         return { deployments: [{ versions: [{ version_id: w.version, percentage: 100 }] }] };
       if (tail === "/subdomain") return { enabled: Boolean(w?.public), previews_enabled: false };

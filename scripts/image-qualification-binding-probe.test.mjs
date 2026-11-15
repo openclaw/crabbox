@@ -407,6 +407,46 @@ test("bounded streamed bodies preserve multipart identity and reject excess", as
   await assert.rejects(readProbeResponse(new Response("x".repeat(8193))), /exceeds bound/);
 });
 
+test("large original bundles require an explicit bounded module read", async (t) => {
+  const source = Buffer.alloc(1_816_278, "x");
+  t.mock.method(globalThis, "fetch", async () => {
+    // Use an inert wire body: Node's FormData producer can enqueue after a
+    // deliberately cancelled oversized stream, obscuring the reader result.
+    return new Response(
+      Buffer.concat([
+        Buffer.from(
+          '--fixture\r\nContent-Disposition: form-data; name="candidate.js"; filename="candidate.js"\r\nContent-Type: application/javascript\r\n\r\n',
+        ),
+        source,
+        Buffer.from("\r\n--fixture--\r\n"),
+      ]),
+      { headers: { "content-type": "multipart/form-data; boundary=fixture" } },
+    );
+  });
+  const cf = new Cloudflare("a".repeat(32), "synthetic-only");
+  await assert.rejects(
+    cf.request("/content/v2", {}, { probeContentIdentity: true }),
+    /exceeds bound/,
+  );
+  await assert.rejects(
+    cf.request("/content/v2", {}, { contentIdentityBytes: 1024 * 1024 }),
+    /exceeds bound/,
+  );
+  assert.deepEqual(await cf.request("/content/v2", {}, { contentIdentityBytes: 4 * 1024 * 1024 }), {
+    module: "candidate.js",
+    count: 1,
+    sha256: digest(source),
+  });
+  await assert.rejects(
+    probeContentIdentity(new Response("x".repeat(4 * 1024 * 1024 + 1)), 4 * 1024 * 1024),
+    /exceeds bound/,
+  );
+  await assert.rejects(
+    probeContentIdentity(new Response("unused"), 4 * 1024 * 1024 + 1),
+    /invalid content bound/,
+  );
+});
+
 test("journal is private, durable, exclusive and rejects symlink custody", async (t) => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "binding-probe-test-")));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
