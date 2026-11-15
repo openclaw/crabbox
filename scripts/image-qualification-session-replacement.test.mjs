@@ -1,3 +1,4 @@
+/* eslint-disable no-await-in-loop -- Failure/recovery sequences and process settlement deliberately run in order. */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -26,7 +27,7 @@ import {
 } from "./image-qualification-session-replacement.mjs";
 
 const newVersion = "33333333-3333-4333-8333-333333333333";
-const hashState = ({ integrity, ...value }) => digest(canonical(value));
+const hashState = ({ integrity: _integrity, ...value }) => digest(canonical(value));
 const sealed = (value) => ({ ...value, integrity: hashState(value) });
 
 function fixture(t) {
@@ -579,7 +580,7 @@ test("real management client sends one fixed-endpoint bounded request without pe
     2,
     "only STS and identity children; no delivery CLI/dotenv/logs",
   );
-  assert.deepEqual(fs.readdirSync(f.dir).sort(), [
+  assert.deepEqual(fs.readdirSync(f.dir).toSorted(), [
     "aws.json",
     "node.json",
     "session-issuance-intent.json",

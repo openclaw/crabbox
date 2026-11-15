@@ -1,3 +1,4 @@
+/* eslint-disable no-await-in-loop -- Effect ordering, pagination and process settlement must stay sequential. */
 // Operator tooling only. Registry truth remains with the existing private owner.
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -27,7 +28,7 @@ const fail = () => {
   );
 };
 const time = (v) => (typeof v === "string" ? Date.parse(v) : NaN);
-const recordHash = ({ integrity, ...v }) => digest(canonical(v));
+const recordHash = ({ integrity: _integrity, ...v }) => digest(canonical(v));
 const seal = (v) => ({ ...v, integrity: recordHash(v) });
 const sourceFiles = [
   "image-qualification-session-replacement.mjs",
@@ -84,7 +85,7 @@ export function validateReplacementPlan(plan) {
     QUALIFICATION_ISOLATION_SHA256: digest(canonical(plan.isolation)),
   });
   if (
-    !equal(Object.keys(plan.tools ?? {}).sort(), ["aws", "node"]) ||
+    !equal(Object.keys(plan.tools ?? {}).toSorted(), ["aws", "node"]) ||
     Object.values(plan.tools).some(
       (tool) => !path.isAbsolute(tool.path ?? "") || !sha.test(tool.sha256 ?? ""),
     )
@@ -120,11 +121,11 @@ export function claimSessionIssuance(plan) {
   } finally {
     fs.closeSync(fd);
   }
-  const directory = fs.openSync(plan.recoveryDirectory, "r");
+  const directoryFd = fs.openSync(plan.recoveryDirectory, "r");
   try {
-    fs.fsyncSync(directory);
+    fs.fsyncSync(directoryFd);
   } finally {
-    fs.closeSync(directory);
+    fs.closeSync(directoryFd);
   }
 }
 
@@ -412,10 +413,10 @@ export async function replaceIdleSession(
       fail();
     for (const name of names)
       if (name !== authorityName) {
-        const settings = await api.settings(name);
+        const clientSettings = await api.settings(name);
         if (
-          !Array.isArray(settings.bindings) ||
-          settings.bindings.some(
+          !Array.isArray(clientSettings.bindings) ||
+          clientSettings.bindings.some(
             (b) =>
               b.service === authorityName ||
               b.script_name === authorityName ||
