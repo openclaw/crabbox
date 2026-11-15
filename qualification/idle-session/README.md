@@ -120,6 +120,13 @@ do not blindly remove it while a process or effect might still be active.
 even if a new version exists. Known command success still requires exact new
 single-version readback, unchanged raw module, full settings, namespaces and
 private exposure, and no foreign clients. Preserve the original admission.
+Before delivery the full raw settings digest must match exactly. After confirmed
+delivery, only Cloudflare's `annotations["workers/triggered_by"]` transition from
+`version_upload` to `secret` is also accepted: restoring that one value must
+reproduce the original full digest. Other annotations and all configuration
+remain checked. The first accepted inspection records `afterSettingsSha256`, the
+full raw post-delivery settings digest. Later inspection and recovery must match
+that exact digest, including the provenance annotation.
 
 After creating the post proof through the existing idle owner, `reseal` runs
 `idle-controller-recover` in a separate process using its original directory and
@@ -130,6 +137,40 @@ or proof that AWS execution will work. The independent source/artifact/handoff,
 credential applicability, protected approvals and finite observation-cycle gates
 remain required. No automatic rotation or renewal exists; recovery does not
 restore expired credentials or delete namespaces.
+
+The post-idle owner's plan must use `afterSettingsSha256` for its
+`authoritySettingsSha256`; the original pre-idle plan and session plan retain
+their original digest. Freeze the post plan only after inspection succeeds.
+Changing this helper does not authorize rewriting an in-flight operation's
+source pins, plan, intent or deadlines.
+
+### Reconcile a confirmed predecessor delivery
+
+For the predecessor affected by the provenance mismatch, the corrected CLI has
+one recovery-only option:
+
+```sh
+node scripts/image-qualification-session-replacement.mjs inspect /absolute/private-attempt --original-source /absolute/original-clean-checkout
+node scripts/image-qualification-session-replacement.mjs reseal /absolute/private-attempt --original-source /absolute/original-clean-checkout
+```
+
+Use separately accepted corrected source and set `QUALIFICATION_SESSION_SOURCE_SHA`
+to that executor's commit. Keep `QUALIFICATION_SESSION_PLAN_SHA256` bound to the
+original plan. The original checkout must be clean, canonical, at the original
+plan's commit, and contain the exact supported predecessor helper. Every other
+effect-bearing dependency must match the corrected executor. The complete commit
+trees may differ only in this helper, its test and this README. Other source
+changes require separate compatibility work; this is not a general migration.
+
+Only an existing `delivery-confirmed`, `reseal-candidate` or `resealed` journal is
+accepted. Prepared or uncertain issuance/delivery cannot use this option; it
+cannot issue or deliver credentials. The original exclusive issuance marker,
+plan hash and all deadlines remain mandatory. The journal records and pins the
+corrected `recoverySourceSha` before reconciliation. Further calls must use that
+same recovery executor. Create the post-idle proof with the original checkout
+and its original source identity, using the newly inspected raw settings digest.
+Independent recovery also executes that exact original idle owner. The option
+does not extend an expired recovery deadline or grant enrollment permission.
 
 ## Credential-free checks
 
