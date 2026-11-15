@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readPrivateJSON } from "./image-qualification-journal.mjs";
 import test from "node:test";
-import { Cloudflare, recoverActiveQualification } from "./image-qualification-control.mjs";
+import { pathToFileURL } from "node:url";
+
 import {
-  validateRecoveryPlan,
-  initialRecoveryState,
-  recoverTransition,
-} from "./image-qualification-recovery.mjs";
+  fixtureAdmission,
+  ownedSettings,
+  controllerContent,
+  version,
+} from "./fixtures/qualification-isolation.mjs";
+import { Cloudflare, recoverActiveQualification } from "./image-qualification-control.mjs";
 import {
   authorityName,
   controllerName,
@@ -17,16 +20,16 @@ import {
   canonical,
   digest,
 } from "./image-qualification-isolation.mjs";
+import { readPrivateJSON } from "./image-qualification-journal.mjs";
 import {
-  fixtureAdmission,
-  ownedSettings,
-  controllerContent,
-  version,
-} from "./fixtures/qualification-isolation.mjs";
+  validateRecoveryPlan,
+  initialRecoveryState,
+  recoverTransition,
+} from "./image-qualification-recovery.mjs";
 
-function fixture() {
+function fixture(options = {}) {
   const original = fixtureAdmission();
-  const sourceSha = "e".repeat(40),
+  const sourceSha = options.sourceSha ?? "e".repeat(40),
     hash = "b".repeat(64),
     start = Date.parse("2026-11-15T00:00:00Z");
   const binding = {
@@ -57,7 +60,8 @@ function fixture() {
   });
   corrected.authority.bindingDigest = digest(canonical(bindingShape(authorityBindings)));
   const controllerSource = fs.readFileSync(
-    new URL("./image-qualification-controller-worker.mjs", import.meta.url),
+    options.controllerSource ??
+      new URL("./image-qualification-controller-worker.mjs", import.meta.url),
     "utf8",
   );
   const workers = {
@@ -139,8 +143,8 @@ function fixture() {
   };
   const events = [],
     saved = [];
-  let active = true,
-    finalized = false,
+  let active = options.active ?? true,
+    finalized = options.finalized ?? false,
     clock = start + 120 * 60_000;
   let loseUpload = false,
     loseDelete = false,
@@ -289,10 +293,11 @@ function fixture() {
   return {
     plan,
     workers,
+    remoteState: () => ({ active, finalized, workers }),
     events,
     saved,
     fetch,
-    state: initialRecoveryState(plan),
+    state: options.state ?? initialRecoveryState(plan),
     options: () => ({
       run: async (...args) => {
         const result = await recoverActiveQualification(...args);
@@ -609,4 +614,197 @@ test("upload cannot replace a verified retained secret name", async () => {
     /cannot replace a retained secret/,
   );
   assert.ok(f.events.every((e) => e.startsWith("GET ")));
+});
+
+test("recovery command reloads original v1 receipts and settles a lost secret-preserving upload across processes", (t) => {
+  const directory = fs.mkdtempSync(
+    path.join(fs.realpathSync(os.tmpdir()), "qualification-recovery-command-"),
+  );
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const checkout = path.join(directory, "checkout"),
+    journal = path.join(directory, "journal");
+  fs.mkdirSync(checkout);
+  fs.mkdirSync(journal, { mode: 0o700 });
+  // A real clean Git checkout preserves the command's source/dirty-tree gates.
+  // Only public test/source scripts are copied; no credentials or cloud calls.
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", "scripts"], {
+    cwd: path.dirname(import.meta.dirname),
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean);
+  for (const name of tracked) {
+    const from = path.join(path.dirname(import.meta.dirname), name),
+      to = path.join(checkout, name);
+    assert.ok(fs.lstatSync(from).isFile(), "fixture source must be a regular tracked file");
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
+  const git = (...args) =>
+    execFileSync("git", args, {
+      cwd: checkout,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, HOME: directory, GIT_CONFIG_NOSYSTEM: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  git("init");
+  git("add", "scripts");
+  git(
+    "-c",
+    "user.name=Qualification Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-m",
+    "fixture",
+  );
+  const sourceSha = git("rev-parse", "HEAD"),
+    f = fixture({ sourceSha });
+  const write = (name, value) => {
+    const bytes = `${JSON.stringify(value)}\n`;
+    fs.writeFileSync(path.join(journal, name), bytes, { mode: 0o600 });
+    return digest(bytes);
+  };
+  f.plan.originalAttestationSha256 = write("original-attestation.json", {
+    version: 1,
+    ...f.plan.binding,
+    finalizingAt: f.plan.binding.enrolledAt,
+    finalized: false,
+  });
+  f.plan.originalHandoffSha256 = write("original-handoff.json", {
+    ...f.plan.binding,
+    mode: "first-walk",
+    startsAt: f.plan.handoffStartedAt,
+  });
+  write("recovery-plan.json", f.plan);
+  // Explicit serialized v1 state, not a live object shared with the command.
+  write("recovery-state.json", {
+    profile: "active-cleanup-transition/v1",
+    planSha256: digest(canonical(f.plan)),
+    sequence: 0,
+    requests: 0,
+    uploadIntents: {},
+    attestation: null,
+    retired: false,
+    settled: false,
+  });
+  const remote = path.join(directory, "provider.json"),
+    preload = path.join(directory, "provider.mjs"),
+    moduleURL = (name) => pathToFileURL(path.join(checkout, "scripts", name)).href;
+  fs.writeFileSync(
+    remote,
+    JSON.stringify({ sourceSha, ...f.remoteState(), events: [], loseUpload: true }),
+  );
+  // Reuse the same strict synthetic management/RPC fixture at the provider boundary.
+  // This exercises the real CLI, receipt readers, locks and durable journal;
+  // it is not live Cloudflare/AWS behavior proof or an authority key-deletion test.
+  fs.writeFileSync(
+    preload,
+    `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { Cloudflare, recoverActiveQualification } from ${JSON.stringify(moduleURL("image-qualification-control.mjs"))};
+import { authorityName, controllerName, bindingShape, canonical, digest } from ${JSON.stringify(moduleURL("image-qualification-isolation.mjs"))};
+import { fixtureAdmission, ownedSettings, controllerContent, version } from ${JSON.stringify(moduleURL("fixtures/qualification-isolation.mjs"))};
+${fixture.toString()}
+const file = process.env.QUALIFICATION_TEST_PROVIDER;
+const input = JSON.parse(fs.readFileSync(file));
+const f = fixture({...input, state: {}, controllerSource: new URL(${JSON.stringify(moduleURL("image-qualification-controller-worker.mjs"))})});
+for (const key of Object.keys(f.workers)) delete f.workers[key];
+Object.assign(f.workers, input.workers);
+if (input.loseUpload) f.loseUpload();
+const provider = f.options().callerCF;
+Cloudflare.prototype.request = (...args) => provider.request(...args);
+Cloudflare.prototype.list = function (route) { return this.request(route); };
+globalThis.fetch = f.fetch;
+Date.now = f.options().now;
+process.on("exit", () => fs.writeFileSync(file, JSON.stringify({ sourceSha: input.sourceSha, ...f.remoteState(), events: [...input.events, ...f.events], loseUpload: false })));
+`,
+  );
+  const command = path.join(checkout, "scripts/image-qualification-recovery.mjs");
+  const run = (overrides = {}) =>
+    spawnSync(process.execPath, ["--import", preload, command, journal], {
+      cwd: directory,
+      encoding: "utf8",
+      timeout: 15_000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: directory,
+        GIT_CONFIG_NOSYSTEM: "1",
+        CLOUDFLARE_ACCOUNT_ID: f.plan.correctedAdmission.accountId,
+        CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
+        QUALIFICATION_CONTROLLER_TOKEN: "x".repeat(64),
+        QUALIFICATION_RECOVERY_PLAN_SHA256: digest(canonical(f.plan)),
+        QUALIFICATION_TEST_PROVIDER: remote,
+        ...overrides,
+      },
+    });
+  const dirty = path.join(checkout, "untracked-change");
+  fs.writeFileSync(dirty, "refuse dirty source\n");
+  const dirtyResult = run();
+  assert.equal(dirtyResult.error, undefined);
+  assert.equal(dirtyResult.status, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(remote)).events, []);
+  fs.unlinkSync(dirty);
+  const refused = run({ QUALIFICATION_RECOVERY_PLAN_SHA256: "0".repeat(64) });
+  assert.equal(refused.error, undefined);
+  assert.equal(refused.status, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(remote)).events, []);
+  // The rejected preflight must not consume the later lost-response discriminator.
+  const before = JSON.parse(fs.readFileSync(remote));
+  before.loseUpload = true;
+  fs.writeFileSync(remote, JSON.stringify(before));
+  const first = run();
+  assert.equal(first.error, undefined);
+  assert.equal(first.status, 1, first.stderr);
+  const interrupted = readPrivateJSON(path.join(journal, "recovery-state.json"));
+  assert.equal(interrupted.settled, false);
+  assert.ok(
+    interrupted.uploadIntents[f.plan.binding.candidateWorker],
+    JSON.stringify({
+      events: JSON.parse(fs.readFileSync(remote)).events,
+      stderr: first.stderr,
+      state: interrupted,
+    }),
+  );
+  assert.deepEqual(
+    interrupted.uploadIntents[f.plan.binding.candidateWorker].bindings.filter(
+      (b) => b.type === "secret_text",
+    ),
+    [
+      { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text" },
+      { name: "CRABBOX_SHARED_TOKEN", type: "secret_text" },
+    ],
+  );
+  const second = run();
+  assert.equal(second.error, undefined);
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /Original qualification owner settled/);
+  const settled = readPrivateJSON(path.join(journal, "recovery-state.json")),
+    provider = JSON.parse(fs.readFileSync(remote));
+  assert.equal(settled.settled, true);
+  assert.equal(settled.retired, true);
+  assert.ok(settled.requests > interrupted.requests);
+  assert.deepEqual(settled.attestation.runId, f.plan.binding.runId);
+  assert.equal(settled.attestation.authoritySha, f.plan.originalAdmission.authority.sourceSha);
+  assert.deepEqual(settled.attestation.finalReceipt.finalCounts, {
+    images: 0,
+    instances: 0,
+    keyPairs: 0,
+    snapshots: 0,
+    volumes: 0,
+  });
+  assert.deepEqual(Object.keys(provider.workers), [authorityName]);
+  assert.equal(provider.active, false);
+  assert.equal(
+    provider.events.filter((e) => e === `PUT /workers/scripts/${f.plan.binding.candidateWorker}`)
+      .length,
+    1,
+  );
+  assert.ok(!provider.events.some((e) => /force|enroll|transport-open/.test(e)));
+  assert.ok(!fs.existsSync(path.join(journal, "recovery.lock")));
+  for (const result of [dirtyResult, refused, first, second])
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-cloudflare-token|x{64}/);
 });
