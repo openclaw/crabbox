@@ -1041,7 +1041,7 @@ export class Cloudflare {
   async verifyController() {
     const version = await this.latestVersion(controllerName);
     await verifyOwned(this, controllerName);
-    if (this.beforeRecoveryCall) await this.beforeRecoveryCall();
+    if (this.beforeRecoveryCall) await this.beforeRecoveryCall("controller-content");
     const response = await fetch(`${this.base}/workers/scripts/${controllerName}/content/v2`, {
       ...(this.recoverySignal ? { signal: this.recoverySignal(), redirect: "error" } : {}),
       headers: { authorization: `Bearer ${this.token}` },
@@ -1586,10 +1586,10 @@ async function verifyExecutionDeployment(cf, expected) {
 async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
   await verifyAuthority(authorityCF);
   await cf.verifyController();
-  if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall();
+  if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
   const response = await fetch(`${url}/${action}`, {
     method: "POST",
-    ...(cf.recoverySignal ? { signal: cf.recoverySignal(), redirect: "error" } : {}),
+    ...(cf.recoverySignal ? { signal: cf.recoverySignal(action), redirect: "error" } : {}),
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",

@@ -453,3 +453,26 @@ test("missing original controller without retirement receipt cannot be replaced"
   await local(f, () => assert.rejects(recoverTransition(f.plan, f.state, f.options())));
   assert.ok(!f.events.some((event) => /^(PUT|DELETE|RPC)/.test(event)));
 });
+
+test("fresh finalization gets five minutes while the original deadline still clips it", async (t) => {
+  const f = fixture(),
+    limits = [],
+    timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    limits.push(ms);
+    return timeout(ms);
+  });
+  await local(f, () => recoverTransition(f.plan, f.state, f.options()));
+  assert.ok(limits.includes(300_000));
+  assert.ok(limits.includes(30_000));
+  const g = fixture();
+  limits.length = 0;
+  await local(g, () =>
+    recoverTransition(g.plan, g.state, {
+      ...g.options(),
+      now: () => Date.parse(g.plan.deadline) - 45_000,
+    }),
+  );
+  assert.ok(!limits.includes(300_000));
+  assert.ok(limits.includes(45_000));
+});

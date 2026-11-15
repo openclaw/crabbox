@@ -182,10 +182,10 @@ export async function recoverTransition(
   if ((state.retired && !state.attestation) || (state.settled && !state.retired)) fail();
   callerCF.admission = original;
   authorityCF.admission = corrected;
-  const check = () => {
+  const check = (limit = 30_000) => {
     if (signal?.aborted || now() >= Date.parse(plan.deadline) || state.requests >= plan.maxRequests)
       fail();
-    return Math.min(120_000, Date.parse(plan.deadline) - now());
+    return Math.min(limit, Date.parse(plan.deadline) - now());
   };
   const persist = async () => {
     state.sequence++;
@@ -215,8 +215,13 @@ export async function recoverTransition(
     state.requests++;
     await persist();
   };
-  callerCF.recoverySignal = () =>
-    AbortSignal.any([AbortSignal.timeout(check()), ...(signal ? [signal] : [])]);
+  callerCF.recoverySignal = (action) =>
+    // A fresh finalization includes 120s of mandatory inventory backoffs alone.
+    // Only that existing owner operation gets 5min; the absolute clock never resets.
+    AbortSignal.any([
+      AbortSignal.timeout(check(action === "finalize" ? 300_000 : 30_000)),
+      ...(signal ? [signal] : []),
+    ]);
   const moduleIdentity = (cf, name) =>
     cf.request(`/workers/scripts/${name}/content/v2`, {}, { contentIdentityBytes: 1024 * 1024 });
   const fence = async () => {
