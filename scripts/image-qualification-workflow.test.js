@@ -266,8 +266,8 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /candidate changed protected build inputs/);
   assert.match(control, /candidate build-input receipt mismatch/);
   assert.match(control, /deleted_classes: \["FleetDurableObject"\]/);
-  assert.match(control, /controllerCall\(cf, controllerURL, token, "finalize"/);
-  assert.match(control, /controllerCall\(cf, controllerURL, token, "retire"/);
+  assert.match(control, /call\(controllerURL, "finalize"/);
+  assert.match(control, /call\(controllerURL, "retire"/);
   assert.match(control, /workers\/scripts/);
   assert.match(control, /candidate Worker version changed after protected deployment/);
   assert.match(control, /await preparePrivateCandidate\(cf, candidateWorker, stagingBindings\)/);
@@ -281,7 +281,7 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   );
   assert.match(
     control,
-    /controllerCall\(cf, controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(cf, controllerURL, token, "finalize"/,
+    /call\(controllerURL, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*call\(controllerURL, "finalize"/,
   );
   assert.match(
     control,
