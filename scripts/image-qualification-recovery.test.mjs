@@ -328,6 +328,31 @@ test("exact dual identity runs existing finalizer, namespace migration and ordin
   assert.ok(f.saved.some((s) => s.attestation && !s.retired));
 });
 
+test("already-revoked relay settles without inventing a missing version", async () => {
+  const f = fixture(),
+    name = f.plan.binding.candidateWorker.replace("qualification-", "qualification-relay-");
+  delete f.workers[name];
+  f.plan.callers = f.plan.callers.map((c) => (c.name === name ? { name, absent: true } : c));
+  f.state = initialRecoveryState(f.plan);
+  await local(f, () => recoverTransition(f.plan, f.state, f.options()));
+  assert.equal(f.state.settled, true);
+  assert.ok(!f.events.some((event) => event.startsWith("PUT /workers/scripts/" + name)));
+});
+
+test("an absent caller cannot reappear or replace the required controller", async () => {
+  const f = fixture(),
+    name = f.plan.binding.candidateWorker.replace("qualification-", "qualification-relay-");
+  f.plan.callers = f.plan.callers.map((c) => (c.name === name ? { name, absent: true } : c));
+  f.state = initialRecoveryState(f.plan);
+  await local(f, () => assert.rejects(recoverTransition(f.plan, f.state, f.options())));
+  assert.ok(!f.events.some((event) => /^(PUT|DELETE|RPC)/.test(event)));
+  const g = fixture();
+  g.plan.callers = g.plan.callers.map((c) =>
+    c.name === controllerName ? { name: controllerName, absent: true } : c,
+  );
+  assert.throws(() => validateRecoveryPlan(g.plan));
+});
+
 for (const [name, mutate] of [
   [
     "different namespaces",

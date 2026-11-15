@@ -98,13 +98,15 @@ export function validateRecoveryPlan(plan) {
   if (
     !Array.isArray(plan.callers) ||
     !same(plan.callers.map((c) => c.name).sort(), names) ||
-    plan.callers.some(
-      (c) =>
-        !uuid.test(c.version ?? "") ||
-        !sha.test(c.settingsSha256 ?? "") ||
-        !sha.test(c.module?.sha256 ?? "") ||
-        c.module.count !== 1 ||
-        !/^[A-Za-z0-9_.-]+$/.test(c.module.module ?? ""),
+    plan.callers.some((c) =>
+      c.absent === true
+        ? c.name === controllerName || !same(Object.keys(c).sort(), ["absent", "name"])
+        : Object.hasOwn(c, "absent") ||
+          !uuid.test(c.version ?? "") ||
+          !sha.test(c.settingsSha256 ?? "") ||
+          !sha.test(c.module?.sha256 ?? "") ||
+          c.module.count !== 1 ||
+          !/^[A-Za-z0-9_.-]+$/.test(c.module.module ?? ""),
     ) ||
     !sha.test(plan.authorityModule?.sha256 ?? "") ||
     plan.authorityModule.count !== 1 ||
@@ -253,6 +255,9 @@ export async function recoverTransition(
     if (!expected) fail();
     const settings = await verifyOwned(callerCF, name, { allowAbsent: true });
     if (!settings) return undefined;
+    // Absence is a fail-closed observation, never authority to adopt a later
+    // Worker with this name. The original controller is always required.
+    if (expected.absent) fail();
     const version = await callerCF.latestVersion(name);
     const module = await moduleIdentity(callerCF, name);
     const intent = state.uploadIntents[name];
