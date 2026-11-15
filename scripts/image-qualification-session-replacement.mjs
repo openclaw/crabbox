@@ -73,7 +73,11 @@ export function validateReplacementPlan(plan) {
     !Number.isFinite(time(plan.startsAt)) ||
     time(plan.deliveryStopsAt) !== time(plan.startsAt) + 20 * 60_000 ||
     time(plan.recoveryStopsAt) !== time(plan.startsAt) + 60 * 60_000 ||
-    !(time(plan.previousSessionExpiresAt) <= time(plan.startsAt)) ||
+    !Number.isFinite(time(plan.previousSessionExpiresAt)) ||
+    (plan.allowUnexpiredSessionReplacement !== undefined &&
+      typeof plan.allowUnexpiredSessionReplacement !== "boolean") ||
+    (time(plan.previousSessionExpiresAt) > time(plan.startsAt) &&
+      plan.allowUnexpiredSessionReplacement !== true) ||
     !(time(plan.recoveryStopsAt) < time(plan.cycleRecoveryBy)) ||
     !(time(plan.cycleRecoveryBy) <= time(plan.startsAt) + 8 * 3600_000) ||
     !(time(plan.cycleRecoveryBy) <= time(plan.authorityRetentionEndsAt))
@@ -144,6 +148,10 @@ function custody(plan, value, now, version, before) {
       "previousRunsSettled",
       "fallbackReady",
     ].every((key) => value[key] === true) ||
+    // Rotation does not revoke the previous session. Its consumers must already
+    // be stopped, in addition to the existing idle and exclusive-custody checks.
+    (time(plan.previousSessionExpiresAt) > time(plan.startsAt) &&
+      value.previousSessionUseStopped !== true) ||
     !(0 <= now - time(value.observedAt) && now - time(value.observedAt) <= 900_000) ||
     (before && digest(canonical(value)) !== plan.preCustodySha256)
   )
@@ -473,7 +481,11 @@ export async function replaceIdleSession(
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
     const tokenExpiry = await token();
     await fence(plan.isolation);
-    await persist("issuance-intent", { beforeVersion: plan.isolation.authority.version });
+    await persist("issuance-intent", {
+      beforeVersion: plan.isolation.authority.version,
+      previousSessionExpiresAt: plan.previousSessionExpiresAt,
+      unexpiredSessionReplacement: time(plan.previousSessionExpiresAt) > time(plan.startsAt),
+    });
     // Separate exclusive marker survives a lost/recreated state journal. Copies
     // cannot choose a new destination: the reviewed plan binds this directory.
     claimIssuance(plan);
