@@ -4,9 +4,13 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import relay from "./image-qualification-relay-worker.mjs";
+import {
+  prepareQualificationBuild,
+  readQualificationPackage,
+} from "./image-qualification-package.mjs";
 import {
   firstWalkRecipeSha256,
   readFirstWalkRecipe,
@@ -142,6 +146,85 @@ if (args[0] === 'systemd-run') {
   assert.equal(fs.existsSync(calls[1].at(-1)), false);
 }
 
+// Exercise the emitted argv, not a second hand-maintained flag list. The CLI
+// must be built from the same pinned baseline/overlay used by the private job.
+// Appending help parses every preceding flag and exits before config/backend
+// loading. Explicit --id keeps stop's lease from hiding later flags as operands.
+function checkPinnedCLI(commands, directory) {
+  const baseline = path.join(directory, "baseline");
+  const candidate = path.join(directory, "candidate-source");
+  const home = path.join(directory, "parser-home");
+  fs.mkdirSync(home);
+  const cleanEnv = { PATH: process.env.PATH, HOME: home, GOTOOLCHAIN: "local" };
+  const exec = (command, args, options = {}) =>
+    execFileSync(command, args, {
+      env: cleanEnv,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 300_000,
+      ...options,
+    });
+  const { contract } = readQualificationPackage(root);
+  for (const target of [baseline, candidate]) {
+    exec("git", ["clone", "--quiet", "--shared", "--no-checkout", root, target]);
+    exec("git", ["checkout", "--quiet", "--detach", contract.baselineCommit], { cwd: target });
+  }
+  fs.cpSync(
+    path.join(root, "qualification/first-walk/v1"),
+    path.join(candidate, "qualification/first-walk/v1"),
+    { recursive: true },
+  );
+  prepareQualificationBuild(root, candidate, baseline);
+  const [goCache, moduleCache] = exec("go", ["env", "GOCACHE", "GOMODCACHE"], {
+    env: { ...cleanEnv, HOME: os.homedir() },
+  })
+    .trim()
+    .split(/\r?\n/);
+  const binary = path.join(directory, "pinned-crabbox");
+  exec("go", ["build", "-trimpath", "-o", binary, "./cmd/crabbox"], {
+    cwd: baseline,
+    env: {
+      ...cleanEnv,
+      GOCACHE: goCache,
+      GOMODCACHE: moduleCache,
+      GOWORK: "off",
+      CGO_ENABLED: "0",
+      GOFLAGS: "-mod=readonly",
+    },
+  });
+  assert.deepEqual(
+    commands.map((c) => c.args[0]),
+    ["warmup", "run", "stop", "warmup", "run"],
+  );
+  for (const { args, env } of commands) {
+    assert.equal(args.includes("--help"), false);
+    assert.equal(args.includes("--"), false);
+    const probe = (argv) =>
+      spawnSync(binary, [...argv, "--help"], {
+        cwd: home,
+        env: { ...env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+    const parsed = probe(args);
+    assert.equal(parsed.status, 0, `${args[0]}: ${parsed.stderr}`);
+    assert.match(parsed.stderr, new RegExp(`Usage of ${args[0]}:`));
+    const rejected = probe([...args, "--region", "us-east-1"]);
+    assert.equal(rejected.status, 2);
+    assert.match(rejected.stderr, /flag provided but not defined: -region/);
+  }
+  // Config projection is local: verify the admitted region is actually consumed
+  // by this CLI, rather than merely present in the mock executor's environment.
+  const config = JSON.parse(
+    exec(binary, ["config", "show", "--provider", "aws", "--json"], {
+      cwd: home,
+      env: { ...commands[0].env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+    }),
+  );
+  assert.equal(config.aws.region, "us-east-1");
+  assert.equal(config.coordinator, commands[0].env.CRABBOX_COORDINATOR);
+}
+
 for (const { label, badResult = false, badPreparation = false, evidenceFault } of [
   { label: "captures exactly once and dies for independent cleanup" },
   { label: "rejects failed first walk without replay", badResult: true },
@@ -225,6 +308,8 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         AWS_PROFILE: "production",
         AWS_WEB_IDENTITY_TOKEN_FILE: "/synthetic/production-token",
         CRABBOX_BROKER_URL: "https://production.invalid",
+        CRABBOX_AWS_REGION: "eu-west-1",
+        AWS_REGION: "eu-west-1",
         GH_TOKEN: "synthetic-inherited-token",
         GITHUB_RUN_ID: "123",
         GITHUB_RUN_ATTEMPT: "1",
@@ -261,15 +346,18 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
       assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
+      if (!badResult && !badPreparation && !evidenceFault) checkPinnedCLI(commands, dir);
       for (const command of commands) {
         for (const key of [
           "AWS_PROFILE",
           "AWS_WEB_IDENTITY_TOKEN_FILE",
           "CRABBOX_BROKER_URL",
           "GH_TOKEN",
+          "AWS_REGION",
         ])
           assert.equal(command.env[key], undefined);
         assert.equal(command.env.CRABBOX_COORDINATOR, env.QUALIFICATION_RELAY_URL);
+        assert.equal(command.env.CRABBOX_AWS_REGION, env.QUALIFICATION_AWS_REGION);
         assert.notEqual(command.env.HOME, dir);
         assert.equal(command.cwd, command.env.HOME);
         assert.equal(command.env.XDG_CONFIG_HOME, path.join(command.cwd, "config"));
