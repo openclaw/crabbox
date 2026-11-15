@@ -184,6 +184,9 @@ function installAPI(file) {
           throw new Error(
             `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
           );
+        const isRelay = name.startsWith("crabbox-image-qualification-relay-");
+        if (isRelay && state.relayFault === "put-before")
+          throw new Error("relay upload failed before create");
         const metadata = JSON.parse(await init.body.get("metadata").text());
         // Validate the wire format, rather than accepting Wrangler config here.
         // The upload API takes one migration object; config uses an array.
@@ -248,15 +251,92 @@ function installAPI(file) {
           throw new Error("tombstone upload response lost");
         }
         if (state.uploadDelay) state.now += state.uploadDelay;
-        return api({ deployment_id: workerVersion });
+        if (isRelay && state.relayFault === "put-lost")
+          throw new Error("relay upload response lost after create");
+        return api({
+          deployment_id: isRelay && state.relayFault === "ack-invalid" ? "invalid" : workerVersion,
+        });
       }
       if (!suffix && method === "DELETE") {
         delete state.workers[name];
         return api({});
       }
+      const relayRead =
+        name.startsWith("crabbox-image-qualification-relay-") &&
+        state.workers[name] &&
+        method === "GET" &&
+        ["/settings", "/deployments"].includes(suffix);
+      if (relayRead && state.relayFault) {
+        state.relayReads ??= {};
+        state.relayReads[suffix] = (state.relayReads[suffix] ?? 0) + 1;
+        const count = state.relayReads[suffix];
+        const fault = state.relayFault;
+        if (fault === "404-both" && count === 1) return api(null, 404);
+        if (fault === "404-settings" && suffix === "/settings" && count === 1)
+          return api(null, 404);
+        if (fault === "404-deployments" && suffix === "/deployments" && count === 1)
+          return api(null, 404);
+        if (fault === "404-persistent") return api(null, 404);
+        if (fault === "404-settings-wrong-version" && suffix === "/settings") return api(null, 404);
+        if (fault === "wrong-version" || fault === "404-settings-wrong-version") {
+          if (suffix === "/deployments")
+            return api({
+              deployments: [
+                {
+                  versions: [
+                    { version_id: "22222222-2222-4222-8222-222222222222", percentage: 100 },
+                  ],
+                },
+              ],
+            });
+        }
+        if (suffix === "/settings") {
+          if (fault === "denied") return api(null, 403);
+          if (fault === "unauthorized") return api(null, 401);
+          if (fault === "server-error") return api(null, 503);
+          if (fault === "malformed-json") return new Response("not JSON");
+          if (fault === "oversize") return new Response("x".repeat(70 * 1024));
+          if (fault === "malformed-settings") return api({ tags: [], bindings: null });
+          if (fault === "deadline") state.now += 10_000;
+          if (fault === "clipped-deadline") state.now += 1001;
+          if (fault === "cancel") process.emit("SIGTERM");
+          if (fault === "cancel-backoff") {
+            setTimeout(() => process.emit("SIGTERM"), 25);
+            return api(null, 404);
+          }
+          if (fault === "cancel-body")
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  const cancel = () => controller.error(init.signal.reason);
+                  init.signal.addEventListener("abort", cancel, { once: true });
+                  setTimeout(() => process.emit("SIGTERM"), 25);
+                },
+              }),
+            );
+          if (fault === "hung-fetch")
+            return await new Promise((resolve, reject) => {
+              assert(init.signal, "readback must bound requests");
+              const keepAlive = setInterval(() => {}, 1000);
+              init.signal.addEventListener(
+                "abort",
+                () => {
+                  clearInterval(keepAlive);
+                  reject(init.signal.reason);
+                },
+                { once: true },
+              );
+            });
+        }
+        if (fault === "malformed-deployments" && suffix === "/deployments")
+          return api({ deployments: [] });
+      }
       if (suffix === "/settings") {
         if (!state.workers[name]) return api(null, 404);
         const metadata = structuredClone(state.workers[name].metadata);
+        if (relayRead && state.relayFault === "ownership-drift") metadata.tags = [];
+        if (relayRead && state.relayFault === "binding-drift")
+          metadata.bindings.push({ name: "UNEXPECTED", type: "plain_text", text: "extra" });
         if (transportProfile(metadata.bindings))
           for (const binding of metadata.bindings) {
             if (binding.type === "service") {
@@ -436,7 +516,7 @@ function fixture(t, mode = "retained") {
     fs.writeFileSync(output, "");
     const child = spawnSync(process.execPath, ["--import", import.meta.url, control, command], {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: 15_000,
       env: {
         ...env,
         ...(command !== "admit"
@@ -497,6 +577,123 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
+  for (const fault of [
+    "404-settings",
+    "404-deployments",
+    "404-both",
+    "404-persistent",
+    "404-settings-wrong-version",
+    "wrong-version",
+    "binding-drift",
+    "ownership-drift",
+    "denied",
+    "unauthorized",
+    "server-error",
+    "malformed-json",
+    "malformed-settings",
+    "malformed-deployments",
+    "oversize",
+    "deadline",
+    "clipped-deadline",
+    "cancel",
+    "cancel-backoff",
+    "cancel-body",
+    "hung-fetch",
+    "put-lost",
+    "put-before",
+    "ack-invalid",
+  ]) {
+    test(`relay acknowledged-upload readback: ${fault}`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ relayFault: fault });
+      if (fault === "clipped-deadline")
+        f.update({ now: Date.parse(f.prepared().workExpiresAt) - 61_000 });
+      const started = performance.now();
+      const deployed = f.invoke("deploy");
+      const elapsed = performance.now() - started;
+      const success = ["404-settings", "404-deployments", "404-both"].includes(fault);
+      assert.equal(deployed.status, success ? 0 : 1, deployed.stderr);
+      const relay = "crabbox-image-qualification-relay-42-1";
+      const puts = () =>
+        f
+          .state()
+          .events.filter(
+            (event) =>
+              event ===
+              `PUT api.cloudflare.com/client/v4/accounts/${"0".repeat(32)}/workers/scripts/${relay}`,
+          ).length;
+      assert.equal(puts(), 1, "no create/upload replay");
+      const receiptPath = path.join(f.directory, "deploy-proof/relay-readback.json");
+      if (["put-lost", "put-before"].includes(fault)) {
+        assert.equal(
+          fs.existsSync(receiptPath),
+          false,
+          "uncertain PUT cannot enter acknowledged path",
+        );
+        assert.match(deployed.stderr, /relay upload/);
+      } else {
+        const receipt = JSON.parse(fs.readFileSync(receiptPath));
+        assert.equal(receipt.state, success ? "verified" : "unresolved");
+        assert.equal(receipt.upload.status, 200);
+        assert(receipt.reads.length <= 12);
+        if (fault !== "ack-invalid") assert.equal(receipt.acknowledgedVersion, workerVersion);
+        if (fault === "404-persistent") {
+          assert.equal(receipt.reads.length, 12);
+          assert(receipt.reads.every((r) => r.state === "http404" && r.response.status === 404));
+        } else if (!success) {
+          assert(
+            receipt.reads.length <= 2,
+            "visible drift, denial, malformed data and cancellation fail immediately",
+          );
+        }
+        if (fault === "denied") assert.equal(receipt.reads[0].response.status, 403);
+        const bytes = fs.readFileSync(receiptPath, "utf8");
+        for (const secret of [
+          "synthetic-cloudflare-token",
+          "synthetic-controller-token",
+          "6".repeat(64),
+        ])
+          assert(!bytes.includes(secret), "receipt must not contain credentials");
+        if (fault === "hung-fetch") {
+          assert(elapsed >= 9500 && elapsed < 13_000, `request timeout elapsed ${elapsed}`);
+          assert.equal(receipt.reads.length, 1);
+        }
+      }
+      if (!success)
+        assert.equal(f.state().identity, undefined, "no authority claim on unresolved readback");
+      if (fault === "404-persistent") {
+        const refused = f.invoke("reap");
+        assert.equal(refused.status, 1);
+        assert(f.state().workers[relay], "unknown ownership must still block deletion");
+      }
+      // Explicit restoration of metadata in this model, never a live cause claim.
+      f.update({ relayFault: undefined });
+      const settled = f.invoke("reap");
+      assert.equal(settled.status, 0, settled.stderr);
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+      assert.equal(puts(), 1);
+    });
+  }
+
+  test("exhausted readback reserve refuses relay upload and remains recoverable", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    f.update({ now: Date.parse(f.prepared().workExpiresAt) - 60_000 });
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 1);
+    assert.match(deployed.stderr, /subsequent-gate reserve/);
+    assert(
+      !f.state().events.some((event) => event.startsWith("PUT ") && event.includes("relay-42-1")),
+    );
+    assert.equal(f.state().identity, undefined);
+    const settled = f.invoke("reap");
+    assert.equal(settled.status, 0, settled.stderr);
+    assert.deepEqual(f.state().workers, {});
+  });
+
   test("first-walk source-admission failure still fences and settles the admitted run", (t) => {
     const f = fixture(t, "first-walk");
     assert.equal(f.invoke("admit").status, 0);
