@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -20,6 +21,7 @@ import {
   requireAbsent,
   ownershipTags,
   verifyOwned,
+  assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
 import {
@@ -950,13 +952,22 @@ export class Cloudflare {
       probeContentIdentity = false,
       contentIdentityBytes,
       boundedBytes,
+      responseMetadata = false,
     } = {},
   ) {
     const response = await fetch(`${this.base}${pathname}`, {
       ...init,
       headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
     });
-    if (allow404 && response.status === 404) return undefined;
+    const ray = response.headers.get("cf-ray");
+    const responseInfo = {
+      status: response.status,
+      ...(ray && /^[a-zA-Z0-9-]{1,128}$/.test(ray) ? { ray } : {}),
+    };
+    if (allow404 && response.status === 404) {
+      await response.body?.cancel();
+      return responseMetadata ? { result: undefined, response: responseInfo } : undefined;
+    }
     if ((probeContentIdentity || contentIdentityBytes) && response.ok) {
       const probe = await import("./image-qualification-binding-probe.mjs");
       return await probe.probeContentIdentity(response, contentIdentityBytes);
@@ -973,11 +984,14 @@ export class Cloudflare {
       parsed = { raw: text.slice(0, 200) };
     }
     if (!response.ok || parsed.success === false) {
-      throw new Error(`Cloudflare API ${pathname} returned ${response.status}`);
+      throw Object.assign(new Error(`Cloudflare API ${pathname} returned ${response.status}`), {
+        status: response.status,
+      });
     }
     if (allow404 && (init.method ?? "GET") === "GET" && parsed.result === undefined) {
       throw new Error(`Cloudflare API ${pathname} did not confirm existence or absence`);
     }
+    if (responseMetadata) return { result: parsed.result, response: responseInfo };
     return envelope ? parsed : parsed.result;
   }
 
@@ -1007,7 +1021,7 @@ export class Cloudflare {
     throw new Error("Cloudflare inventory pagination exceeded bound");
   }
 
-  async upload(name, moduleFile, metadata, extraModules = []) {
+  async upload(name, moduleFile, metadata, extraModules = [], options = {}) {
     let retained = [];
     if (metadata.keep_bindings !== undefined) {
       if (canonical(metadata.keep_bindings) !== canonical(["secret_text"]))
@@ -1037,7 +1051,7 @@ export class Cloudflare {
         module.name,
       );
     }
-    return await this.request(`/workers/scripts/${name}`, { method: "PUT", body: form });
+    return await this.request(`/workers/scripts/${name}`, { method: "PUT", body: form }, options);
   }
 
   async settings(name) {
@@ -1670,6 +1684,120 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
   }
 }
 
+// Only first-upload visibility for this run's relay is reconciled. No writes,
+// credential changes, enrollment, deadline resets or general API retries here.
+function assertRelayReadbackReserve(handoff) {
+  assertHandoffWindow(handoff);
+  const end = Date.parse(handoff.workExpiresAt) - 60_000;
+  if (Date.now() >= end) throw new Error("relay readback has no subsequent-gate reserve");
+  return end;
+}
+
+async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
+  const directory = path.resolve(required("QUALIFICATION_PROOF_DIR"));
+  const readbackStopsAt = Date.now() + 10_000;
+  const receipt = {
+    version: 1,
+    worker,
+    upload: upload.response,
+    // Acknowledged creation is never proof of serving state.
+    state: "unresolved",
+    reads: [],
+  };
+  return await withQualificationJournal(
+    directory,
+    {
+      stateName: "relay-readback.json",
+      lockName: "relay-readback.lock",
+      create: true,
+      initial: () => receipt,
+    },
+    async (retained, save) => {
+      if (canonical(retained) !== canonical(receipt))
+        throw new Error(
+          "relay readback receipt already exists; use recovery, never replay deployment",
+        );
+      receipt.acknowledgedVersion = workerVersion(upload.result?.deployment_id);
+      await save(receipt);
+      const stopsAt = Math.min(readbackStopsAt, assertRelayReadbackReserve(handoff));
+      const stop = new AbortController();
+      const cancel = () => stop.abort();
+      const signal = AbortSignal.any([
+        stop.signal,
+        AbortSignal.timeout(Math.max(1, stopsAt - Date.now())),
+      ]);
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+      const check = () => {
+        if (signal.aborted || Date.now() >= stopsAt)
+          throw new Error("qualification relay readback cancelled or deadline exhausted");
+      };
+      const read = async (suffix) => {
+        check();
+        const observed = { endpoint: suffix, state: "pending" };
+        receipt.reads.push(observed);
+        await save(receipt);
+        // Only an actual HTTP404 is unresolved visibility. Denial, invalid JSON,
+        // malformed deployments and other errors fail immediately, without retries.
+        let result;
+        try {
+          const response = await cf.request(
+            `/workers/scripts/${worker}/${suffix}`,
+            { signal, redirect: "error" },
+            { allow404: true, boundedBytes: 64 * 1024, responseMetadata: true },
+          );
+          observed.response = response.response;
+          result = response.result;
+          observed.state = result === undefined ? "http404" : "visible";
+        } catch (error) {
+          observed.state = "failed";
+          if (Number.isInteger(error.status)) observed.response = { status: error.status };
+          await save(receipt);
+          throw error;
+        }
+        await save(receipt);
+        check();
+        return result;
+      };
+      try {
+        for (let round = 0; round < 6; round++) {
+          const settings = await read("settings");
+          if (settings !== undefined) {
+            assertOwnedSettings(cf, worker, settings);
+            if (canonical(publicBindingShape(settings.bindings)) !== canonical(expectedBindings))
+              throw new Error(
+                "qualification relay settings do not match the reviewed binding contract",
+              );
+          }
+          const deployments = await read("deployments");
+          if (deployments !== undefined) {
+            const active = (deployments?.deployments ?? deployments?.items ?? deployments)?.[0];
+            if (
+              active?.versions?.length !== 1 ||
+              active.versions[0].percentage !== 100 ||
+              workerVersion(active.versions[0].version_id) !== receipt.acknowledgedVersion
+            )
+              throw new Error(
+                "qualification relay active version differs from acknowledged upload",
+              );
+          }
+          if (settings !== undefined && deployments !== undefined) {
+            check();
+            receipt.state = "verified";
+            await save(receipt);
+            return receipt.acknowledgedVersion;
+          }
+          if (round < 5) await delay(250, undefined, { signal });
+        }
+        throw new Error("qualification relay readback remains unresolved after six rounds");
+      } finally {
+        process.removeListener("SIGINT", cancel);
+        process.removeListener("SIGTERM", cancel);
+      }
+    },
+  );
+}
+
 async function deploy() {
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
@@ -1829,21 +1957,19 @@ async function deploy() {
     expiresAt,
   );
   await requireAbsent(cf, relayWorker);
-  const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata);
-  const [relaySettings, relayVersion] = await Promise.all([
-    cf.settings(relayWorker),
-    cf.latestVersion(relayWorker),
-    Promise.resolve(undefined),
-  ]);
-  const relayBindings = publicBindingShape(relaySettings.bindings ?? []);
+  // Acknowledgement is required: uncertain PUTs never enter a replay/retry path.
+  assertRelayReadbackReserve(handoff);
+  const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata, [], {
+    responseMetadata: true,
+  });
   const expectedRelayBindings = publicBindingShape(expectedRelayMetadata.bindings);
-  if (
-    workerVersion(relayUpload.deployment_id) !== relayVersion ||
-    canonical(relayBindings) !== canonical(expectedRelayBindings)
-  ) {
-    throw new Error("qualification relay settings do not match the reviewed binding contract");
-  }
-  await verifyOwned(cf, relayWorker);
+  const relayVersion = await readbackRelay(
+    cf,
+    relayWorker,
+    relayUpload,
+    expectedRelayBindings,
+    handoff,
+  );
   const relayURL = await cf.enableSubdomain(relayWorker);
   const relayBindingDigest = digest(canonical(expectedRelayBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
