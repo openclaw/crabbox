@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Boat: confirm absence and release the local lease when a snapshot-disabled sandbox disappears during native stop, while retaining claims if inventory or ownership is uncertain.
+- Boat: confirm absence and release the local lease when a snapshot-disabled sandbox disappears during native stop, while retaining claims if inventory or ownership is uncertain. [PR 3168](https://github.com/openclaw/crabbox/pull/3168). Thanks @vincentkoc.
 
 ## 0.83.1 - 2026-11-14
 
