@@ -51,9 +51,10 @@ const env = {
   CRABBOX_COORDINATOR: relay,
   CRABBOX_COORDINATOR_TOKEN: token,
   CRABBOX_COORDINATOR_ADMIN_TOKEN: token,
+  CRABBOX_AWS_REGION: region,
   CRABBOX_ENV_ALLOW: "CI",
 };
-const scope = ["--provider", "aws", "--target", "linux", "--region", region];
+const scope = ["--provider", "aws", "--target", "linux"];
 const logs = new Map();
 const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 function remaining() {
@@ -169,7 +170,7 @@ try {
   }
   if (capture?.state !== "ready" || capture.image?.snapshotIDs?.length !== 1)
     throw new Error("single synthetic capture not ready");
-  await cli("source-release", ["stop", ...scope, sourceID]);
+  await cli("source-release", ["stop", ...scope, "--id", sourceID]);
   const { readiness } = await create(targetID, "target-stock-ready");
   const use = await api("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" });
   const intent = {
