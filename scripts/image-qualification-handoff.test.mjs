@@ -1250,7 +1250,8 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       });
       const result = f.invoke("arm", f.armEnv());
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /work window is not active/);
+      assert.match(result.stderr, /qualification controller request failed/);
+      assert.match(result.stderr, /"action":"attest","reason":"deadline"/);
       assert.equal(
         fs.existsSync(path.join(f.directory, "arm-proof", "execution-manifest.json")),
         false,
@@ -1358,6 +1359,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   for (const status of [200, 503]) {
     test(`non-JSON transport-open ${status} retains sanitized failure and recovers without replay`, (t) => {
       const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
       assert.equal(f.invoke("admit").status, 0);
       f.update({ controllerHTML: status });
       const deployed = f.invoke("deploy");
