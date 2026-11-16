@@ -1086,6 +1086,7 @@ test("issuer checks only fixed no-allocation imports with exact session tags bef
     );
     assert.equal(argv[argv.indexOf("--region") + 1], f.plan.isolation.aws.region);
     assert.equal(argv[argv.indexOf("--cli-binary-format") + 1], "base64");
+    assert.equal(argv[argv.indexOf("--cli-error-format") + 1], "legacy");
     const publicKey = Buffer.from(
       argv[argv.indexOf("--public-key-material") + 1],
       "base64",
@@ -1176,8 +1177,13 @@ test("DryRun child accepts only exact exit254 ImportKeyPair authorization codes 
       "",
       { importKeyDryRun: true, ...options },
     );
-  for (const code of ["DryRunOperation", "UnauthorizedOperation"])
+  for (const code of ["DryRunOperation", "UnauthorizedOperation"]) {
     assert.equal(await run(message(code)), code);
+    assert.equal(
+      await run(message(code).replace("An error occurred", "aws: [ERROR]: An error occurred")),
+      code,
+    );
+  }
   for (const [stderr, exit, stdout] of [
     [message("DryRunOperation"), 0],
     [message("UnauthorizedOperation"), 255],
@@ -1185,6 +1191,8 @@ test("DryRun child accepts only exact exit254 ImportKeyPair authorization codes 
     [message("AccessDenied"), 254],
     [message("DryRunOperation") + message("UnauthorizedOperation"), 254],
     ["fake-secret DryRunOperation", 254],
+    [message("DryRunOperation").replace("An error occurred", "untrusted: An error occurred"), 254],
+    [message("DryRunOperation") + "Additional error details:\nsynthetic-only\n", 254],
     [message("DryRunOperation"), 254, "unexpected response"],
     ["x".repeat(140000), 254],
   ])

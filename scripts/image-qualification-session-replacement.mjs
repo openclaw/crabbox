@@ -323,7 +323,7 @@ export async function sessionChild(
     // CLI v2 service errors are exit254. Never accept substrings, stdout, local
     // errors or a successful mutation; never return the raw message/encoded detail.
     const match =
-      /^\n?An error occurred \((DryRunOperation|UnauthorizedOperation)\) when calling the ImportKeyPair operation: [^\r\n]+\r?\n?$/.exec(
+      /^\n?(?:aws: \[ERROR\]: )?An error occurred \((DryRunOperation|UnauthorizedOperation)\) when calling the ImportKeyPair operation: [^\r\n]+\r?\n?$/.exec(
         Buffer.concat(errors).toString("utf8"),
       );
     if (exitCode !== 254 || chunks.length || !match) fail();
@@ -384,6 +384,8 @@ async function importKeyPreflight(plan, run, sessionEnv, signal, now) {
         dryRunPublicKey,
         "--cli-binary-format",
         "base64",
+        "--cli-error-format",
+        "legacy",
         "--tag-specifications",
         JSON.stringify([
           {

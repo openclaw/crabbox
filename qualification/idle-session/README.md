@@ -340,8 +340,9 @@ them, each missing ownership tag and each mismatched ownership value must return
 session, not missing-principal-tag or cross-session tests. The public test-vector
 key is syntax only; this path never imports a key or allocates another fixture.
 
-Only an AWS CLI v2 service error (exit 254) with the exact action and authorization
-code is accepted. Other exits, success, malformed output, timeout or cancellation
+The command pins legacy error output. Only an AWS CLI v2 service error (exit 254)
+with the exact action and authorization code is accepted, including the optional
+standard `aws: [ERROR]:` prefix. Other exits, success, malformed output, timeout or cancellation
 block delivery. Each child has ten seconds, no AWS retry, bounded output and
 complete process-group settlement; the gate has a two-minute cancellation bound
 plus final settlement, within the original delivery deadline. The existing
