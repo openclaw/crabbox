@@ -160,6 +160,8 @@ function installAPI(file) {
           policyHash,
           enrolledAt: state.enrolledAt,
           finalized: state.finalized ?? false,
+          ...(state.finalizing ? { finalizingAt: new Date(state.now).toISOString() } : {}),
+          ...(state.finalized ? { finalizedAt: new Date(state.now).toISOString() } : {}),
           ...(state.finalized ? { finalReceipt: { finalCounts: { instances: 0 } } } : {}),
         });
       }
@@ -862,6 +864,33 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.equal(f.state().identity, undefined);
     assert.ok(f.state().events.some((event) => event.endsWith("/begin-finalization")));
   });
+
+  for (const missing of ["first-walk.json", "first-walk-result.json"])
+    test(`missing ${missing} fails observation while preserving complete cleanup evidence`, (t) => {
+      const f = fixture(t, "first-walk");
+      assert.equal(f.invoke("admit").status, 0);
+      assert.equal(f.invoke("deploy").status, 0);
+      assert.equal(f.invoke("arm", f.armEnv()).status, 0);
+      const execution = path.join(f.directory, "execution-proof");
+      fs.mkdirSync(execution);
+      const present = missing === "first-walk.json" ? "first-walk-result.json" : "first-walk.json";
+      fs.writeFileSync(path.join(execution, present), "{}");
+      fs.writeFileSync(path.join(execution, "checksums.sha256"), `${digest("{}")}  ./${present}\n`);
+      const result = f.invoke("finalize", {
+        ...f.armEnv(),
+        QUALIFICATION_EXECUTION_PROOF_DIR: execution,
+      });
+      assert.equal(result.status, 1, "missing observation must never pass qualification");
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "finalize-proof/finalization.json")),
+      );
+      assert.equal(receipt.result, "failed");
+      assert.match(receipt.failure, /first-walk observation unavailable/);
+      assert.equal(receipt.cleanup, "finalized");
+      assert.equal(receipt.attestation.finalized, true);
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+    });
 
   for (const phase of ["before", "after"])
     test(`failed private upload ${phase} create settles with empty deploy outputs`, (t) => {

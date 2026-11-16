@@ -58,14 +58,24 @@ attachment, mapping and tag effects. Before launch it also tests unchanged,
 missing, changed and removed ownership tags against its already-owned physical
 key. Callers cannot select probes, actions or DryRun parameters.
 
-Each run permits at most 32 persisted checks, with one dispatch per request
-digest, no retries and a ten-second request/body timeout bounded by the original
-forward deadline. Error XML is capped at 16 KiB. Private attestation evidence
-contains only action, probe, request digest, timestamps, outcome and an
-allowlisted service code. An unresolved or failed check fences subsequent
+Each run permits at most 32 persisted checks, with one DryRun per request
+digest and no retries. The unchanged-tag check first reads the ledger's exact
+key ID, verifies its name and all four ownership tags, then performs its existing
+DryRun. Both requests share one ten-second timeout and the original forward
+deadline. Key metadata is capped at 64 KiB and error XML at 16 KiB.
+
+Additive `keyObservation` evidence records a resource digest and fixed-order
+tag match flags; service metadata contains only HTTP status, hashed request IDs
+and allowlisted error codes. Raw correlation IDs stay in private authority
+storage, outside attestations and candidate responses. A missing, mismatched,
+denied or interrupted key read fails closed. An unresolved or failed check fences subsequent
 forward work across restart; the existing cleanup owner remains usable.
 Passing evidence may be reused only for that exact request within the same
 immutable run. Actual effects retain their final dispatch-time deadline checks.
+
+If execution stops before first-walk proof is complete, finalization still
+exports its independent cleanup attestation. Missing observation evidence keeps
+qualification failed even when cleanup is finalized.
 
 These checks establish only the requested EC2 authorization outcomes. They do
 not prove missing principal-tag trust rejection, foreign-resource isolation,

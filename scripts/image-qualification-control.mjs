@@ -2813,11 +2813,20 @@ function readExecutionProof() {
       throw new Error("execution proof checksum mismatch");
     }
   }
-  if (process.env.QUALIFICATION_MODE === "first-walk")
+  if (process.env.QUALIFICATION_MODE === "first-walk") {
+    // A failed executor may stop before either observation file exists. Keep
+    // this a qualification failure; cleanupRun still exports its independent
+    // authoritative cleanup evidence and settles every admitted resource.
+    if (
+      !fs.existsSync(path.join(directory, "first-walk.json")) ||
+      !fs.existsSync(path.join(directory, "first-walk-result.json"))
+    )
+      throw new Error("first-walk observation unavailable: execution proof is incomplete");
     return {
       ...readJSON(path.join(directory, "first-walk.json")),
       result: readJSON(path.join(directory, "first-walk-result.json")),
     };
+  }
   return {
     spoof: readJSON(path.join(directory, "spoofed-admin.json")),
     fsr: readJSON(path.join(directory, "fsr-denial.json")),
