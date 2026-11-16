@@ -2764,6 +2764,41 @@ export async function recoverActiveQualification(recovery, expected) {
   return await cleanupRun({ recovery, expected });
 }
 
+// Read through the existing, authenticated original controller. Never create a
+// caller or enable a hostname while deciding whether cleanup issuance is safe.
+export async function observeRecoveryOwner({ callerCF, authorityCF, token }, expected) {
+  const domain = await callerCF.request("/workers/subdomain");
+  const exposure = await callerCF.request(`/workers/scripts/${controllerName}/subdomain`);
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain?.subdomain ?? "") ||
+    exposure?.enabled !== true ||
+    exposure.previews_enabled !== false
+  )
+    throw new Error("original recovery controller is unavailable");
+  const url = `https://${controllerName}.${domain.subdomain}.workers.dev`;
+  const discovered = await controllerCall(callerCF, url, token, "discover", {}, authorityCF);
+  for (const key of ["runId", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"])
+    if (discovered?.run?.[key] !== expected[key])
+      throw new Error("original recovery registry owner differs");
+  const attestation = await controllerCall(
+    callerCF,
+    url,
+    token,
+    "attest",
+    { runId: expected.runId },
+    authorityCF,
+  );
+  verifyAttestationIdentity(attestation, expected);
+  const finalizing = Date.parse(attestation.finalizingAt ?? "");
+  if (
+    attestation.finalized !== false ||
+    !Number.isFinite(finalizing) ||
+    finalizing < Date.parse(attestation.enrolledAt)
+  )
+    throw new Error("original recovery owner is not awaiting finalization");
+  return attestation;
+}
+
 function readExecutionProof() {
   const directory = process.env.QUALIFICATION_EXECUTION_PROOF_DIR?.trim();
   if (!directory || !fs.existsSync(directory))

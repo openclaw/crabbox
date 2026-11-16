@@ -172,6 +172,59 @@ and its original source identity, using the newly inspected raw settings digest.
 Independent recovery also executes that exact original idle owner. The option
 does not extend an expired recovery deadline or grant enrollment permission.
 
+## Same-owner cleanup after authority session loss
+
+Idle replacement above remains idle-only. For an already-finalizing first-walk
+owner, the existing `image-qualification-recovery.mjs` additionally accepts
+`deliver-session` and `inspect-session` after its original recovery directory.
+Use them only after the supported authority update has installed the exact
+original-owner cleanup binding. That mode denies enrollment, forward work and
+probes and preserves the original ledger, source protection and namespaces.
+
+The immutable recovery plan may contain `cleanupSession` with profile
+`same-owner-cleanup-session/v1`, the original protected first-walk `scope`,
+canonical private `directory`, pinned `aws: {path,sha256}`, admitted `tokenId`,
+full `authoritySettingsSha256`, `preCustodySha256`, `startsAt` and
+`deliveryStopsAt` (20 minutes later). Delivery must end at least one hour before
+the original recovery deadline. Scope fields must match the original handoff;
+neither the original run's clocks nor original caller ownership may change.
+
+Private `pre-cleanup-custody.json` and `post-cleanup-custody.json` bind that
+profile, `runId`, current reviewed `sourceSha`, observed `authorityVersion`,
+`exclusiveUntil` equal to the original recovery deadline and `observedAt` no
+older than 15 minutes. Require all of `continuousExclusiveCustody`,
+`noConcurrentWritersOrCallers`, `noActiveWorkflowWriters`,
+`noOtherSessionConsumers` and `fallbackReady` true. These are trusted operator
+assertions, not authenticated history. Do not commit custody or plan records.
+
+`deliver-session` alone needs the separately authorized direct-user bootstrap
+key. It issues once with the original four tags and original cutoffs, plus an
+unconditional denial of all forward actions, then PATCHes only the three AWS
+secret fields once. It records exclusive fsynced issuance intent before STS and
+delivery intent before PATCH. It does not run the finalizer or re-admit work.
+The session must outlive the original recovery deadline by an hour. It does not
+revoke earlier sessions; stop their other consumers and preserve cleanup mode.
+
+`inspect-session` uses no AWS credentials and never retries issuance or delivery.
+It may reconcile a lost PATCH response only with the original issuance marker,
+a changed exact serving version, complete original module/settings checks
+(including the one documented provenance-annotation transition), original
+namespaces, exact callers, no unknown authority consumers, fresh custody and a
+live original-owner finalizing attestation. It records the new serving UUID
+separately; original enrollment/caller identity and the recovery plan remain
+unchanged. Later ordinary recovery checks that exact new settings digest and
+uses the existing finalizer, retirement and complete caller-deletion sequence.
+Do not run competing recovery commands. All share the same lock, durable journal
+and original 800-request budget. No deployment fallback or deadline extension
+exists.
+
+Lost issuance material, an unchanged/ambiguous serving version, missing original
+journal/marker, revoked issuer/role permissions or lost Cloudflare/controller
+custody remain explicit recovery dependencies. Preserve them for the existing
+operator; do not clear intent, retry the mutation, substitute a new identity or
+expand permissions to get past a refusal. This is a bounded recovery option,
+not an availability guarantee or qualification success.
+
 ## Credential-free checks
 
 Use Node from `.node-version`:
