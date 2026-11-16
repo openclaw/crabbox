@@ -32,6 +32,15 @@ const fail = () => {
     "qualification session replacement refused; preserve original intent and custody",
   );
 };
+// Only this local error can render specific operator guidance; cloud/tool errors
+// keep the fixed redacted failure below.
+class SessionNotActive extends Error {
+  constructor(seconds) {
+    super(
+      `Session not active. Retry after ${seconds} seconds only within the original delivery window; keep the frozen plan and scope unchanged. No issuance was attempted.`,
+    );
+  }
+}
 const time = (v) => (typeof v === "string" ? Date.parse(v) : NaN);
 const recordHash = ({ integrity: _integrity, ...v }) => digest(canonical(v));
 const seal = (v) => ({ ...v, integrity: recordHash(v) });
@@ -233,18 +242,25 @@ export function verifyReplacementIdle(
 
 // Bounded, sanitized, POSIX process groups. Neither stderr nor raw errors escape.
 // Trusted AWS/Node tools must not detach descendants into other groups.
-export async function sessionChild(argv, env, input, { signal, timeout = 180_000, cwd } = {}) {
+export async function sessionChild(
+  argv,
+  env,
+  input,
+  { signal, timeout = 180_000, cwd, importKeyDryRun = false } = {},
+) {
   if (process.platform === "win32" || signal?.aborted) fail();
   const child = spawn(argv[0], argv.slice(1), {
     env,
     cwd,
     detached: true,
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", importKeyDryRun ? "pipe" : "ignore"],
   });
   let timer,
     failed = false,
-    size = 0;
-  const chunks = [];
+    size = 0,
+    exitCode;
+  const chunks = [],
+    errors = [];
   const kill = () => {
     if (child.pid)
       try {
@@ -264,7 +280,8 @@ export async function sessionChild(argv, env, input, { signal, timeout = 180_000
       resolve();
     });
     child.on("exit", (code) => {
-      if (code !== 0) failed = true;
+      exitCode = code;
+      if (code !== (importKeyDryRun ? 254 : 0)) failed = true;
       resolve();
     });
   });
@@ -272,6 +289,11 @@ export async function sessionChild(argv, env, input, { signal, timeout = 180_000
     size += data.length;
     if (size > 128 * 1024) stop();
     else chunks.push(data);
+  });
+  child.stderr?.on("data", (data) => {
+    size += data.length;
+    if (size > 128 * 1024) stop();
+    else errors.push(data);
   });
   child.stdin.on("error", stop);
   try {
@@ -297,6 +319,7 @@ export async function sessionChild(argv, env, input, { signal, timeout = 180_000
         if (performance.now() >= end) {
           child.stdout.destroy();
           child.stdin.destroy();
+          child.stderr?.destroy();
           fail();
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -305,7 +328,98 @@ export async function sessionChild(argv, env, input, { signal, timeout = 180_000
     await closed;
   }
   if (failed) fail();
+  if (importKeyDryRun) {
+    // CLI v2 service errors are exit254. Never accept substrings, stdout, local
+    // errors or a successful mutation; never return the raw message/encoded detail.
+    const match =
+      /^\n?(?:aws: \[ERROR\]: )?An error occurred \((DryRunOperation|UnauthorizedOperation)\) when calling the ImportKeyPair operation: [^\r\n]+\r?\n?$/.exec(
+        Buffer.concat(errors).toString("utf8"),
+      );
+    if (exitCode !== 254 || chunks.length || !match) fail();
+    return match[1];
+  }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+// The RFC8032 public test vector is only syntax for DryRun, never a usable
+// qualification login key. No private key is generated or accepted here.
+const dryRunPublicKey = Buffer.from(
+  "ssh-ed25519 " +
+    Buffer.concat([
+      Buffer.from("0000000b7373682d6564323535313900000020", "hex"),
+      Buffer.from("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex"),
+    ]).toString("base64"),
+).toString("base64");
+
+async function importKeyPreflight(plan, run, sessionEnv, signal, now) {
+  const tags = runSessionTags(plan.runSession);
+  const otherRun = plan.runSession.runId.replace(
+    /([1-9])[0-9]*-1$/,
+    (value) => (value[0] === "1" ? "2" : "1") + value.slice(1),
+  );
+  const mismatches = [
+    otherRun,
+    `${otherRun}@example.invalid`,
+    (plan.runSession.candidateSha[0] === "0" ? "1" : "0") + plan.runSession.candidateSha.slice(1),
+    new Date(time(plan.runSession.expiresAt) + 60_000).toISOString(),
+  ];
+  const cases = [{ name: "same-run-before", tags, expected: "DryRunOperation" }];
+  for (const [index, key] of Object.keys(tags).entries()) {
+    const missing = { ...tags };
+    delete missing[key];
+    cases.push(
+      { name: `missing-${key}`, tags: missing, expected: "UnauthorizedOperation" },
+      {
+        name: `mismatched-${key}`,
+        tags: { ...tags, [key]: mismatches[index] },
+        expected: "UnauthorizedOperation",
+      },
+    );
+  }
+  cases.push({ name: "same-run-after", tags, expected: "DryRunOperation" });
+  const bounded = AbortSignal.any([AbortSignal.timeout(120_000), ...(signal ? [signal] : [])]);
+  const startedAt = new Date(now()).toISOString(),
+    observations = [];
+  for (const item of cases) {
+    const code = await run(
+      [
+        plan.tools.aws.path,
+        "ec2",
+        "import-key-pair",
+        "--dry-run",
+        "--key-name",
+        `${plan.runSession.runId}-issuer-preflight`,
+        "--public-key-material",
+        dryRunPublicKey,
+        "--cli-binary-format",
+        "base64",
+        "--cli-error-format",
+        "legacy",
+        "--tag-specifications",
+        JSON.stringify([
+          {
+            ResourceType: "key-pair",
+            Tags: Object.entries(item.tags).map(([Key, Value]) => ({ Key, Value })),
+          },
+        ]),
+        "--region",
+        plan.isolation.aws.region,
+        "--output",
+        "json",
+      ],
+      sessionEnv,
+      undefined,
+      { importKeyDryRun: true, signal: bounded, timeout: 10_000 },
+    );
+    if (bounded.aborted || code !== item.expected) fail();
+    observations.push({ name: item.name, code });
+  }
+  return {
+    profile: "qualification-import-key-dry-run/v1",
+    startedAt,
+    completedAt: new Date(now()).toISOString(),
+    observations,
+  };
 }
 
 const safeEnv = () => ({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8", CI: "true" });
@@ -505,15 +619,17 @@ export async function replaceIdleSession(
       fail();
     return settingsSha256;
   };
-  const run = async (argv, childEnv, input) => {
+  const run = async (argv, childEnv, input, preflight = {}) => {
     clock(mode === "deliver");
+    if (preflight.signal?.aborted) fail();
     tools(plan);
     return command(argv, childEnv, input, {
-      signal,
+      signal: preflight.signal ?? signal,
+      importKeyDryRun: preflight.importKeyDryRun ?? false,
       timeout: Math.max(
         1,
         Math.min(
-          180_000,
+          preflight.timeout ?? 180_000,
           time(mode === "deliver" ? plan.deliveryStopsAt : plan.recoveryStopsAt) - now(),
         ),
       ),
@@ -542,6 +658,8 @@ export async function replaceIdleSession(
       !env.CLOUDFLARE_API_TOKEN
     )
       fail();
+    const activationWait = time(plan.runSession.startsAt) - now();
+    if (activationWait > 0) throw new SessionNotActive(Math.ceil(activationWait / 1000));
     const pre = await readProof("pre");
     verifyReplacementIdle(plan, pre, plan.isolation, now());
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
@@ -627,11 +745,19 @@ export async function replaceIdleSession(
         `arn:aws:sts::${admission.aws.accountId}:assumed-role/${roleName}/${sessionName}`
     )
       fail();
+    const authorizationPreflight = await importKeyPreflight(
+      plan,
+      run,
+      awsEnv(session, admission.aws.region),
+      signal,
+      now,
+    );
     verifyReplacementIdle(plan, pre, plan.isolation, now());
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
     await fence(plan.isolation);
     await token();
     await persist("delivery-intent", {
+      authorizationPreflight,
       sessionExpiresAt: c.Expiration,
       runSessionSha256: digest(canonical(plan.runSession)),
       sessionPolicySha256: digest(canonical(runSessionPolicy(plan.runSession))),
@@ -844,9 +970,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   replacementCommand(process.argv.slice(2)).then(
     (state) =>
       console.log(`Session operation: ${state.phase}. Enrollment remains separately gated.`),
-    () => {
+    (error) => {
       console.error(
-        "Session operation stopped. Preserve the original intent; no blind retry. No raw diagnostic or credential was printed.",
+        error instanceof SessionNotActive
+          ? error.message
+          : "Session operation stopped. Preserve the original intent; no blind retry. No raw diagnostic or credential was printed.",
       );
       process.exitCode = 1;
     },
