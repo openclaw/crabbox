@@ -210,10 +210,9 @@ func externalDesktopChildEnvDenylist(cfg Config, _ string) []string {
 // rsync, scp, and viewer launchers.
 func ApplyTargetChildEnvironmentBoundary(cfg Config, target *SSHTarget) {
 	if target != nil {
-		target.ChildEnvDenylist = appendUniqueStrings(
-			target.ChildEnvDenylist,
-			externalDesktopChildEnvDenylist(cfg, target.TargetOS)...,
-		)
+		if denied := externalDesktopChildEnvDenylist(cfg, target.TargetOS); len(denied) > 0 {
+			target.ChildEnvDenylist = appendUniqueStrings(target.ChildEnvDenylist, denied...)
+		}
 	}
 }
 

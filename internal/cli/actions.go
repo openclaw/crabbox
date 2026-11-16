@@ -455,7 +455,7 @@ func targetWithConfigDefaults(target SSHTarget, cfg Config) SSHTarget {
 	if target.TargetOS == "" {
 		target.TargetOS = cfg.TargetOS
 	}
-	if target.WindowsMode == "" {
+	if target.TargetOS == targetWindows && target.WindowsMode == "" {
 		target.WindowsMode = cfg.WindowsMode
 	}
 	ApplyTargetChildEnvironmentBoundary(cfg, &target)

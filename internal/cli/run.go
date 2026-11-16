@@ -2112,13 +2112,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !*preflight || preflightPrinted {
 			return nil
 		}
-		hydrateTarget := currentTarget
-		if hydrateTarget.TargetOS == "" {
-			hydrateTarget.TargetOS = cfg.TargetOS
-		}
-		if hydrateTarget.WindowsMode == "" {
-			hydrateTarget.WindowsMode = cfg.WindowsMode
-		}
+		hydrateTarget := targetWithConfigDefaults(currentTarget, cfg)
 		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
 		preflightEnv := mergeEnv(nil, envSelection.Inline)
 		removeEnvironmentKeys(preflightEnv, reservedRunEnvNames...)
@@ -2151,13 +2145,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			rawJSRuntimePreflightDone = true
 			return nil
 		}
-		hydrateTarget := currentTarget
-		if hydrateTarget.TargetOS == "" {
-			hydrateTarget.TargetOS = cfg.TargetOS
-		}
-		if hydrateTarget.WindowsMode == "" {
-			hydrateTarget.WindowsMode = cfg.WindowsMode
-		}
+		hydrateTarget := targetWithConfigDefaults(currentTarget, cfg)
 		if autoHydrateActions && supportsLocalActionsHydrateTarget(hydrateTarget) {
 			rawJSRuntimePreflightDone = true
 			return nil
@@ -2192,13 +2180,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !autoHydrateActions || hydratedByActions {
 			return nil
 		}
-		hydrateTarget := currentTarget
-		if hydrateTarget.TargetOS == "" {
-			hydrateTarget.TargetOS = cfg.TargetOS
-		}
-		if hydrateTarget.WindowsMode == "" {
-			hydrateTarget.WindowsMode = cfg.WindowsMode
-		}
+		hydrateTarget := targetWithConfigDefaults(currentTarget, cfg)
 		if !supportsLocalActionsHydrateTarget(hydrateTarget) {
 			return nil
 		}

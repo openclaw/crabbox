@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Actions: preserve the prepared native Linux runtime through hydration and workspace verification when applying configuration defaults.
+
 ## 0.83.0 - 2026-11-10
 
 ### Added

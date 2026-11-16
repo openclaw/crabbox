@@ -31,6 +31,34 @@ func runtimeLeaseContext(ctx context.Context, lease string) context.Context {
 	return context.WithValue(ctx, nativeRuntimeLeaseKey{}, lease)
 }
 
+func TestNativeRuntimeAdmissionSurvivesActionsDefaults(t *testing.T) {
+	s := testNativeRuntimeScope()
+	s.manifest = "selected fixture"
+	s.ready = func(context.Context, *SSHTarget, io.Writer) error { return nil }
+	ctx := context.WithValue(runtimeLeaseContext(t.Context(), "lease-a"), nativeRuntimeScopeKey{}, s)
+	target := SSHTarget{Host: "example.invalid", Port: "22", TargetOS: targetLinux}
+	ctx, err := s.prepareCommandRuntime(ctx, &target, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Run prepares the native runtime before Actions hydration applies defaults.
+	// Linux config still carries a default Windows mode; it must not change the route.
+	cfg := baseConfig()
+	cfg.TargetOS = targetLinux
+	cfg.WindowsMode = windowsModeNormal
+	hydrateTarget := targetWithConfigDefaults(target, cfg)
+	transport, err := prepareSSHTransport(ctx, hydrateTarget, remoteInvalidateSyncFingerprintForTarget(hydrateTarget, "/work/my-app", false), nil, 0, sshCommandLimit{})
+	if err != nil {
+		t.Fatalf("Actions fingerprint invalidation lost prepared runtime: %v", err)
+	}
+	if transport.native == nil {
+		t.Fatal("Actions fingerprint invalidation bypassed native runtime")
+	}
+	if err := transport.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNativeRuntimeScopeSharesInstallation(t *testing.T) {
 	s := testNativeRuntimeScope()
 	var installs atomic.Int32
