@@ -214,7 +214,7 @@ function fixture(t, { secretProvenance = false } = {}) {
       model.saves.push(structuredClone(value));
     },
     command: async (argv, env, input, options) => {
-      model.commands.push({ argv, env, input });
+      model.commands.push({ argv, env, input, options });
       assert.equal(options.cwd, dir);
       await model.command?.(argv, env, input);
       if (argv.includes("assume-role")) {
@@ -240,6 +240,25 @@ function fixture(t, { secretProvenance = false } = {}) {
           },
           ...model.assumed,
         });
+      }
+      if (argv.includes("import-key-pair")) {
+        assert.equal(options.importKeyDryRun, true);
+        assert.ok(options.timeout > 0 && options.timeout <= 10_000);
+        assert.equal(env.AWS_ACCESS_KEY_ID, "fake-new-id");
+        assert.equal(env.AWS_SECRET_ACCESS_KEY, "fake-new-secret");
+        assert.equal(env.AWS_SESSION_TOKEN, "fake-new-token");
+        assert.equal(env.CLOUDFLARE_API_TOKEN, undefined);
+        const tags = Object.fromEntries(
+          JSON.parse(argv[argv.indexOf("--tag-specifications") + 1])[0].Tags.map(
+            ({ Key, Value }) => [Key, Value],
+          ),
+        );
+        return (
+          model.dryRunCode ??
+          (canonical(tags) === canonical(runSessionTags(plan.runSession))
+            ? "DryRunOperation"
+            : "UnauthorizedOperation")
+        );
       }
       if (argv.includes("get-caller-identity"))
         return JSON.stringify({
@@ -918,8 +937,8 @@ test("real management client sends one fixed-endpoint bounded request without pe
   assert.equal(requests[0].init.headers["Content-Type"], "application/merge-patch+json");
   assert.equal(
     f.model.commands.length,
-    2,
-    "only STS and identity children; no delivery CLI/dotenv/logs",
+    12,
+    "only STS, identity and ten DryRun children; no delivery CLI/dotenv/logs",
   );
   assert.deepEqual(fs.readdirSync(f.dir).toSorted(), [
     "aws.json",
@@ -1051,3 +1070,145 @@ for (const [label, alter] of Object.entries({
     assert.equal(f.model.commands.length, 0);
     assert.equal(f.model.delivery, undefined);
   });
+
+test("issuer checks only fixed no-allocation imports with exact session tags before delivery", async (t) => {
+  const f = fixture(t);
+  await f.run("deliver");
+  const probes = f.model.commands.filter(({ argv }) => argv.includes("import-key-pair"));
+  assert.equal(probes.length, 10);
+  const original = runSessionTags(f.plan.runSession);
+  const observed = probes.map(({ argv, env, options }) => {
+    assert.equal(argv.filter((v) => v === "--dry-run").length, 1);
+    assert.equal(argv.includes("--no-dry-run"), false);
+    assert.equal(
+      argv[argv.indexOf("--key-name") + 1],
+      `${f.plan.runSession.runId}-issuer-preflight`,
+    );
+    assert.equal(argv[argv.indexOf("--region") + 1], f.plan.isolation.aws.region);
+    assert.equal(argv[argv.indexOf("--cli-binary-format") + 1], "base64");
+    const publicKey = Buffer.from(
+      argv[argv.indexOf("--public-key-material") + 1],
+      "base64",
+    ).toString();
+    assert.match(publicKey, /^ssh-ed25519 [A-Za-z0-9+/=]+$/);
+    const wireKey = Buffer.from(publicKey.split(" ")[1], "base64");
+    assert.equal(wireKey.readUInt32BE(0), 11);
+    assert.equal(wireKey.readUInt32BE(15), 32);
+    assert.equal(wireKey.length, 51);
+    assert.equal(env.AWS_MAX_ATTEMPTS, "1");
+    assert.equal(env.AWS_CONFIG_FILE, "/dev/null");
+    assert.equal(env.AWS_SHARED_CREDENTIALS_FILE, "/dev/null");
+    assert.equal(env.AWS_EC2_METADATA_DISABLED, "true");
+    assert.equal(options.signal.aborted, false);
+    const specs = JSON.parse(argv[argv.indexOf("--tag-specifications") + 1]);
+    assert.equal(specs.length, 1);
+    assert.equal(specs[0].ResourceType, "key-pair");
+    return Object.fromEntries(specs[0].Tags.map(({ Key, Value }) => [Key, Value]));
+  });
+  assert.deepEqual(observed[0], original);
+  assert.deepEqual(observed.at(-1), original);
+  Object.keys(original).forEach((key, index) => {
+    const missing = { ...original };
+    delete missing[key];
+    assert.deepEqual(observed[1 + index * 2], missing);
+    const mismatch = observed[2 + index * 2];
+    assert.notEqual(mismatch[key], original[key]);
+    assert.deepEqual({ ...mismatch, [key]: original[key] }, original);
+  });
+  assert.deepEqual(
+    f.state.authorizationPreflight.observations.map(({ code }) => code),
+    ["DryRunOperation", ...Array(8).fill("UnauthorizedOperation"), "DryRunOperation"],
+  );
+  assert.ok(!JSON.stringify(f.model.saves).includes("fake-new"));
+});
+
+for (const stage of [
+  "same-run-denied",
+  "cross-run-allowed",
+  "unexpected",
+  "lost",
+  "cancelled",
+  "deadline",
+])
+  test(`preflight ${stage} prevents delivery and leaves issuance permanently fenced`, async (t) => {
+    const f = fixture(t);
+    const stop = new AbortController();
+    f.context.signal = stop.signal;
+    let count = 0;
+    f.model.command = async (argv) => {
+      if (!argv.includes("import-key-pair")) return;
+      count++;
+      if (stage === "same-run-denied") f.model.dryRunCode = "UnauthorizedOperation";
+      if (stage === "cross-run-allowed") f.model.dryRunCode = "DryRunOperation";
+      if (stage === "unexpected") f.model.dryRunCode = "InvalidKey.Format";
+      if (stage === "lost") throw new Error("lost DryRun response");
+      if (stage === "cancelled") stop.abort();
+      if (stage === "deadline") f.model.now = Date.parse(f.plan.deliveryStopsAt);
+    };
+    await assert.rejects(f.run("deliver"));
+    assert.equal(count, stage === "cross-run-allowed" ? 2 : 1);
+    assert.equal(f.state.phase, "issuance-intent");
+    assert.equal(f.state.authorizationPreflight, undefined);
+    assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 0);
+    await assert.rejects(f.run("deliver"));
+    f.context.signal = undefined;
+    f.model.now = Date.parse(f.plan.startsAt) + 1000;
+    await f.run("inspect");
+    assert.equal(f.state.admissionDenied, true);
+    assert.equal(f.model.commands.filter(({ argv }) => argv.includes("assume-role")).length, 1);
+    assert.equal(
+      f.model.commands.filter(({ argv }) => argv.includes("import-key-pair")).length,
+      count,
+    );
+  });
+
+test("DryRun child accepts only exact exit254 ImportKeyPair authorization codes and suppresses raw output", async () => {
+  const message = (code, action = "ImportKeyPair") =>
+    `\nAn error occurred (${code}) when calling the ${action} operation: fake-secret encoded detail\n`;
+  const run = (stderr, exit = 254, stdout = "", options = {}) =>
+    sessionChild(
+      [
+        process.execPath,
+        "-e",
+        `process.stdout.write(${JSON.stringify(stdout)});process.stderr.write(${JSON.stringify(stderr)});process.exit(${exit})`,
+      ],
+      {},
+      "",
+      { importKeyDryRun: true, ...options },
+    );
+  for (const code of ["DryRunOperation", "UnauthorizedOperation"])
+    assert.equal(await run(message(code)), code);
+  for (const [stderr, exit, stdout] of [
+    [message("DryRunOperation"), 0],
+    [message("UnauthorizedOperation"), 255],
+    [message("DryRunOperation", "RunInstances"), 254],
+    [message("AccessDenied"), 254],
+    [message("DryRunOperation") + message("UnauthorizedOperation"), 254],
+    ["fake-secret DryRunOperation", 254],
+    [message("DryRunOperation"), 254, "unexpected response"],
+    ["x".repeat(140000), 254],
+  ])
+    await assert.rejects(
+      run(stderr, exit, stdout),
+      (error) => !error.message.includes("fake-secret"),
+    );
+  await assert.rejects(
+    sessionChild(
+      [
+        process.execPath,
+        "-e",
+        `process.stderr.write(${JSON.stringify(message("DryRunOperation"))});setInterval(()=>{},1000)`,
+      ],
+      {},
+      "",
+      { importKeyDryRun: true, timeout: 30 },
+    ),
+  );
+  const stop = new AbortController();
+  const pending = sessionChild([process.execPath, "-e", "setInterval(()=>{},1000)"], {}, "", {
+    importKeyDryRun: true,
+    signal: stop.signal,
+  });
+  stop.abort();
+  await assert.rejects(pending);
+});

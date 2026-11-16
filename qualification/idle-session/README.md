@@ -329,3 +329,32 @@ authorization for policy validation/DryRun plus one disposable synthetic full
 cycle, including executor loss, independent recovery and exact zero-residue/source
 preservation proof. No production/campaign input or first-walk performance claim
 follows from these checks.
+
+### Fixed issuer permission preflight
+
+After checking the new STS identity and before delivering its secrets, the trusted
+issuer performs ten fixed EC2 `ImportKeyPair --dry-run` requests. The first and
+last must return `DryRunOperation` with all four same-run request tags. Between
+them, each missing ownership tag and each mismatched ownership value must return
+`UnauthorizedOperation`. These are request-tag checks using the same actual tagged
+session, not missing-principal-tag or cross-session tests. The public test-vector
+key is syntax only; this path never imports a key or allocates another fixture.
+
+Only an AWS CLI v2 service error (exit 254) with the exact action and authorization
+code is accepted. Other exits, success, malformed output, timeout or cancellation
+block delivery. Each child has ten seconds, no AWS retry, bounded output and
+complete process-group settlement; the gate has a two-minute cancellation bound
+plus final settlement, within the original delivery deadline. The existing
+issuance marker prevents repeating STS issuance after any failure. Inspect can
+record denial but cannot retry delivery or turn partial checks into admission.
+Only case names/codes and timestamps enter the private journal, alongside the
+existing scope/policy digests; raw error details and credentials stay out of it.
+Historical inspect/reseal journals remain recoverable without invented evidence.
+
+This gate is deliberately limited. Existing-resource ownership-tag changes,
+launch, capture, copy, attachment, deletion and KMS authorization still require
+their own validation against actual admitted synthetic resources at the relevant
+lifecycle stages. A nonexistent key/volume is not positive authorization proof.
+DryRun does not demonstrate real execution, cleanup or bootstrap improvement.
+See the [EC2 API contract](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ImportKeyPair.html)
+and [AWS CLI return codes](https://docs.aws.amazon.com/cli/latest/userguide/cli-usage-returncodes.html).
