@@ -19,6 +19,7 @@ import { readPrivateJSON, withQualificationJournal } from "./image-qualification
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceFiles = [
   "image-qualification-control.mjs",
+  "image-qualification-controller-http.mjs",
   "image-qualification-isolation.mjs",
   "image-qualification-controller-worker.mjs",
   "image-qualification-binding-probe.mjs",
