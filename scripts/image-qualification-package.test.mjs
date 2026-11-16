@@ -92,6 +92,28 @@ function fixture() {
   return { temp, baseline, candidate, protectedRoot, contract };
 }
 
+test("checked-in package prepares current production inputs against its exact baseline", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "qualification-current-package-"));
+  try {
+    const { contract } = readQualificationPackage(root);
+    const baseline = path.join(temp, "baseline");
+    const candidate = path.join(temp, "candidate");
+    for (const [directory, commit] of [
+      [baseline, contract.baselineCommit],
+      [candidate, git(root, "rev-parse", "HEAD")],
+    ]) {
+      git(temp, "clone", "--quiet", "--shared", "--no-checkout", root, directory);
+      git(directory, "checkout", "--quiet", "--detach", commit);
+    }
+    fs.cpSync(path.join(root, pkg), path.join(candidate, pkg), { recursive: true });
+    assertProductionBaseline(root, baseline, contract);
+    const result = prepareQualificationBuild(root, candidate, baseline);
+    assert.deepEqual(result.qualification, qualificationIdentity(root));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("private build applies only protected pinned data in a separate exact baseline", () => {
   const f = fixture();
   try {
