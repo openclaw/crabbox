@@ -331,8 +331,9 @@ export async function sessionChild(
   if (importKeyDryRun) {
     // CLI v2 service errors are exit254. Never accept substrings, stdout, local
     // errors or a successful mutation; never return the raw message/encoded detail.
+    // AWS_MAX_ATTEMPTS=1 may add the exact zero-retry marker. No retries run.
     const match =
-      /^\n?(?:aws: \[ERROR\]: )?An error occurred \((DryRunOperation|UnauthorizedOperation)\) when calling the ImportKeyPair operation: [^\r\n]+\r?\n?$/.exec(
+      /^\n?(?:aws: \[ERROR\]: )?An error occurred \((DryRunOperation|UnauthorizedOperation)\) when calling the ImportKeyPair operation(?: \(reached max retries: 0\))?: [^\r\n]+\r?\n?$/.exec(
         Buffer.concat(errors).toString("utf8"),
       );
     if (exitCode !== 254 || chunks.length || !match) fail();
