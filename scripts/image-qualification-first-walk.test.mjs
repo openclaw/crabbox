@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
 import test from "node:test";
-import relay from "./image-qualification-relay-worker.mjs";
-import {
-  prepareQualificationBuild,
-  readQualificationPackage,
-} from "./image-qualification-package.mjs";
+
 import {
   firstWalkRecipeSha256,
   readFirstWalkRecipe,
@@ -18,6 +14,11 @@ import {
   verifyQualificationEvidence,
   verifyFirstWalkPreparation,
 } from "./image-qualification-control.mjs";
+import {
+  prepareQualificationBuild,
+  readQualificationPackage,
+} from "./image-qualification-package.mjs";
+import relay from "./image-qualification-relay-worker.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
@@ -240,6 +241,18 @@ async function checkPinnedCLI(commands, directory) {
     CANDIDATE: {
       fetch: async (request) => {
         const pathname = new URL(request.url).pathname;
+        if (pathname === "/v1/runs/run_receipt_fixture")
+          return Response.json({
+            run: { id: "run_receipt_fixture", exitCode: 0, endedAt: "2026-01-01T00:00:01Z" },
+          });
+        if (pathname === "/v1/runs/run_receipt_fixture/receipt") {
+          assert.equal(request.method, "GET");
+          assert.equal(
+            request.headers.get("authorization"),
+            `Bearer ${relayEnv.CANDIDATE_ADMIN_TOKEN}`,
+          );
+          return Response.json({ error: "fixture_receipt_stop" }, { status: 403 });
+        }
         if (request.method === "GET" && /^\/v1\/leases\/cbx_/.test(pathname))
           return Response.json({
             lease: {
@@ -317,6 +330,35 @@ async function checkPinnedCLI(commands, directory) {
           method === "GET" || method === "PUT" || url.endsWith("/admission-failure"),
       ),
     );
+
+    // Use the same pinned CLI to send its real receipt request through the
+    // relay. Stop at the candidate, before signature verification: existing Go
+    // tests cover receipt verification, and no log-read route is needed here.
+    const receipt = await new Promise((resolve, reject) => {
+      let stderr = "";
+      const child = spawn(binary, ["receipt", "run_receipt_fixture"], {
+        cwd: home,
+        env: {
+          ...commands[0].env,
+          CRABBOX_COORDINATOR: `http://127.0.0.1:${server.address().port}`,
+          HOME: home,
+          XDG_CONFIG_HOME: path.join(home, "config"),
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      });
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal, stderr }));
+    });
+    assert.equal(receipt.signal, null);
+    assert.notEqual(receipt.code, 0);
+    assert.match(receipt.stderr, /fixture_receipt_stop/);
+    assert.deepEqual(requests.slice(-2), [
+      { method: "GET", url: "/v1/runs/run_receipt_fixture" },
+      { method: "GET", url: "/v1/runs/run_receipt_fixture/receipt" },
+    ]);
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
