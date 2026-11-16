@@ -477,7 +477,7 @@ index 00000000..4211b953
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d..6abf598b 100644
+index ad26506d..189de922 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
 @@ -1,15 +1,31 @@
@@ -1329,7 +1329,7 @@ index ad26506d..6abf598b 100644
        },
        maxVerificationEvidence,
      );
-@@ -1491,12 +2065,19 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1491,12 +2065,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        const result = await boundedResponse(response);
        if (
          result.status >= 300 &&
@@ -1337,6 +1337,7 @@ index ad26506d..6abf598b 100644
 -        !result.body.includes("InvalidAMIID.NotFound") &&
 -        !result.body.includes("InvalidSnapshot.NotFound")
 +        (action === "DeleteKeyPair" ||
++          action === "DeregisterImage" ||
 +          (!result.body.includes("NotFound") &&
 +            !result.body.includes("InvalidAMIID.NotFound") &&
 +            !result.body.includes("InvalidSnapshot.NotFound")))
@@ -1346,53 +1347,60 @@ index ad26506d..6abf598b 100644
 +        // Preserve the rejected mutation. Only authoritative exact-ID absence can
 +        // settle its obligation; tag-filtered inventory is deliberately insufficient.
 +        if (
-+          action !== "DeleteKeyPair" ||
-+          !(await this.confirmRejectedKeyAbsent(run, policy, parameters))
++          (action !== "DeleteKeyPair" && action !== "DeregisterImage") ||
++          !(await this.confirmRejectedDeleteAbsent(run, policy, action, parameters))
 +        )
 +          failures.push(`${action} http ${result.status}`);
        } else {
          await this.finishCleanupEvidence(
            evidenceSequence,
-@@ -1512,6 +2093,47 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1512,6 +2094,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
    }
 
-+  private async confirmRejectedKeyAbsent(
++  private async confirmRejectedDeleteAbsent(
 +    run: AWSQualificationRunState,
 +    policy: AWSQualificationPolicy,
++    action: "DeleteKeyPair" | "DeregisterImage",
 +    parameters: Record<string, unknown>,
 +  ): Promise<boolean> {
-+    const id = parameters["KeyPairId"];
++    const image = action === "DeregisterImage";
++    const idField = image ? "ImageId" : "KeyPairId";
++    const readAction = image ? "DescribeImages" : "DescribeKeyPairs";
++    const id = parameters[idField];
 +    const ledger = await this.ledger();
++    const owned = image
++      ? ownedWithRetired(ledger.imageIds, ledger.retiredImageIds)
++      : ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
 +    if (
 +      typeof id !== "string" ||
-+      Object.keys(parameters).join(",") !== "KeyPairId" ||
-+      !ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds).includes(id)
++      Object.keys(parameters).join(",") !== idField ||
++      !owned.includes(id)
 +    )
-+      throw new Error("rejected key deletion is not ledger-owned");
++      throw new Error("rejected deletion is not ledger-owned");
 +    assertRecoveryRun(this.env, run);
 +    try {
 +      await this.ensureAccount(policy);
 +      const response = await this.signer.execute(
 +        "ec2",
-+        "DescribeKeyPairs",
++        readAction,
 +        policy.region,
 +        {
-+          "KeyPairId.1": id,
++          [`${idField}.1`]: id,
 +        },
 +        AbortSignal.timeout(30_000),
 +      );
 +      const result = await boundedResponse(response);
-+      const absent = exactKeyAbsence(result);
++      const absent = exactResourceAbsence(result, readAction);
 +      await this.recordVerificationEvidence(
-+        "DescribeKeyPairsAfterRejectedDelete",
++        `${readAction}AfterRejectedDelete`,
 +        absent ? "absent" : "rejected",
-+        { KeyPairId: id },
++        { [idField]: id },
 +      );
 +      return absent;
 +    } catch {
-+      await this.recordVerificationEvidence("DescribeKeyPairsAfterRejectedDelete", "error", {
-+        KeyPairId: id,
++      await this.recordVerificationEvidence(`${readAction}AfterRejectedDelete`, "error", {
++        [idField]: id,
 +      });
 +      return false;
 +    }
@@ -1401,7 +1409,7 @@ index ad26506d..6abf598b 100644
    private async inventoryRunResources(
      run: AWSQualificationRunState,
      ledger: AWSQualificationLedger,
-@@ -1547,6 +2169,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1547,6 +2177,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        for (const result of [instances, images, snapshots, volumes, keys]) {
          if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
        }
@@ -1420,7 +1428,7 @@ index ad26506d..6abf598b 100644
        ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
          .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
          .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
-@@ -1581,6 +2215,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1581,6 +2223,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          ledger.instanceIds.length > maxActiveInstances ||
          ledger.imageIds.length > maxActiveImages ||
          ledger.snapshotIds.length > maxActiveSnapshots ||
@@ -1428,7 +1436,7 @@ index ad26506d..6abf598b 100644
          ledger.keyPairIds.length > 1
        ) {
          failures.push("run-tag inventory exceeds qualification resource bounds");
-@@ -1662,7 +2297,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1662,7 +2305,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
        for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
          const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1437,7 +1445,7 @@ index ad26506d..6abf598b 100644
        }
      }
      await this.ctx.storage.put(ledgerKey, ledger);
-@@ -1780,6 +2415,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1780,6 +2423,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      );
    }
 
@@ -1480,10 +1488,43 @@ index ad26506d..6abf598b 100644
    private async retireUnresolvedIntents(): Promise<void> {
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
-@@ -1868,45 +2539,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1808,14 +2487,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       "reservationSet",
+       failures,
+     );
+-    await this.verifyAbsent(
+-      policy,
+-      "DescribeImages",
+-      "ImageId",
+-      ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+-      "imagesSet",
+-      failures,
+-    );
++    await this.verifyExactResourcesAbsent(ledger, policy, "DescribeImages", failures);
+     await this.verifyAbsent(
+       policy,
+       "DescribeSnapshots",
+@@ -1832,7 +2504,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       "volumeSet",
+       failures,
+     );
+-    await this.verifyKeyPairsAbsent(ledger, policy, failures);
++    await this.verifyExactResourcesAbsent(ledger, policy, "DescribeKeyPairs", failures);
+     try {
+       const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
+         "GroupId.1": policy.securityGroupId,
+@@ -1862,51 +2534,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     }
+   }
+
+-  private async verifyKeyPairsAbsent(
++  private async verifyExactResourcesAbsent(
+     ledger: AWSQualificationLedger,
+     policy: AWSQualificationPolicy,
++    action: "DescribeKeyPairs" | "DescribeImages",
      failures: string[],
    ): Promise<void> {
-     const keyPairIds = ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
+-    const keyPairIds = ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
 -    const parameters =
 -      keyPairIds.length > 0
 -        ? Object.fromEntries(keyPairIds.map((id, index) => [`KeyPairId.${index + 1}`, id]))
@@ -1491,11 +1532,19 @@ index ad26506d..6abf598b 100644
 -            ledger.keyPairNames.map((name, index) => [`KeyName.${index + 1}`, name]),
 -          );
 -    if (Object.keys(parameters).length === 0) {
-+    const lookups = keyPairIds.length
-+      ? keyPairIds.map((id) => ({ "KeyPairId.1": id }))
-+      : ledger.keyPairNames.map((name) => ({ "KeyName.1": name }));
+-      await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
++    const image = action === "DescribeImages";
++    const ids = image
++      ? ownedWithRetired(ledger.imageIds, ledger.retiredImageIds)
++      : ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
++    const idField = image ? "ImageId" : "KeyPairId";
++    const lookups = ids.length
++      ? ids.map((id) => ({ [`${idField}.1`]: id }))
++      : image
++        ? []
++        : ledger.keyPairNames.map((name) => ({ "KeyName.1": name }));
 +    if (!lookups.length) {
-       await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
++      await this.recordVerificationEvidence(action, "absent");
        return;
      }
 -    try {
@@ -1508,26 +1557,22 @@ index ad26506d..6abf598b 100644
 -      const result = await boundedResponse(response);
 -      if (result.status >= 300) {
 -        if (result.body.includes("NotFound")) {
+-          await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+-          return;
 +    for (const parameters of lookups) {
 +      try {
-+        // One immutable ID per response: NotFound for one key cannot hide another.
-+        // oxlint-disable-next-line eslint/no-await-in-loop -- verify each exact key independently.
-+        const response = await this.signer.execute(
-+          "ec2",
-+          "DescribeKeyPairs",
-+          policy.region,
-+          parameters,
-+        );
++        // One immutable ID per response: NotFound for one resource cannot hide another.
++        // oxlint-disable-next-line eslint/no-await-in-loop -- verify each exact resource independently.
++        const response = await this.signer.execute("ec2", action, policy.region, parameters);
 +        // oxlint-disable-next-line eslint/no-await-in-loop -- bound each independent response.
 +        const result = await boundedResponse(response);
-+        if (!exactKeyAbsence(result)) {
-+          failures.push("DescribeKeyPairs exact absence not established");
++        if (!exactResourceAbsence(result, action)) {
++          failures.push(`${action} exact absence not established`);
 +          // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
-+          await this.recordVerificationEvidence("DescribeKeyPairs", "rejected");
++          await this.recordVerificationEvidence(action, "rejected");
 +        } else {
 +          // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
-           await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
--          return;
++          await this.recordVerificationEvidence(action, "absent");
          }
 -        await this.recordVerificationEvidence("DescribeKeyPairs", "rejected");
 -        failures.push(`DescribeKeyPairs verification http ${result.status}`);
@@ -1540,9 +1585,9 @@ index ad26506d..6abf598b 100644
 -      } else {
 -        await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
 +      } catch {
-+        failures.push("DescribeKeyPairs exact verification failed");
++        failures.push(`${action} exact verification failed`);
 +        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
-+        await this.recordVerificationEvidence("DescribeKeyPairs", "error");
++        await this.recordVerificationEvidence(action, "error");
        }
 -    } catch (error) {
 -      await this.recordVerificationEvidence("DescribeKeyPairs", "error");
@@ -1552,7 +1597,7 @@ index ad26506d..6abf598b 100644
      }
    }
 
-@@ -1986,6 +2650,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1986,6 +2653,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
      action: string,
      region: string,
      parameters: Record<string, unknown>,
@@ -1560,7 +1605,7 @@ index ad26506d..6abf598b 100644
    ): Promise<Response> {
      const credentials = authorityCredentials(this.env);
      const client = new AwsClient({ ...credentials, service, region, retries: 0 });
-@@ -1999,6 +2664,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1999,6 +2667,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
        }
        return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
          method: "POST",
@@ -1568,7 +1613,7 @@ index ad26506d..6abf598b 100644
          headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
          body: body.toString(),
        });
-@@ -2236,9 +2902,11 @@ function authorizedRunInstances(
+@@ -2236,9 +2905,11 @@ function authorizedRunInstances(
    }
    const imageId = input["ImageId"] ?? "";
    if (
@@ -1583,7 +1628,7 @@ index ad26506d..6abf598b 100644
    ) {
      throw new Error("AWS qualification image is outside the run ledger");
    }
-@@ -2262,7 +2930,7 @@ function authorizedRunInstances(
+@@ -2262,7 +2933,7 @@ function authorizedRunInstances(
    );
    const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
    if (
@@ -1592,7 +1637,7 @@ index ad26506d..6abf598b 100644
        ? rootGB !== awsQualificationRetainedRootGB
        : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
    ) {
-@@ -2283,11 +2951,14 @@ function authorizedRunInstances(
+@@ -2283,11 +2954,14 @@ function authorizedRunInstances(
      MaxCount: "1",
      MinCount: "1",
      UserData: userData,
@@ -1608,7 +1653,7 @@ index ad26506d..6abf598b 100644
      "MetadataOptions.HttpEndpoint": "enabled",
      "MetadataOptions.HttpPutResponseHopLimit": "1",
      "MetadataOptions.HttpTokens": "required",
-@@ -2445,7 +3116,7 @@ function updateLedgerFromResponse(
+@@ -2445,7 +3119,7 @@ function updateLedgerFromResponse(
          }
          for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
            const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1617,7 +1662,7 @@ index ad26506d..6abf598b 100644
          }
        }
      }
-@@ -2526,6 +3197,59 @@ function updateLedgerFromResponse(
+@@ -2526,6 +3200,59 @@ function updateLedgerFromResponse(
    }
  }
 
@@ -1677,7 +1722,7 @@ index ad26506d..6abf598b 100644
  function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
      throw new Error("AWS qualification run id is malformed");
-@@ -2545,6 +3269,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2545,6 +3272,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!Number.isFinite(Date.parse(identity.expiresAt))) {
      throw new Error("AWS qualification expiry is malformed");
    }
@@ -1686,7 +1731,7 @@ index ad26506d..6abf598b 100644
    if (identity.retainedImage !== undefined) {
      const retained = identity.retainedImage;
      if (
-@@ -2563,11 +3289,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2563,11 +3292,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
  function validateRunWindow(identity: AWSQualificationRunIdentity): void {
    const expiresAt = Date.parse(identity.expiresAt);
    const now = Date.now();
@@ -1707,7 +1752,7 @@ index ad26506d..6abf598b 100644
      throw new Error("AWS qualification retained work window expired");
    }
  }
-@@ -2671,11 +3404,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
+@@ -2671,11 +3407,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
  function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
    const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
    const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
@@ -1726,7 +1771,7 @@ index ad26506d..6abf598b 100644
    if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
      throw new Error("AWS qualification base AMI is malformed");
    if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
-@@ -2687,7 +3427,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
+@@ -2687,7 +3430,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
    if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
      throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
    }
@@ -1747,7 +1792,7 @@ index ad26506d..6abf598b 100644
  }
 
  function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
-@@ -3053,7 +3805,7 @@ function assertLifecycleCapacity(
+@@ -3053,7 +3808,7 @@ function assertLifecycleCapacity(
      if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
        throw new Error("AWS qualification allows one active instance");
      }
@@ -1756,13 +1801,19 @@ index ad26506d..6abf598b 100644
        throw new Error("AWS qualification launch budget is exhausted");
      }
    }
-@@ -3252,3 +4004,70 @@ function isRetryableReconciliationError(error: unknown): boolean {
+@@ -3252,3 +4007,76 @@ function isRetryableReconciliationError(error: unknown): boolean {
  function sleep(ms: number): Promise<void> {
    return new Promise((resolve) => setTimeout(resolve, ms));
  }
 +
 +// Separate from permissive legacy response readers: this is new settlement authority.
-+function exactKeyAbsence(result: AWSQualificationResponse): boolean {
++function exactResourceAbsence(
++  result: AWSQualificationResponse,
++  action: "DescribeKeyPairs" | "DescribeImages",
++): boolean {
++  const image = action === "DescribeImages";
++  const resultField = image ? "imagesSet" : "keySet";
++  const notFoundCode = image ? "InvalidAMIID.NotFound" : "InvalidKeyPair.NotFound";
 +  if (XMLValidator.validate(result.body) !== true || /<!DOCTYPE|<!ENTITY/i.test(result.body))
 +    return false;
 +  const parsed = record(parser.parse(result.body));
@@ -1781,21 +1832,21 @@ index ad26506d..6abf598b 100644
 +    if (Object.keys(errors).join(",") !== "Error" || Array.isArray(errors["Error"])) return false;
 +    const error = record(errors["Error"]);
 +    return (
-+      error["Code"] === "InvalidKeyPair.NotFound" &&
++      error["Code"] === notFoundCode &&
 +      Object.keys(error).every((key) => ["Code", "Message"].includes(key))
 +    );
 +  }
-+  if (result.status !== 200 || top[0] !== "DescribeKeyPairsResponse") return false;
-+  const root = record(parsed["DescribeKeyPairsResponse"]);
++  if (result.status !== 200 || top[0] !== `${action}Response`) return false;
++  const root = record(parsed[`${action}Response`]);
 +  if (
 +    root["@_xmlns"] !== undefined &&
 +    root["@_xmlns"] !== "http://ec2.amazonaws.com/doc/2016-11-15/"
 +  )
 +    return false;
 +  return (
-+    Object.hasOwn(root, "keySet") &&
-+    root["keySet"] === "" &&
-+    Object.keys(root).every((key) => ["keySet", "requestId", "@_xmlns"].includes(key))
++    Object.hasOwn(root, resultField) &&
++    root[resultField] === "" &&
++    Object.keys(root).every((key) => [resultField, "requestId", "@_xmlns"].includes(key))
 +  );
 +}
 +
@@ -2559,7 +2610,7 @@ index 00000000..1dc196fd
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc64189..d78b709c 100644
+index 0cc64189..4ef09449 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3340,7 +3391,7 @@ index 0cc64189..d78b709c 100644
        );
      }
      if (action === "DescribeKeyPairs") {
-@@ -2914,3 +3587,291 @@ function awsServerError(): Response {
+@@ -2914,3 +3587,552 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -3630,6 +3681,267 @@ index 0cc64189..d78b709c 100644
 +    );
 +    await expect(wrong.finalize(controller)).rejects.toThrow("does not own");
 +    await expect(wrong.attest(controller)).rejects.toThrow("does not own");
++  });
++});
++
++describe("ledger-owned AMI cleanup replay", () => {
++  async function fixture(retire = false) {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.run.execute(
++      identity,
++      request(
++        "CreateImage",
++        {
++          InstanceId: "i-owned",
++          Name: "qualification-image",
++          NoReboot: "true",
++        },
++        "ec2",
++      ),
++    );
++    if (retire)
++      await f.run.execute(identity, request("DeregisterImage", { ImageId: "ami-created" }, "ec2"));
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (action === "DeregisterImage")
++          return new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>NotFound is not authority</Message></Error></Errors></Response>",
++            { status: 403 },
++          );
++        return execute(service, action, region, parameters);
++      },
++    );
++    return f;
++  }
++
++  it("settles a denied AMI replay only with exact absence and retains rejected evidence", async () => {
++    const f = await fixture(true);
++    const before = f.signer.calls.length;
++    await f.run.finalize(controller);
++    const a = await f.run.attest(controller);
++    expect(a.finalized).toBe(true);
++    expect(a.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({
++        action: "DeregisterImage",
++        outcome: "rejected",
++        statusClass: 4,
++      }),
++    );
++    expect(a.finalReceipt?.verification).toContainEqual(
++      expect.objectContaining({
++        action: "DescribeImagesAfterRejectedDelete",
++        outcome: "absent",
++        targetDigest: createHash("sha256")
++          .update(JSON.stringify({ ImageId: "ami-created" }))
++          .digest("hex"),
++      }),
++    );
++    const exactReads = f.signer.calls
++      .slice(before)
++      .filter((c) => c.action === "DescribeImages" && c.parameters["ImageId.1"] === "ami-created");
++    expect(exactReads.length).toBeGreaterThanOrEqual(2);
++    expect(
++      exactReads.every(
++        (c) => JSON.stringify(c.parameters) === JSON.stringify({ "ImageId.1": "ami-created" }),
++      ),
++    ).toBe(true);
++  });
++
++  it("retries a partially completed cleanup after the owned root volume disappears", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.run.execute(
++      identity,
++      request(
++        "CreateImage",
++        {
++          InstanceId: "i-owned",
++          Name: "qualification-image",
++          NoReboot: "true",
++        },
++        "ec2",
++      ),
++    );
++    const execute = f.signer.execute.bind(f.signer);
++    let rootPending = true;
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (!rootPending && action === "DeregisterImage")
++          return new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code></Error></Errors></Response>",
++            { status: 403 },
++          );
++        const response = await execute(service, action, region, parameters);
++        if (rootPending && action === "DescribeVolumes")
++          return new Response(
++            "<DescribeVolumesResponse><volumeSet><item><volumeId>vol-owned</volumeId><status>deleting</status></item></volumeSet></DescribeVolumesResponse>",
++          );
++        return response;
++      },
++    );
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    const first = await f.run.attest(controller);
++    expect(first.finalized).toBe(false);
++    expect(first.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({ action: "DeregisterImage", outcome: "accepted" }),
++    );
++    expect(first.finalReceipt?.finalCounts.volumes).toBe(1);
++    rootPending = false;
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.alarm();
++    const final = await reopened.attest(controller);
++    expect(final.finalized).toBe(true);
++    expect(final.finalReceipt?.finalizeAttempts).toBe(2);
++    expect(final.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({ action: "DeregisterImage", outcome: "rejected" }),
++    );
++    expect(final.finalReceipt?.failureCodes).toEqual([]);
++    expect(final.finalReceipt?.finalCounts.volumes).toBe(0);
++  });
++
++  it("does not settle a denied deregistration of a live AMI", async () => {
++    const f = await fixture();
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++    expect(f.storage.alarm).toBeDefined();
++  });
++
++  it.each([
++    [
++      200,
++      '<DescribeImagesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>test</requestId><imagesSet/></DescribeImagesResponse>',
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code><Message>gone</Message></Error></Errors></Response>",
++    ],
++    [
++      404,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error></Errors></Response>",
++    ],
++  ])("accepts strict exact absence %s/%s", async (status, body) => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) =>
++      action === "DescribeImages" && parameters["ImageId.1"]
++        ? new Response(body, { status })
++        : execute(service, action, region, parameters),
++    );
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++
++  it.each([
++    [
++      403,
++      "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>InvalidAMIID.NotFound</Message></Error></Errors></Response>",
++    ],
++    [
++      500,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidSnapshot.NotFound</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error><Error><Code>Other</Code></Error></Errors></Response>",
++    ],
++    [200, ""],
++    [200, "<DescribeImagesResponse/>"],
++    [200, "<DescribeImagesResponse><imagesSet></DescribeImagesResponse>"],
++    [
++      200,
++      "<DescribeImagesResponse><imagesSet/><nextToken>more</nextToken></DescribeImagesResponse>",
++    ],
++    [
++      200,
++      "<DescribeImagesResponse><imagesSet><item><imageId>ami-foreign</imageId></item></imagesSet></DescribeImagesResponse>",
++    ],
++    [200, "<DescribeImagesResponse><imagesSet/><imagesSet/></DescribeImagesResponse>"],
++    [
++      200,
++      '<DescribeImagesResponse xmlns="https://foreign.invalid/"><imagesSet/></DescribeImagesResponse>',
++    ],
++    [200, "<DescribeKeyPairsResponse><keySet/></DescribeKeyPairsResponse>"],
++    [
++      200,
++      '<!DOCTYPE DescribeImagesResponse [<!ENTITY gone "">]><DescribeImagesResponse><imagesSet/></DescribeImagesResponse>',
++    ],
++  ])("fails closed on exact AMI lookup %s/%s", async (status, body) => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) =>
++      action === "DescribeImages" && parameters["ImageId.1"]
++        ? new Response(body, { status })
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++  });
++
++  it("recovers after an unavailable exact read using reopened durable storage", async () => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeImages" && parameters["ImageId.1"])
++        throw new Error("lookup unavailable");
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    vi.mocked(f.signer.execute).mockImplementation(execute);
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.alarm();
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++
++  it("fails closed when the exact AMI read is aborted", async () => {
++    const f = await fixture(true);
++    const signal = AbortSignal.abort(new DOMException("timed out", "TimeoutError"));
++    vi.spyOn(AbortSignal, "timeout").mockReturnValue(signal);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let observed: AbortSignal | undefined;
++    vi.mocked(f.signer.execute).mockImplementation(async (...args) => {
++      if (args[1] === "DescribeImages" && args[3]["ImageId.1"] && (args as unknown[])[4]) {
++        observed = (args as unknown[])[4] as AbortSignal;
++        observed.throwIfAborted();
++      }
++      return execute(...args);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect(observed).toBe(signal);
++  });
++
++  it("final verification rejects an AMI that resurfaces after rejected-delete absence", async () => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let reads = 0;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeImages" && parameters["ImageId.1"] && ++reads > 1)
++        return new Response(
++          "<DescribeImagesResponse><imagesSet><item><imageId>ami-created</imageId></item></imagesSet></DescribeImagesResponse>",
++        );
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
 +  });
 +});
 diff --git a/worker/test/bootstrap-ownership.test.ts b/worker/test/bootstrap-ownership.test.ts
