@@ -1693,6 +1693,44 @@ function assertRelayReadbackReserve(handoff) {
   return end;
 }
 
+function relayDeploymentList(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return undefined;
+  if (Object.hasOwn(value, "deployments")) return value.deployments;
+  return value.items;
+}
+
+// Persist structure and typed identifiers only, never arbitrary provider fields.
+function relayDeploymentSummary(value) {
+  const list = relayDeploymentList(value);
+  if (!Array.isArray(list)) return { classification: "malformed", count: null };
+  if (list.length === 0) return { classification: "empty", count: 0 };
+  const identifier = (id) => {
+    if (typeof id !== "string") return null;
+    try {
+      return workerVersion(id);
+    } catch {
+      return null;
+    }
+  };
+  const active = list[0];
+  const versions = Array.isArray(active?.versions) ? active.versions : null;
+  return {
+    classification: versions ? "nonempty" : "malformed",
+    count: list.length,
+    activeDeploymentId: identifier(active?.id),
+    versionCount: versions?.length ?? null,
+    versions:
+      versions?.slice(0, 2).map((version) => ({
+        id: identifier(version?.version_id),
+        percentage:
+          typeof version?.percentage === "number" && Number.isFinite(version.percentage)
+            ? version.percentage
+            : null,
+      })) ?? null,
+  };
+}
+
 async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
   const directory = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   const readbackStopsAt = Date.now() + 10_000;
@@ -1737,8 +1775,8 @@ async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
         const observed = { endpoint: suffix, state: "pending" };
         receipt.reads.push(observed);
         await save(receipt);
-        // Only an actual HTTP404 is unresolved visibility. Denial, invalid JSON,
-        // malformed deployments and other errors fail immediately, without retries.
+        // HTTP404 and a valid empty deployment list are unresolved visibility.
+        // Denial, malformed data and nonempty drift still fail without retries.
         let result;
         try {
           const response = await cf.request(
@@ -1749,6 +1787,8 @@ async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
           observed.response = response.response;
           result = response.result;
           observed.state = result === undefined ? "http404" : "visible";
+          if (suffix === "deployments" && result !== undefined)
+            observed.deployment = relayDeploymentSummary(result);
         } catch (error) {
           observed.state = "failed";
           if (Number.isInteger(error.status)) observed.response = { status: error.status };
@@ -1770,18 +1810,26 @@ async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
               );
           }
           const deployments = await read("deployments");
+          let deploymentVerified = false;
           if (deployments !== undefined) {
-            const active = (deployments?.deployments ?? deployments?.items ?? deployments)?.[0];
-            if (
-              active?.versions?.length !== 1 ||
-              active.versions[0].percentage !== 100 ||
-              workerVersion(active.versions[0].version_id) !== receipt.acknowledgedVersion
-            )
-              throw new Error(
-                "qualification relay active version differs from acknowledged upload",
-              );
+            const list = relayDeploymentList(deployments);
+            if (!Array.isArray(list))
+              throw new Error("qualification relay deployments are malformed");
+            if (list.length !== 0) {
+              const active = list[0];
+              if (
+                !Array.isArray(active?.versions) ||
+                active.versions.length !== 1 ||
+                active.versions[0]?.percentage !== 100 ||
+                workerVersion(active.versions[0]?.version_id) !== receipt.acknowledgedVersion
+              )
+                throw new Error(
+                  "qualification relay active version differs from acknowledged upload",
+                );
+              deploymentVerified = true;
+            }
           }
-          if (settings !== undefined && deployments !== undefined) {
+          if (settings !== undefined && deploymentVerified) {
             check();
             receipt.state = "verified";
             await save(receipt);

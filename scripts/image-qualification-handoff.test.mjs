@@ -279,6 +279,70 @@ function installAPI(file) {
           return api(null, 404);
         if (fault === "404-persistent") return api(null, 404);
         if (fault === "404-settings-wrong-version" && suffix === "/settings") return api(null, 404);
+        if (fault === "empty-deployments-settings404" && suffix === "/settings" && count === 1)
+          return api(null, 404);
+        if (suffix === "/deployments") {
+          const empty =
+            [
+              "empty-deployments",
+              "empty-deployments-items",
+              "empty-deployments-array",
+              "empty-deployments-settings404",
+              "empty-then-wrong-version",
+              "empty-cancel-backoff",
+              "empty-deadline",
+            ].includes(fault) && count === 1;
+          if (empty || fault === "empty-deployments-persistent") {
+            if (fault === "empty-cancel-backoff") setTimeout(() => process.emit("SIGTERM"), 25);
+            if (fault === "empty-deadline") state.now += 10_000;
+            if (fault === "empty-deployments-array") return api([]);
+            return api({
+              [fault === "empty-deployments-items" ? "items" : "deployments"]: [],
+              ignored: "provider-field-must-not-be-retained",
+            });
+          }
+          if (fault === "empty-then-wrong-version")
+            return api({
+              deployments: [
+                {
+                  versions: [
+                    { version_id: "22222222-2222-4222-8222-222222222222", percentage: 100 },
+                  ],
+                },
+              ],
+            });
+          if (
+            [
+              "wrong-traffic",
+              "multiple-versions",
+              "malformed-version-id",
+              "malformed-versions",
+            ].includes(fault)
+          ) {
+            const versions = [
+              {
+                version_id:
+                  fault === "malformed-version-id"
+                    ? "provider-field-must-not-be-retained"
+                    : workerVersion,
+                percentage: fault === "wrong-traffic" ? 50 : 100,
+                ignored: "provider-field-must-not-be-retained",
+              },
+            ];
+            if (fault === "multiple-versions")
+              versions.push(...structuredClone(versions), ...structuredClone(versions));
+            return api({
+              deployments: [
+                {
+                  id: "provider-field-must-not-be-retained",
+                  versions:
+                    fault === "malformed-versions" ? { 0: versions[0], length: 1 } : versions,
+                  ignored: "provider-field-must-not-be-retained",
+                },
+              ],
+            });
+          }
+        }
         if (fault === "wrong-version" || fault === "404-settings-wrong-version") {
           if (suffix === "/deployments")
             return api({
@@ -330,7 +394,7 @@ function installAPI(file) {
             });
         }
         if (fault === "malformed-deployments" && suffix === "/deployments")
-          return api({ deployments: [] });
+          return api({ deployments: null, items: [] });
       }
       if (suffix === "/settings") {
         if (!state.workers[name]) return api(null, 404);
@@ -587,8 +651,20 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     "404-deployments",
     "404-both",
     "404-persistent",
+    "empty-deployments",
+    "empty-deployments-items",
+    "empty-deployments-array",
+    "empty-deployments-settings404",
+    "empty-deployments-persistent",
+    "empty-then-wrong-version",
+    "empty-cancel-backoff",
+    "empty-deadline",
     "404-settings-wrong-version",
     "wrong-version",
+    "wrong-traffic",
+    "multiple-versions",
+    "malformed-version-id",
+    "malformed-versions",
     "binding-drift",
     "ownership-drift",
     "denied",
@@ -618,7 +694,15 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       const started = performance.now();
       const deployed = f.invoke("deploy");
       const elapsed = performance.now() - started;
-      const success = ["404-settings", "404-deployments", "404-both"].includes(fault);
+      const success = [
+        "404-settings",
+        "404-deployments",
+        "404-both",
+        "empty-deployments",
+        "empty-deployments-items",
+        "empty-deployments-array",
+        "empty-deployments-settings404",
+      ].includes(fault);
       assert.equal(deployed.status, success ? 0 : 1, deployed.stderr);
       const relay = "crabbox-image-qualification-relay-42-1";
       const puts = () =>
@@ -647,18 +731,66 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
         if (fault === "404-persistent") {
           assert.equal(receipt.reads.length, 12);
           assert(receipt.reads.every((r) => r.state === "http404" && r.response.status === 404));
+        } else if (fault === "empty-deployments-persistent") {
+          assert.equal(receipt.reads.length, 12);
+          const deployments = receipt.reads.filter((r) => r.endpoint === "deployments");
+          assert.equal(deployments.length, 6);
+          assert(
+            deployments.every(
+              (r) => r.response.status === 200 && r.deployment.classification === "empty",
+            ),
+          );
+          assert.match(deployed.stderr, /unresolved after six rounds/);
+        } else if (fault === "empty-then-wrong-version") {
+          assert.equal(receipt.reads.length, 4, "stop on the first nonempty mismatch");
+          assert.match(deployed.stderr, /active version differs/);
         } else if (!success) {
           assert(
             receipt.reads.length <= 2,
             "visible drift, denial, malformed data and cancellation fail immediately",
           );
         }
+        if (fault.startsWith("empty-") && fault !== "empty-deadline") {
+          assert.deepEqual(receipt.reads.find((r) => r.endpoint === "deployments").deployment, {
+            classification: "empty",
+            count: 0,
+          });
+          if (success) assert.equal(receipt.reads.at(-1).deployment.versions[0].id, workerVersion);
+        }
+        if (
+          [
+            "wrong-version",
+            "wrong-traffic",
+            "multiple-versions",
+            "malformed-version-id",
+            "malformed-versions",
+            "malformed-deployments",
+          ].includes(fault)
+        ) {
+          const summary = receipt.reads.at(-1).deployment;
+          assert(summary, "retain structural evidence before rejecting visible metadata");
+          if (fault === "wrong-version")
+            assert.equal(summary.versions[0].id, "22222222-2222-4222-8222-222222222222");
+          if (fault === "wrong-traffic") assert.equal(summary.versions[0].percentage, 50);
+          if (fault === "multiple-versions") assert.equal(summary.versionCount, 3);
+          if (fault === "malformed-version-id") assert.equal(summary.versions[0].id, null);
+          if (fault.startsWith("malformed-") && fault !== "malformed-version-id")
+            assert.equal(summary.classification, "malformed");
+        }
+        assert(
+          receipt.reads.every((r) => !r.deployment || (r.deployment.versions?.length ?? 0) <= 2),
+        );
+        assert.equal(
+          fs.existsSync(path.join(f.directory, "deploy-proof/relay-readback.lock")),
+          false,
+        );
         if (fault === "denied") assert.equal(receipt.reads[0].response.status, 403);
         const bytes = fs.readFileSync(receiptPath, "utf8");
         for (const secret of [
           "synthetic-cloudflare-token",
           "synthetic-controller-token",
           "6".repeat(64),
+          "provider-field-must-not-be-retained",
         ])
           assert(!bytes.includes(secret), "receipt must not contain credentials");
         if (fault === "hung-fetch") {
