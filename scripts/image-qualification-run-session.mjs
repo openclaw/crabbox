@@ -120,10 +120,8 @@ export function runSessionPolicy(scope) {
 }
 
 export function handoffSession(env, identity, manifestSha256) {
-  if (env.QUALIFICATION_MODE !== "first-walk") {
-    if (env.QUALIFICATION_AWS_SESSION_JSON) refuse();
-    return undefined;
-  }
+  // Shared protected variables persist when operators select another mode.
+  if (env.QUALIFICATION_MODE !== "first-walk") return undefined;
   const scope = validateRunSession(JSON.parse(env.QUALIFICATION_AWS_SESSION_JSON ?? "null"));
   if (
     scope.repository !== identity.repository ||

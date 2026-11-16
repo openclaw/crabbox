@@ -241,9 +241,10 @@ The protected admit/deploy/arm jobs bind that scope to hosted run, source,
 artifact ID/digest and manifest. Its hash is part of the immutable handoff's
 configuration hash. Missing/mismatched scope fails closed for first-walk. No AWS
 credential enters the handoff, candidate build or ordinary executor. Non-first-walk
-handoff formats remain unchanged; this issuer does not create new unscoped or
-mint/retained sessions. Historical inspect/reseal and existing recovery checkouts
-remain available; never rewrite their source pins to this revision.
+modes ignore the shared descriptor and retain their handoff formats; this issuer
+does not create new unscoped or mint/retained sessions. Historical inspect/reseal
+and existing recovery checkouts remain available; never rewrite their source pins
+to this revision.
 
 The existing direct-user issuer requests twelve hours and rejects ambient
 session credentials, avoiding AWS's one-hour role-chaining limit. It passes only

@@ -271,6 +271,15 @@ test("deadline ends forward work while same-run independent cleanup remains poss
   assert.deepEqual(runSessionPolicy(scope).Statement[1].Action, forwardActions);
 });
 
+test("non-first-walk modes ignore a shared first-walk session descriptor", () => {
+  for (const mode of ["mint", "retained"])
+    for (const value of [JSON.stringify(scope), "stale-or-malformed", "", undefined])
+      assert.equal(
+        handoffSession({ QUALIFICATION_MODE: mode, QUALIFICATION_AWS_SESSION_JSON: value }),
+        undefined,
+      );
+});
+
 test("malformed scopes, altered deadlines and mismatched artifact/handoff fail closed", () => {
   const id = {
     repository: scope.repository,

@@ -580,21 +580,22 @@ function fixture(t, mode = "retained") {
         }
       : {}),
   };
-  if (mode === "first-walk")
-    env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify({
-      profile: "first-walk-aws-session/v1",
-      repository: env.GITHUB_REPOSITORY,
-      workflowSha,
-      candidateSha,
-      runId: "image-qualification-42-1",
-      candidateArtifactId: "9",
-      candidateArtifactDigest: env.QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST,
-      manifestSha256: digest(canonical(manifest)),
-      startsAt: new Date(state().now).toISOString(),
-      workExpiresAt: new Date(state().now + 130 * 60_000).toISOString(),
-      expiresAt: new Date(state().now + 150 * 60_000).toISOString(),
-      recoveryExpiresAt: new Date(state().now + 270 * 60_000).toISOString(),
-    });
+  // Protected environment variables persist across modes. Mint and retained
+  // admission/deploy/arm must ignore this first-walk-only descriptor.
+  env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify({
+    profile: "first-walk-aws-session/v1",
+    repository: env.GITHUB_REPOSITORY,
+    workflowSha,
+    candidateSha,
+    runId: "image-qualification-42-1",
+    candidateArtifactId: "9",
+    candidateArtifactDigest: env.QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST,
+    manifestSha256: digest(canonical(manifest)),
+    startsAt: new Date(state().now).toISOString(),
+    workExpiresAt: new Date(state().now + 130 * 60_000).toISOString(),
+    expiresAt: new Date(state().now + 150 * 60_000).toISOString(),
+    recoveryExpiresAt: new Date(state().now + 270 * 60_000).toISOString(),
+  });
   function invoke(command, overrides = {}) {
     const output = path.join(directory, `${command}.outputs`);
     fs.writeFileSync(output, "");
