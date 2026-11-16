@@ -125,7 +125,22 @@ async function create(id, name) {
   return { lease: (await api("GET", `/v1/leases/${id}`)).lease, readiness: sha(output) };
 }
 async function run(name, id, script) {
-  return await cli(name, ["run", ...scope, "--id", id, "--no-sync", "--script-stdin"], script);
+  return await cli(
+    name,
+    [
+      "run",
+      ...scope,
+      "--class",
+      "standard",
+      "--type",
+      "t3.small",
+      "--id",
+      id,
+      "--no-sync",
+      "--script-stdin",
+    ],
+    script,
+  );
 }
 let successful = false;
 try {
