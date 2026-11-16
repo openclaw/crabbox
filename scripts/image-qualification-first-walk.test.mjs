@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
 import test from "node:test";
-import relay from "./image-qualification-relay-worker.mjs";
-import {
-  prepareQualificationBuild,
-  readQualificationPackage,
-} from "./image-qualification-package.mjs";
+
 import {
   firstWalkRecipeSha256,
   readFirstWalkRecipe,
@@ -18,6 +14,11 @@ import {
   verifyQualificationEvidence,
   verifyFirstWalkPreparation,
 } from "./image-qualification-control.mjs";
+import {
+  prepareQualificationBuild,
+  readQualificationPackage,
+} from "./image-qualification-package.mjs";
+import relay from "./image-qualification-relay-worker.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");

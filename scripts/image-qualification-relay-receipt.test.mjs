@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
 import relay from "./image-qualification-relay-worker.mjs";
 
 function fixture() {
