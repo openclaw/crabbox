@@ -357,20 +357,18 @@ test("capture, snapshot-backed copy and attribute policies authorize only constr
   ]) {
     assert.equal(allowed("ec2:CreateVolume", resources, { ...copy, [key]: value }), false, key);
   }
+  // Real block-device requests have no usable ec2:Attribute context. IAM is
+  // ownership-scoped; the unchanged typed authority restricts request contents.
+  assert.equal(allowed("ec2:ModifyInstanceAttribute", [arn("instance")]), true);
   assert.equal(
     allowed("ec2:ModifyInstanceAttribute", [arn("instance")], {
       ...context,
-      "ec2:Attribute": "blockDeviceMapping",
-    }),
-    true,
-  );
-  assert.equal(
-    allowed("ec2:ModifyInstanceAttribute", [arn("instance")], {
-      ...context,
-      "ec2:Attribute": "groupSet",
+      "ec2:ResourceTag/crabbox_qualification_run": "foreign",
     }),
     false,
   );
+  const attribute = all.find((statement) => statement.Sid === "OwnedInstanceAttribute");
+  assert.equal(attribute.Condition.StringEquals["ec2:Attribute"], undefined);
   for (const create of ["RunInstances", "CreateImage", "ImportKeyPair", "CreateVolume"]) {
     assert.equal(
       allowed("ec2:CreateTags", [arn("volume")], { ...context, "ec2:CreateAction": create }),

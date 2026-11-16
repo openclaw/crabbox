@@ -197,9 +197,12 @@ under separate live authorization, retaining the existing permissions boundary.
 
 The fixed grants preserve approved stock AMI/network, small instance types,
 required metadata tokens, encrypted bounded gp3 storage, owned snapshot sources
-and typed data-copy attachment. `ModifyInstanceAttribute` is additionally limited
-to `blockDeviceMapping`. AWS authorization for this exact attribute must pass a
-later live DryRun before allocation. EC2 describes remain regional management
+and typed data-copy attachment. `ModifyInstanceAttribute` retains its prior
+ownership-scoped IAM permission. AWS's `ec2:Attribute` condition cannot constrain
+the complex block-device array. The existing typed first-walk owner alone constructs
+the exact delete-on-termination request; the generic candidate action proxy does
+not admit this action. IAM does not validate that array's contents. Verify this
+exact request in the later live DryRun before allocation. EC2 describes remain regional management
 reads under the existing read grants; AWS does not offer resource-tag filtering
 as an authorization boundary for those actions. The existing authority still
 checks exact IDs, request shapes, resource limits and source-use protection.

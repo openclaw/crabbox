@@ -257,10 +257,11 @@ export function reusableQualificationPolicies(config) {
     ...owned,
     "ec2:ResourceTag/crabbox_qualification_op": "first-walk-data",
   });
-  allow("DeleteOnTermination", "ModifyInstanceAttribute", arn("instance"), {
-    ...owned,
-    "ec2:Attribute": "blockDeviceMapping",
-  });
+  // BlockDeviceMapping is a complex array: ec2:Attribute cannot express its
+  // contents. Preserve the prior ownership-scoped IAM action; only the trusted
+  // typed first-walk owner constructs the exact DeleteOnTermination request.
+  // The generic candidate action proxy does not admit ModifyInstanceAttribute.
+  allow("OwnedInstanceAttribute", "ModifyInstanceAttribute", arn("instance"), owned);
   const tagged = [
     arn("instance"),
     arn("volume"),

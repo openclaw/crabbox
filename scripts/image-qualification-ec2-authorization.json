@@ -76,7 +76,7 @@
     "ModifyInstanceAttribute": {
       "conditions": [],
       "resources": {
-        "instance": ["ec2:Attribute", "ec2:ResourceTag/${TagKey}"]
+        "instance": ["ec2:ResourceTag/${TagKey}"]
       }
     },
     "RunInstances": {
@@ -128,5 +128,9 @@
     ],
     "TagSession": ["aws:RequestTag/${TagKey}", "aws:TagKeys", "saml:aud", "sts:TransitiveTagKeys"]
   },
-  "scope": "Public AWS reference subset: only generated allow action/resource/condition pairs, not a full service catalog."
+  "scope": "Public AWS reference subset: only generated allow action/resource/condition pairs, not a full service catalog.",
+  "attributeLimitation": {
+    "source": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-policies-for-amazon-ec2.html",
+    "note": "The ec2:Attribute keys cannot authorize complex multi-property BlockDeviceMapping arrays; use existing typed owner for exact request construction, IAM for ownership-scoped action."
+  }
 }
