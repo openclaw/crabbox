@@ -6,6 +6,7 @@ import {
   validateRunSession,
   runSessionTags,
   runSessionPolicy,
+  cleanupSessionPolicy,
   handoffSession,
   forwardActions,
   cleanupActions,
@@ -126,6 +127,35 @@ test("deterministic reusable policy packing and compact session size", () => {
   );
   assert.equal(fixed.issuer.Statement[0].Resource, config.roleArn);
   assert.doesNotMatch(JSON.stringify(fixed), /iam:(?:Create|Put|Attach|Pass)/);
+});
+
+test("cleanup-only intersection retains original tags/clocks and denies every forward action", () => {
+  const normal = runSessionPolicy(scope),
+    cleanup = cleanupSessionPolicy(scope);
+  assert.deepEqual(cleanup.Statement.slice(0, -1), normal.Statement);
+  assert.deepEqual(cleanup.Statement.at(-1), {
+    Effect: "Deny",
+    Action: forwardActions,
+    Resource: "*",
+  });
+  assert.ok(JSON.stringify(cleanup).length <= 2048);
+  for (const action of forwardActions)
+    assert.ok(
+      cleanup.Statement.some((s) => s.Effect === "Deny" && matches(s, action, "*", context)),
+    );
+  for (const action of cleanupActions)
+    assert.ok(
+      !cleanup.Statement.some((s) => s.Effect === "Deny" && matches(s, action, "*", context)),
+    );
+  for (const at of ["2029-12-31T23:59:59.999Z", scope.recoveryExpiresAt])
+    for (const action of cleanupActions)
+      assert.ok(
+        cleanup.Statement.some(
+          (s) =>
+            s.Effect === "Deny" && matches(s, action, "*", { ...context, "aws:CurrentTime": at }),
+        ),
+      );
+  assert.deepEqual(runSessionPolicy(scope), normal, "normal issuance is unchanged");
 });
 
 test("all generated EC2 allow conditions exist for each action/resource in AWS reference", () => {

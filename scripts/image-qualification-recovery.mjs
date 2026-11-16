@@ -1,5 +1,6 @@
 // Cleanup-only transition for an already-finalizing owner. No deployment,
-// enrollment, credentials, arbitrary caller adoption or replacement authority.
+// enrollment, arbitrary caller adoption or replacement authority. Optional
+// trusted cleanup-session delivery retains this same original recovery owner.
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -7,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   Cloudflare,
   recoverActiveQualification,
+  observeRecoveryOwner,
   verifyAttestationIdentity,
 } from "./image-qualification-control.mjs";
 import {
@@ -21,6 +23,11 @@ import {
   ownershipTags,
 } from "./image-qualification-isolation.mjs";
 import { readPrivateJSON, withQualificationJournal } from "./image-qualification-journal.mjs";
+import {
+  validateCleanupSession,
+  cleanupSessionAdmission,
+  manageCleanupSession,
+} from "./image-qualification-cleanup-session.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const same = (a, b) => canonical(a) === canonical(b);
@@ -123,6 +130,7 @@ export function validateRecoveryPlan(plan) {
     plan.maxRequests !== 800
   )
     fail();
+  if (plan.cleanupSession !== undefined) validateCleanupSession(plan);
   return { original, corrected };
 }
 
@@ -152,9 +160,12 @@ export async function recoverTransition(
     signal,
     now = Date.now,
     run = recoverActiveQualification,
+    sessionMode,
+    sessionOptions = {},
   } = {},
 ) {
-  const { original, corrected } = validateRecoveryPlan(plan);
+  const { original } = validateRecoveryPlan(plan);
+  let corrected = cleanupSessionAdmission(plan, state);
   if (
     state?.profile !== plan.profile ||
     state.planSha256 !== digest(canonical(plan)) ||
@@ -165,6 +176,11 @@ export async function recoverTransition(
     !state.uploadIntents ||
     typeof token !== "string" ||
     token.length < 32
+  )
+    fail();
+  if (
+    (sessionMode !== undefined && !["deliver", "inspect"].includes(sessionMode)) ||
+    (!sessionMode && state.cleanupSession && state.cleanupSession.phase !== "reconciled")
   )
     fail();
   if (state.attestation) {
@@ -353,7 +369,32 @@ export async function recoverTransition(
     await fence();
     for (const caller of plan.callers) if (await inspect(caller.name)) fail();
   };
+  if (sessionMode) {
+    await manageCleanupSession(plan, state, {
+      ...sessionOptions,
+      mode: sessionMode,
+      cf: authorityCF,
+      save: persist,
+      now,
+      signal,
+      verify: async (version) => {
+        corrected = structuredClone(plan.correctedAdmission);
+        corrected.authority.version = version;
+        authorityCF.admission = corrected;
+        await fence();
+        for (const caller of plan.callers) await inspect(caller.name);
+      },
+      observe: () => observeRecoveryOwner({ callerCF, authorityCF, token }, plan.binding),
+    });
+    return state;
+  }
   await fence();
+  if (
+    state.cleanupSession?.phase === "reconciled" &&
+    digest(canonical(await authorityCF.settings(authorityName))) !==
+      state.cleanupSession.afterSettingsSha256
+  )
+    fail();
   for (const caller of plan.callers) await inspect(caller.name);
   const recovery = {
     callerCF,
@@ -394,7 +435,11 @@ export async function recoverTransition(
 }
 
 export async function recoveryCommand(args, env = process.env) {
-  if (args.length !== 1) fail();
+  if (
+    args.length !== 1 &&
+    !(args.length === 2 && ["deliver-session", "inspect-session"].includes(args[1]))
+  )
+    fail();
   const directory = path.resolve(args[0]),
     plan = readPrivateJSON(path.join(directory, "recovery-plan.json"));
   const { corrected } = validateRecoveryPlan(plan);
@@ -407,6 +452,10 @@ export async function recoveryCommand(args, env = process.env) {
     path.join(directory, "original-handoff.json"),
     plan.originalHandoffSha256,
   );
+  if (plan.cleanupSession) {
+    validateCleanupSession(plan, handoff);
+    if (plan.cleanupSession.directory !== directory) fail();
+  }
   if (
     handoff.startsAt !== plan.handoffStartedAt ||
     handoff.mode !== "first-walk" ||
@@ -454,6 +503,13 @@ export async function recoveryCommand(args, env = process.env) {
           token: env.QUALIFICATION_CONTROLLER_TOKEN,
           save,
           signal: abort.signal,
+          sessionMode: args[1]?.replace("-session", ""),
+          sessionOptions: {
+            env,
+            workdir: directory,
+            readCustody: (stage) =>
+              readPrivateJSON(path.join(directory, `${stage}-cleanup-custody.json`)),
+          },
         }),
     );
   } finally {
@@ -463,7 +519,12 @@ export async function recoveryCommand(args, env = process.env) {
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))
   recoveryCommand(process.argv.slice(2)).then(
-    () => console.log("Original qualification owner settled. No qualification was started."),
+    (state) =>
+      console.log(
+        state.settled
+          ? "Original qualification owner settled. No qualification was started."
+          : "Cleanup session operation recorded. Original-owner recovery remains required.",
+      ),
     () => {
       console.error(
         "Recovery stopped; retain original access and journal. No raw credential or diagnostic was printed.",

@@ -119,6 +119,15 @@ export function runSessionPolicy(scope) {
   return policy;
 }
 
+// Recovery can replace only the original run's session, never reopen work or
+// move its clocks. This is an additional intersection with the installed role.
+export function cleanupSessionPolicy(scope) {
+  const policy = runSessionPolicy(scope);
+  policy.Statement.push({ Effect: "Deny", Action: forwardActions, Resource: "*" });
+  if (JSON.stringify(policy).length > 2048) refuse();
+  return policy;
+}
+
 export function handoffSession(env, identity, manifestSha256) {
   // Shared protected variables persist when operators select another mode.
   if (env.QUALIFICATION_MODE !== "first-walk") return undefined;
