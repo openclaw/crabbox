@@ -196,6 +196,7 @@ function installAPI(file) {
             new_sqlite_classes: ["FleetDurableObject"],
           });
         } else if (metadata.main_module === "tombstone.mjs") {
+          state.tombstoneUploads = (state.tombstoneUploads ?? 0) + 1;
           assert.deepEqual(metadata.keep_bindings, ["secret_text"]);
           assert.ok(!metadata.bindings.some((b) => b.type === "secret_text"));
           assert.deepEqual(metadata.migrations, {
@@ -334,6 +335,10 @@ function installAPI(file) {
       if (suffix === "/settings") {
         if (!state.workers[name]) return api(null, 404);
         const metadata = structuredClone(state.workers[name].metadata);
+        if (state.tombstoneReadbackMismatch && metadata.main_module === "tombstone.mjs") {
+          state.tombstoneReadbackMismatch = false;
+          metadata.tags = [];
+        }
         if (relayRead && state.relayFault === "ownership-drift") metadata.tags = [];
         if (relayRead && state.relayFault === "binding-drift")
           metadata.bindings.push({ name: "UNEXPECTED", type: "plain_text", text: "extra" });
@@ -1121,6 +1126,28 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     const recovered = f.invoke("reap");
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.deepEqual(f.state().workers, {});
+  });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("a transient tombstone identity mismatch fails closed and recovers without replay", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneReadbackMismatch: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /unowned or changed Worker/);
+    const partial = f.state();
+    assert.equal(partial.finalized, true);
+    assert.ok(partial.workers["crabbox-image-qualification-42-1"]);
+    assert.equal(partial.tombstoneUploads, 1);
+    const recovered = f.invoke("reap");
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(f.state().tombstoneUploads, 1);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
   });
 }
 

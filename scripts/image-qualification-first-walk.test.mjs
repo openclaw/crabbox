@@ -150,7 +150,7 @@ if (args[0] === 'systemd-run') {
 // must be built from the same pinned baseline/overlay used by the private job.
 // Appending help parses every preceding flag and exits before config/backend
 // loading. Explicit --id keeps stop's lease from hiding later flags as operands.
-function checkPinnedCLI(commands, directory) {
+async function checkPinnedCLI(commands, directory) {
   const baseline = path.join(directory, "baseline");
   const candidate = path.join(directory, "candidate-source");
   const home = path.join(directory, "parser-home");
@@ -223,6 +223,104 @@ function checkPinnedCLI(commands, directory) {
   );
   assert.equal(config.aws.region, "us-east-1");
   assert.equal(config.coordinator, commands[0].env.CRABBOX_COORDINATOR);
+
+  // Parse and send the actual workload argv through the pinned CLI and relay.
+  // Stop at admission: lease metadata is local fixture data; no SSH, guest or
+  // cloud operation is allowed.
+  const requests = [];
+  const forwarded = [];
+  const relayEnv = {
+    EXECUTOR_TOKEN: "e".repeat(64),
+    CANDIDATE_ADMIN_TOKEN: "a".repeat(64),
+    QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+    QUALIFICATION_MODE: "first-walk",
+    QUALIFICATION_OWNER: "fixture-owner",
+    QUALIFICATION_ORG: "fixture-org",
+    AWS_REGION: "us-east-1",
+    CANDIDATE: {
+      fetch: async (request) => {
+        const pathname = new URL(request.url).pathname;
+        if (request.method === "GET" && /^\/v1\/leases\/cbx_/.test(pathname))
+          return Response.json({
+            lease: {
+              id: pathname.split("/").at(-1),
+              provider: "aws",
+              target: "linux",
+              state: "ready",
+            },
+          });
+        assert.match(pathname, /^\/v1\/runs\/run_/);
+        if (request.method === "GET") return Response.json({ error: "not_found" }, { status: 404 });
+        assert.equal(request.method, "PUT");
+        forwarded.push(await request.json());
+        return Response.json({ error: "fixture_admission_stop" }, { status: 403 });
+      },
+    },
+  };
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const part of req) body += part;
+    requests.push({ method: req.method, url: req.url });
+    const response = await relay.fetch(
+      new Request(`https://relay.invalid${req.url}`, {
+        method: req.method,
+        headers: req.headers,
+        ...(body ? { body } : {}),
+      }),
+      relayEnv,
+    );
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const workloadCommands = commands.filter(({ args }) => args[0] === "run");
+    assert.equal(workloadCommands.length, 2);
+    for (const { args, env, input } of workloadCommands) {
+      const outcome = await new Promise((resolve, reject) => {
+        let stderr = "";
+        const child = spawn(binary, args, {
+          cwd: home,
+          env: {
+            ...env,
+            CRABBOX_COORDINATOR: `http://127.0.0.1:${server.address().port}`,
+            HOME: home,
+            XDG_CONFIG_HOME: path.join(home, "config"),
+          },
+          stdio: ["pipe", "ignore", "pipe"],
+          timeout: 10_000,
+          killSignal: "SIGKILL",
+        });
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal, stderr }));
+        child.stdin.end(input);
+      });
+      assert.equal(outcome.signal, null);
+      assert.notEqual(outcome.code, 0);
+      assert.match(outcome.stderr, /fixture_admission_stop/);
+    }
+    assert.equal(forwarded.length, 2);
+    for (const body of forwarded) {
+      assert.equal(body.provider, "aws");
+      assert.equal(body.target, "linux");
+      assert.equal(body.class, "standard");
+      assert.equal(body.serverType, "t3.small");
+    }
+    // Rejected admission reports stay outside the narrow relay surface. The
+    // CLI must preserve the original failure; finalizer/reaper own cleanup.
+    assert.equal(requests.filter(({ method }) => method === "PUT").length, 2);
+    assert.equal(requests.filter(({ url }) => url.endsWith("/admission-failure")).length, 2);
+    assert.ok(
+      requests.every(
+        ({ method, url }) =>
+          method === "GET" || method === "PUT" || url.endsWith("/admission-failure"),
+      ),
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
 
 for (const { label, badResult = false, badPreparation = false, evidenceFault } of [
@@ -346,7 +444,7 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
       assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
-      if (!badResult && !badPreparation && !evidenceFault) checkPinnedCLI(commands, dir);
+      if (!badResult && !badPreparation && !evidenceFault) await checkPinnedCLI(commands, dir);
       for (const command of commands) {
         for (const key of [
           "AWS_PROFILE",
