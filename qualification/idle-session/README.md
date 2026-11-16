@@ -332,6 +332,12 @@ follows from these checks.
 
 ### Fixed issuer permission preflight
 
+Before any cloud request or issuance intent, delivery checks that the frozen
+session start has arrived. Early invocation gives relative wait guidance and
+leaves issuance unclaimed; retry the same plan only within its original delivery
+window, without moving its start or deadlines. After issuance starts, the existing
+no-reissue restriction still applies.
+
 After checking the new STS identity and before delivering its secrets, the trusted
 issuer performs ten fixed EC2 `ImportKeyPair --dry-run` requests. The first and
 last must return `DryRunOperation` with all four same-run request tags. Between

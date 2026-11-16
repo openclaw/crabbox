@@ -1220,3 +1220,72 @@ test("DryRun child accepts only exact exit254 ImportKeyPair authorization codes 
   stop.abort();
   await assert.rejects(pending);
 });
+
+function futureScope(f) {
+  for (const key of ["startsAt", "workExpiresAt", "expiresAt", "recoveryExpiresAt"])
+    f.plan.runSession[key] = new Date(Date.parse(f.plan.runSession[key]) + 600_000).toISOString();
+  f.plan.cycleRecoveryBy = f.plan.runSession.recoveryExpiresAt;
+  f.reset();
+}
+
+test("future session activation leaves issuance unclaimed and the unchanged plan retryable", async (t) => {
+  const f = fixture(t);
+  futureScope(f);
+  const frozen = canonical(f.plan);
+  await assert.rejects(f.run("deliver"), /not active.*Retry after [0-9]+ seconds/);
+  assert.equal(f.state.phase, "prepared");
+  assert.equal(f.state.sequence, 0);
+  assert.equal(f.model.saves.length, 0);
+  assert.equal(f.model.calls.length, 0);
+  assert.equal(f.model.commands.length, 0);
+  assert.equal(fs.existsSync(path.join(f.dir, "session-issuance-intent.json")), false);
+  f.model.now = Date.parse(f.plan.runSession.startsAt);
+  await f.run("deliver");
+  assert.equal(canonical(f.plan), frozen);
+  assert.equal(f.state.phase, "delivery-confirmed");
+  assert.equal(f.model.commands.filter(({ argv }) => argv.includes("assume-role")).length, 1);
+});
+
+test("CLI gives secret-safe future-start guidance before any issuance or cloud request", (t) => {
+  const f = fixture(t);
+  futureScope(f);
+  f.plan.sourceSha = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: import.meta.dirname,
+    encoding: "utf8",
+  }).stdout.trim();
+  f.plan.tools.node = {
+    path: fs.realpathSync(process.execPath),
+    sha256: digest(fs.readFileSync(process.execPath)),
+  };
+  fs.writeFileSync(path.join(f.dir, "session-replacement-plan.json"), canonical(f.plan), {
+    mode: 0o600,
+  });
+  const child = spawnSync(
+    process.execPath,
+    [
+      path.join(import.meta.dirname, "image-qualification-session-replacement.mjs"),
+      "deliver",
+      f.dir,
+    ],
+    {
+      env: {
+        PATH: "/usr/bin:/bin",
+        ...f.context.env,
+        QUALIFICATION_SESSION_SOURCE_SHA: f.plan.sourceSha,
+        QUALIFICATION_SESSION_PLAN_SHA256: digest(canonical(f.plan)),
+        CLOUDFLARE_ACCOUNT_ID: f.plan.isolation.accountId,
+      },
+      encoding: "utf8",
+      timeout: 10000,
+    },
+  );
+  assert.equal(child.status, 1);
+  assert.match(child.stderr, /not active.*Retry after [0-9]+ seconds/);
+  assert.match(child.stderr, /original delivery window.*unchanged.*No issuance was attempted/);
+  assert.equal(child.stdout, "");
+  assert.ok(!child.stderr.includes("fake-bootstrap"));
+  assert.equal(fs.existsSync(path.join(f.dir, "session-issuance-intent.json")), false);
+  const state = readPrivateJSON(path.join(f.dir, "session-replacement-state.json"));
+  assert.equal(state.phase, "prepared");
+  assert.equal(state.sequence, 0);
+});

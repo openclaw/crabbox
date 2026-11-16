@@ -32,6 +32,15 @@ const fail = () => {
     "qualification session replacement refused; preserve original intent and custody",
   );
 };
+// Only this local error can render specific operator guidance; cloud/tool errors
+// keep the fixed redacted failure below.
+class SessionNotActive extends Error {
+  constructor(seconds) {
+    super(
+      `Session not active. Retry after ${seconds} seconds only within the original delivery window; keep the frozen plan and scope unchanged. No issuance was attempted.`,
+    );
+  }
+}
 const time = (v) => (typeof v === "string" ? Date.parse(v) : NaN);
 const recordHash = ({ integrity: _integrity, ...v }) => digest(canonical(v));
 const seal = (v) => ({ ...v, integrity: recordHash(v) });
@@ -649,6 +658,8 @@ export async function replaceIdleSession(
       !env.CLOUDFLARE_API_TOKEN
     )
       fail();
+    const activationWait = time(plan.runSession.startsAt) - now();
+    if (activationWait > 0) throw new SessionNotActive(Math.ceil(activationWait / 1000));
     const pre = await readProof("pre");
     verifyReplacementIdle(plan, pre, plan.isolation, now());
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
@@ -959,9 +970,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   replacementCommand(process.argv.slice(2)).then(
     (state) =>
       console.log(`Session operation: ${state.phase}. Enrollment remains separately gated.`),
-    () => {
+    (error) => {
       console.error(
-        "Session operation stopped. Preserve the original intent; no blind retry. No raw diagnostic or credential was printed.",
+        error instanceof SessionNotActive
+          ? error.message
+          : "Session operation stopped. Preserve the original intent; no blind retry. No raw diagnostic or credential was printed.",
       );
       process.exitCode = 1;
     },
