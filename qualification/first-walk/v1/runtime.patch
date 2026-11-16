@@ -3013,7 +3013,7 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..8b5fcb73567d30646fa06ee251aeed008bc8cbcc 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5b7d3265d684c4cc97b73b9f3f5fed42e37d86c0 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3867,7 +3867,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..8b5fcb73567d30646fa06ee251aeed00
    </item>`;
  }
 
-@@ -2914,3 +3623,1163 @@ function awsServerError(): Response {
+@@ -2914,3 +3623,1164 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -4665,6 +4665,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..8b5fcb73567d30646fa06ee251aeed00
 +    );
 +    void failure.then(() => {
 +      returned = true;
++      return true;
 +    });
 +    await entered.promise;
 +    abort.abort();
