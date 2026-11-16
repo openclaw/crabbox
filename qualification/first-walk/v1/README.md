@@ -49,3 +49,28 @@ ownership; source admission does not authorize deployment or resource allocation
 
 Investigation plans, acceptance checklists, operational receipts and handoffs
 belong in internal artifacts, outside this package and public build outputs.
+
+## Internal authorization checks
+
+The private first-walk authority performs fixed EC2 DryRun checks after its
+existing request and ledger validation, before forward launch, capture, copy,
+attachment, mapping and tag effects. Before launch it also tests unchanged,
+missing, changed and removed ownership tags against its already-owned physical
+key. Callers cannot select probes, actions or DryRun parameters.
+
+Each run permits at most 32 persisted checks, with one dispatch per request
+digest, no retries and a ten-second request/body timeout bounded by the original
+forward deadline. Error XML is capped at 16 KiB. Private attestation evidence
+contains only action, probe, request digest, timestamps, outcome and an
+allowlisted service code. An unresolved or failed check fences subsequent
+forward work across restart; the existing cleanup owner remains usable.
+Passing evidence may be reused only for that exact request within the same
+immutable run. Actual effects retain their final dispatch-time deadline checks.
+
+These checks establish only the requested EC2 authorization outcomes. They do
+not prove missing principal-tag trust rejection, foreign-resource isolation,
+KMS success, storage readiness, successful cleanup or bootstrap improvement.
+Those require their own applicable evidence. Historical attestations remain
+valid without the additive private `authorizationChecks` field. A changed
+package requires a fresh protected build, reviewed source admission and exact
+serving-version binding; old artifacts cannot substitute.
