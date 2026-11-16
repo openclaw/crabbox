@@ -2157,7 +2157,7 @@ index a30b6e46..7cc4425f 100644
          const attempt = claim.leaseID
            ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)
 diff --git a/worker/src/coordinator-entry.ts b/worker/src/coordinator-entry.ts
-index 97372f5d..58418a41 100644
+index e0845fe9..ea4e15aa 100644
 --- a/worker/src/coordinator-entry.ts
 +++ b/worker/src/coordinator-entry.ts
 @@ -22,6 +22,7 @@ import {
@@ -2167,8 +2167,8 @@ index 97372f5d..58418a41 100644
 +import { qualificationTransportProbeResponse } from "./qualification-transport-probe";
  import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
  import { serveDisabledResponse, serveBodyLimit } from "./serve";
- import { timingSafeEqual } from "./timing-safe";
-@@ -42,6 +43,8 @@ export async function routeCoordinatorRequest(
+ import { hostCredentialRequest, hostCredentialRouteAllowed } from "./ssh-host-auth";
+@@ -43,6 +44,8 @@ export async function routeCoordinatorRequest(
    if ("response" in prepared) {
      return prepared.response;
    }
@@ -2178,10 +2178,10 @@ index 97372f5d..58418a41 100644
  }
 
 diff --git a/worker/src/fleet.ts b/worker/src/fleet.ts
-index ca7d662d..2ad067f9 100644
+index f141618e..a2f5bf0d 100644
 --- a/worker/src/fleet.ts
 +++ b/worker/src/fleet.ts
-@@ -201,6 +201,8 @@ import {
+@@ -202,6 +202,8 @@ import {
    finalizeCheckpointDeletion,
    findManagedCheckpointImage,
    finishCheckpointUse,
@@ -2190,7 +2190,7 @@ index ca7d662d..2ad067f9 100644
    markCheckpointProviderMutationStarted,
    markCheckpointProviderDeleted,
    pinCheckpointPromotion,
-@@ -16990,6 +16992,74 @@ export class FleetCoordinator {
+@@ -16999,6 +17001,74 @@ export class FleetCoordinator {
          await this.scheduleCheckpointAlarm();
          return json({ checkpoint: publicCheckpointRecord(checkpoint) });
        }
