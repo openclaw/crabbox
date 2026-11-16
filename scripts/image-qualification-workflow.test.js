@@ -342,6 +342,7 @@ test("protected build prep binds source, rejects substitution, and seals exact b
         "image-qualification-executor-token.mjs",
         "image-qualification-network.ts",
         "image-qualification-package.mjs",
+        "image-qualification-run-session.mjs",
       ])
         fs.copyFileSync(path.join(root, "scripts", file), path.join(directory, "scripts", file));
       fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");

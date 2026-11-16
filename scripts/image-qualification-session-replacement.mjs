@@ -15,6 +15,11 @@ import {
   verifyAuthority,
 } from "./image-qualification-isolation.mjs";
 import { readPrivateJSON, withQualificationJournal } from "./image-qualification-journal.mjs";
+import {
+  validateRunSession,
+  runSessionTags,
+  runSessionPolicy,
+} from "./image-qualification-run-session.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(directory);
@@ -41,6 +46,7 @@ const sourceFiles = [
   "image-qualification-transport.mjs",
   "image-qualification-network.ts",
   "image-qualification-executor-token.mjs",
+  "image-qualification-run-session.mjs",
 ];
 export const replacementSources = () =>
   Object.fromEntries(
@@ -109,6 +115,15 @@ export function validateReplacementPlan(plan, sources = replacementSources()) {
     QUALIFICATION_ISOLATION_JSON: JSON.stringify(plan.isolation),
     QUALIFICATION_ISOLATION_SHA256: digest(canonical(plan.isolation)),
   });
+  if (plan.runSession !== undefined) {
+    const scope = validateRunSession(plan.runSession);
+    if (
+      time(scope.startsAt) < time(plan.startsAt) ||
+      time(scope.startsAt) > time(plan.recoveryStopsAt) ||
+      scope.recoveryExpiresAt !== plan.cycleRecoveryBy
+    )
+      fail();
+  }
   if (
     !equal(Object.keys(plan.tools ?? {}).toSorted(), ["aws", "node"]) ||
     Object.values(plan.tools).some(
@@ -520,6 +535,7 @@ export async function replaceIdleSession(
     fail();
   if (mode === "deliver") {
     if (
+      plan.runSession === undefined ||
       env.AWS_SESSION_TOKEN !== undefined ||
       !env.AWS_ACCESS_KEY_ID ||
       !env.AWS_SECRET_ACCESS_KEY ||
@@ -539,7 +555,9 @@ export async function replaceIdleSession(
     // Separate exclusive marker survives a lost/recreated state journal. Copies
     // cannot choose a new destination: the reviewed plan binds this directory.
     claimIssuance(plan);
-    const sessionName = `cbx-session-${plan.attemptId}`;
+    // Only this trusted issuer chooses scope/tags/policy. Executors never get
+    // its bootstrap key; the installed role cannot AssumeRole or TagSession.
+    const sessionName = plan.runSession.runId;
     const assumed = JSON.parse(
       await run(
         [
@@ -552,6 +570,12 @@ export async function replaceIdleSession(
           sessionName,
           "--duration-seconds",
           "43200",
+          "--tags",
+          JSON.stringify(
+            Object.entries(runSessionTags(plan.runSession)).map(([Key, Value]) => ({ Key, Value })),
+          ),
+          "--policy",
+          JSON.stringify(runSessionPolicy(plan.runSession)),
           "--region",
           admission.aws.region,
           "--output",
@@ -569,6 +593,10 @@ export async function replaceIdleSession(
     const c = assumed.Credentials,
       expiry = time(c?.Expiration);
     if (
+      (assumed.PackedPolicySize !== undefined &&
+        (!Number.isInteger(assumed.PackedPolicySize) ||
+          assumed.PackedPolicySize > 100 ||
+          assumed.PackedPolicySize < 0)) ||
       !(expiry - now() >= 10 * 3600_000 && expiry - now() <= 12 * 3600_000 + 60_000) ||
       expiry < time(plan.cycleRecoveryBy) + 3600_000 ||
       expiry > tokenExpiry ||
@@ -603,7 +631,11 @@ export async function replaceIdleSession(
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
     await fence(plan.isolation);
     await token();
-    await persist("delivery-intent", { sessionExpiresAt: c.Expiration });
+    await persist("delivery-intent", {
+      sessionExpiresAt: c.Expiration,
+      runSessionSha256: digest(canonical(plan.runSession)),
+      sessionPolicySha256: digest(canonical(runSessionPolicy(plan.runSession))),
+    });
     // The documented bulk endpoint is the same operation used by Wrangler, but
     // without its Worker-not-found -> draft-Worker creation fallback, dotenv
     // loading or persistent debug logs. Exactly one request; never retry it.

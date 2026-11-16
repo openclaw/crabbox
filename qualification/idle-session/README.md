@@ -184,3 +184,91 @@ node --test scripts/image-qualification*.test.mjs scripts/image-qualification*.t
 Tests use fake credentials and local processes only. They do not establish live
 serving identity, custody, AWS permissions, private exposure or representative
 checkpoint performance.
+
+## Reusable first-walk permissions and run sessions
+
+`image-qualification-run-session.mjs` generates a fixed managed-policy set,
+bootstrap-user trust and issuer-policy proposal from an operator-reviewed JSON
+configuration. It makes no AWS requests. Configuration has exactly `accountId`,
+`region`, `roleArn`, `issuerArn` (an IAM user, not a role), `subnetId`,
+`securityGroupId`, `baseAmiId`, `availabilityZone`, and `rootGB` (8–20). Keep real
+configuration, generated policies and operation receipts private. Install only
+under separate live authorization, retaining the existing permissions boundary.
+
+The fixed grants preserve approved stock AMI/network, small instance types,
+required metadata tokens, encrypted bounded gp3 storage, owned snapshot sources
+and typed data-copy attachment. `ModifyInstanceAttribute` is additionally limited
+to `blockDeviceMapping`. AWS authorization for this exact attribute must pass a
+later live DryRun before allocation. EC2 describes remain regional management
+reads under the existing read grants; AWS does not offer resource-tag filtering
+as an authorization boundary for those actions. The existing authority still
+checks exact IDs, request shapes, resource limits and source-use protection.
+
+The role trust admits only the existing bootstrap IAM user and requires exactly
+the four run/owner/source/expiry session-tag keys, a matching role session name
+and no transitive tags. Role permissions deny IAM changes, session delegation,
+tag removal and changing the data-copy marker. Role/session tags do not prove
+workload provenance. The trusted issuer must validate the complete frozen plan,
+reviewed policy outputs and hosted build/artifact identities. IAM trust cannot
+validate the content or presence of the `AssumeRole` inline `Policy` argument;
+that enforcement belongs to the trusted issuer. Candidate and executor code
+receive neither its key nor authority credentials and cannot choose sessions.
+
+For new delivery, add `runSession` to the existing replacement plan. It has
+exactly these nonsecret fields:
+
+- `profile: "first-walk-aws-session/v1"`, `repository`, `workflowSha`, `candidateSha`;
+- `runId: "image-qualification-<workflow-run-id>-1"`, `candidateArtifactId`,
+  `candidateArtifactDigest` (including `sha256:`), `manifestSha256`;
+- canonical ISO `startsAt`, `workExpiresAt` (start +130 minutes), `expiresAt`
+  (start +150 minutes), `recoveryExpiresAt` (start +270 minutes).
+
+Scope start must fall within the existing preparation/recovery hour, and
+`cycleRecoveryBy` must equal `recoveryExpiresAt`. Freeze this scope after the
+credential-free build and hosted artifact verification, before admission.
+Issue/deliver/reseal while the existing owner is idle. Then update the protected
+`CRABBOX_IMAGE_QUALIFICATION_AWS_SESSION_JSON` variable to exactly that descriptor,
+plus the existing authority-version/isolation readbacks, before approving the
+handoff. Delivery changes the serving version: publishing a handoff first is
+invalid. Admission requires the scope window already active. Preparation consumes
+that fixed window; never move its start or extend deadlines to rescue an attempt.
+Check sufficient time for the full diagnostic and settlement before allocation.
+
+The protected admit/deploy/arm jobs bind that scope to hosted run, source,
+artifact ID/digest and manifest. Its hash is part of the immutable handoff's
+configuration hash. Missing/mismatched scope fails closed for first-walk. No AWS
+credential enters the handoff, candidate build or ordinary executor. Non-first-walk
+handoff formats remain unchanged; this issuer does not create new unscoped or
+mint/retained sessions. Historical inspect/reseal and existing recovery checkouts
+remain available; never rewrite their source pins to this revision.
+
+The existing direct-user issuer requests twelve hours and rejects ambient
+session credentials, avoiding AWS's one-hour role-chaining limit. It passes only
+four tags and one compact, literal-date session policy (at most 2,048 characters;
+no managed session-policy ARNs). Managed permissions are not squeezed into STS.
+Forward actions stop at the forward cutoff. Same-run deletion and inventory
+remain usable through the separate recovery cutoff; all authorized session work
+stops then even though STS credentials last longer. A later executor failure is
+recovered by the existing finalizer/reaper using the authority-held same-run
+session. At least one hour of credential life must remain beyond planned recovery.
+There is no active-owner renewal or automatic recovery after credential expiry,
+revocation or the policy recovery cutoff. That case needs a separately admitted
+recovery decision; never issue a broader replacement or delete recovery access.
+
+Migration requires canonical idle/settled state and separately approved IAM/trust
+installation. Remove old run grants only after their exact owner, cloud resources,
+source pin, callers, registry and independent recovery are settled. Reuse fixed
+policies across attempts; remove them only at investigation closeout. Rollback
+first stops forward admission, preserves active sessions/grants and supported
+original recovery source, and settles them before changing grants or trust.
+Changing trust does not revoke already issued credentials. Do not replace an
+active authority session with a legacy broad session.
+
+Credential-free tests cover policy construction, the AWS action/resource/condition
+matrix, same/cross-run decisions, malformed identities, deadlines, issuer intent,
+uncertain responses, cancellation, fresh-process recovery and protected handoff
+binding. The local evaluator is not IAM simulation. Before use, obtain separate
+authorization for policy validation/DryRun plus one disposable synthetic full
+cycle, including executor loss, independent recovery and exact zero-residue/source
+preservation proof. No production/campaign input or first-walk performance claim
+follows from these checks.
