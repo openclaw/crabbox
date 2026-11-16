@@ -17,6 +17,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "cpus", JSONValue: c.CPUs, TextName: "cpus", TextValue: strconv.Itoa(c.CPUs)},
 			{JSONName: "memory", JSONValue: c.Memory, TextName: "memory", TextValue: strconv.Itoa(c.Memory)},
 			{JSONName: "switch", JSONValue: c.Switch, TextName: "switch", TextValue: c.Switch},
+			{JSONName: "storage", JSONValue: c.Storage, TextName: "storage", TextValue: c.Storage},
 			{JSONName: "initPassword", JSONValue: c.InitPassword, TextName: "init_password", TextValue: strconv.FormatBool(c.InitPassword)},
 		},
 	}

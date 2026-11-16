@@ -849,7 +849,7 @@ func TestRemoveImportedCheckpointVMFindsPartialRegistrationByStorage(t *testing.
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 
-	if err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import"); err != nil {
+	if err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import", legacyHyperVStorage()); err != nil {
 		t.Fatalf("removeImportedCheckpointVM: %v", err)
 	}
 	cleanupScript := findScript(runner.calls, "Get-CrabboxImportedVM")
@@ -877,7 +877,7 @@ func TestRemoveImportedCheckpointVMReportsUnverifiedCleanup(t *testing.T) {
 	}
 	b := testBackend(runner)
 
-	err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import")
+	err := b.removeImportedCheckpointVM(context.Background(), "crabbox-partial-import", legacyHyperVStorage())
 	if err == nil || !strings.Contains(err.Error(), "remove partial Hyper-V checkpoint import") {
 		t.Fatalf("cleanup error=%v", err)
 	}
@@ -972,7 +972,7 @@ func TestReleaseStoragePreservesCheckpointExport(t *testing.T) {
 	}
 	paths, _ := createCheckpointArtifact(t)
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
-	if err := b.removeVMStorage(name, nil); err != nil {
+	if err := b.removeVMStorage(name, legacyHyperVStorage(), nil); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(paths.config); err != nil {

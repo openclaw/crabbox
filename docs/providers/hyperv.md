@@ -213,6 +213,7 @@ The guest password and credential-presence information are not displayed;
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
+| `--hyperv-storage` | (none) | Absolute host directory for new lease disks and VM configuration; see [Lease storage](#lease-storage) |
 | `--hyperv-init-password` | `false` | Windows only: set the guest password at first boot via the lease disk |
 
 Decoded negative CPU or memory values, including environment and explicit flag
@@ -237,11 +238,15 @@ hyperv:
   cpus: 4
   memory: 8192
   switch: Default Switch
+  storage: D:\Hyper-V\crabbox
   initPassword: false
 ```
 
 For Windows, keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted
 user config, not repository config. There is no default guest password.
+`storage` is read only from user config, the environment, or the flag. Crabbox
+creates and deletes lease files there, so, like Lume's `storage` and Windows
+Sandbox's `tempRoot`, repository config cannot choose the host directory.
 
 ### Environment variables
 
@@ -253,8 +258,47 @@ user config, not repository config. There is no default guest password.
 | `CRABBOX_HYPERV_CPUS` | CPU count |
 | `CRABBOX_HYPERV_MEMORY` | Memory in MB |
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
+| `CRABBOX_HYPERV_STORAGE` | Absolute host directory for new lease disks and VM configuration |
 | `CRABBOX_HYPERV_GUEST_PASSWORD` | Windows guest password for PowerShell Direct bootstrap |
 | `CRABBOX_HYPERV_INIT_PASSWORD` | Windows only: set the guest password at first boot (`true`/`false`) |
+
+### Lease storage
+
+Each lease gets a differencing disk named after its VM, plus any automatic
+checkpoint and checkpoint-fork disks, in a virtual hard disk directory, and its
+VM configuration in `<VM directory>\<vm-name>\`. The template VHDX stays where
+`--hyperv-image` points and is only read.
+
+| `storage` | Virtual hard disk directory | VM directory |
+| --- | --- | --- |
+| unset | `%USERPROFILE%\Hyper-V\Virtual Hard Disks` | `%USERPROFILE%\Hyper-V\Virtual Machines` |
+| `D:\Hyper-V\crabbox` | `D:\Hyper-V\crabbox\Virtual Hard Disks` | `D:\Hyper-V\crabbox\Virtual Machines` |
+
+The value must be an absolute path; a relative or drive-relative value is
+rejected before any host command or local lease state changes. Crabbox creates
+the two subdirectories as needed.
+
+Each lease records its directories in its local claim (`vhd_dir` and `vm_dir`
+labels). Release, cleanup and checkpoint-fork rollback use those recorded
+directories, not the current setting, so changing `storage` affects only new
+leases and never strands an existing one. Leases created before these labels
+existed use the `%USERPROFILE%\Hyper-V` directories. A claim whose recorded
+directories are not clean absolute paths is refused rather than cleaned in a
+guessed location. Ownership checks are unchanged in every location: only the
+lease's deterministically named root and checkpoint disks, its fork-manifest
+disks, and non-disk files under its own VM directory are removed.
+
+Lease disks can hold the guest password, for example in the first-boot command
+written by `--hyperv-init-password`, so the storage directory should be
+owner-only. Your profile directory already is. A new directory elsewhere
+inherits its parent's permissions; a folder at the root of a non-system drive
+usually grants Authenticated Users modify access. Crabbox does not change these
+permissions. To restrict an existing directory to you, SYSTEM (which Hyper-V
+uses to write lease files), and Administrators:
+
+```powershell
+icacls D:\Hyper-V\crabbox /inheritance:r /grant:r "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+```
 
 ## Bootstrap contract
 
@@ -482,9 +526,10 @@ instead of detaching a replacement VM's disk.
 - The selected SSH account must be a local account name containing only letters,
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
-- VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
-  default. Only deterministically named provider-owned root and checkpoint
-  disks are cleaned up; unrelated attached disks are preserved.
+- Lease disks and VM configuration live in the lease's recorded storage; see
+  [Lease storage](#lease-storage). Only deterministically named provider-owned
+  root and checkpoint disks are cleaned up; unrelated attached disks are
+  preserved.
 - The Windows ready check verifies `git`, `tar`, Node/npm, and the work root.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
   interaction after bootstrap happens over SSH.

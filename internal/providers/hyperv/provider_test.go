@@ -40,7 +40,7 @@ func TestHyperVConfigShowSection(t *testing.T) {
 		} {
 			t.Run(selected+"/"+tc.name, func(t *testing.T) {
 				cfg := core.Config{Provider: selected, HyperV: core.HyperVConfig{
-					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw,
+					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw, Storage: tc.raw,
 					CPUs: tc.cpus, Memory: tc.memory, InitPassword: tc.initPassword,
 					GuestPassword: "synthetic-omission-marker",
 				}}
@@ -52,9 +52,9 @@ func TestHyperVConfigShowSection(t *testing.T) {
 					got[field.JSONName] = field.JSONValue
 					text = append(text, field.TextName+"="+field.TextValue)
 				}
-				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
-				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
-				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 7 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
+				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "storage": tc.raw, "initPassword": tc.initPassword}
+				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s storage=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.raw, tc.initPassword)
+				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 8 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
 					t.Fatal("unexpected Hyper-V projection roster, types, or values")
 				}
 				encoded, err := json.Marshal(section)
@@ -339,7 +339,7 @@ func TestCleanupScopedToCrabboxPrefix(t *testing.T) {
 
 func TestRemoveVMRefuseNonCrabbox(t *testing.T) {
 	b := testBackend(&recordingRunner{})
-	err := b.removeVM(context.Background(), "my-personal-vm")
+	err := b.removeVM(context.Background(), "my-personal-vm", legacyHyperVStorage())
 	if err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("removeVM should refuse non-crabbox VM, err=%v", err)
 	}
@@ -359,7 +359,7 @@ func TestRemoveVMStorageRefusesMalformedCrabboxNames(t *testing.T) {
 		"crabbox-blue-1234 ",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := b.removeVMStorage(name, nil); err == nil || !strings.Contains(err.Error(), "refusing") {
+			if err := b.removeVMStorage(name, legacyHyperVStorage(), nil); err == nil || !strings.Contains(err.Error(), "refusing") {
 				t.Fatalf("removeVMStorage(%q) err=%v, want refusal", name, err)
 			}
 		})
@@ -630,7 +630,7 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	err := b.createVM(context.Background(), cfg, "crabbox-blue-1234")
+	err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage())
 	if err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
@@ -684,7 +684,7 @@ func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 	for _, call := range runner.calls {
@@ -708,7 +708,7 @@ func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
@@ -737,7 +737,7 @@ func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
@@ -804,7 +804,7 @@ func TestCreateVMNoInitPasswordByDefault(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 	for _, call := range runner.calls {
@@ -1744,7 +1744,7 @@ func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
 		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
 		core.LocalCommandResult{Stdout: customPath + "\n"}
 	b := testBackend(runner)
-	_ = b.removeVM(context.Background(), "crabbox-blue-1234")
+	_ = b.removeVM(context.Background(), "crabbox-blue-1234", legacyHyperVStorage())
 
 	var foundVHDQuery bool
 	for _, call := range runner.calls {
@@ -1765,7 +1765,7 @@ func TestCreateVMDisablesAutomaticCheckpoints(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 
@@ -1790,7 +1790,7 @@ func TestCreateVMRequestsTurnOffAutomaticStopAction(t *testing.T) {
 	cfg := b.configForRun()
 	cfg.HyperV.Image = `C:\Images\windows.vhdx`
 
-	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234", legacyHyperVStorage()); err != nil {
 		t.Fatalf("createVM: %v", err)
 	}
 	var found bool
@@ -1841,7 +1841,7 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 		core.LocalCommandResult{Stdout: checkpoint + "\n" + dataDisk + "\n"}
 	b := testBackend(runner)
 
-	if err := b.removeVM(context.Background(), name); err != nil {
+	if err := b.removeVM(context.Background(), name, legacyHyperVStorage()); err != nil {
 		t.Fatalf("removeVM: %v", err)
 	}
 	for _, p := range []string{baseVHD, checkpoint, vmDir} {
@@ -1878,7 +1878,7 @@ func TestRemoveVMPreservesDataDiskInsideVMDirectory(t *testing.T) {
 		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
 	b := testBackend(runner)
 
-	if err := b.removeVM(context.Background(), name); err != nil {
+	if err := b.removeVM(context.Background(), name, legacyHyperVStorage()); err != nil {
 		t.Fatalf("removeVM: %v", err)
 	}
 	if _, err := os.Stat(dataDisk); err != nil {
@@ -2433,7 +2433,7 @@ func TestHyperVCreateVMRejectsMiBOverflowBeforeNative(t *testing.T) {
 	cfg := b.configForRun()
 	var size int64 = 17592186052608
 	cfg.HyperV.Memory = int(size)
-	err := b.createVM(t.Context(), cfg, "crabbox-overflow")
+	err := b.createVM(t.Context(), cfg, "crabbox-overflow", legacyHyperVStorage())
 	if err == nil {
 		for _, call := range runner.calls {
 			if script := call.Args[len(call.Args)-1]; strings.Contains(script, "New-VM") {

@@ -25,7 +25,7 @@ func TestRemoveVMStoragePreservesUnrelatedFilesInVMNamedDirectory(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := testBackend(&recordingRunner{}).removeVMStorage(name, nil); err != nil {
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, legacyHyperVStorage(), nil); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(data); err != nil {
@@ -56,7 +56,7 @@ func TestRemoveVMStorageRemovesAttachedForkDisksButKeepsUnattachedFiles(t *testi
 	if err := recordForkDisks(leaseDir, []string{attached}); err != nil {
 		t.Fatal(err)
 	}
-	if err := testBackend(&recordingRunner{}).removeVMStorage(name, []string{attached, attachedOperator}); err != nil {
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, legacyHyperVStorage(), []string{attached, attachedOperator}); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(attached); !os.IsNotExist(err) {
@@ -88,7 +88,7 @@ func TestRemoveVMStorageDeletesManifestDisksWhenDiskQueryUnavailable(t *testing.
 	if err := recordForkDisks(leaseDir, []string{imported}); err != nil {
 		t.Fatal(err)
 	}
-	if err := testBackend(&recordingRunner{}).removeVMStorage(name, nil); err != nil {
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, legacyHyperVStorage(), nil); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(imported); !os.IsNotExist(err) {
@@ -112,7 +112,7 @@ func TestRemoveVMStoragePreservesAttachedDiskWithoutForkMarker(t *testing.T) {
 	if err := os.WriteFile(data, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := testBackend(&recordingRunner{}).removeVMStorage(name, []string{data}); err != nil {
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, legacyHyperVStorage(), []string{data}); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(data); err != nil {
@@ -129,7 +129,7 @@ func TestRemoveVMStorageRemovesEmptyVMNamedDirectory(t *testing.T) {
 	if err := os.MkdirAll(leaseDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := testBackend(&recordingRunner{}).removeVMStorage(name, nil); err != nil {
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, legacyHyperVStorage(), nil); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	if _, err := os.Stat(leaseDir); !os.IsNotExist(err) {

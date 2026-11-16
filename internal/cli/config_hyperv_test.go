@@ -16,6 +16,7 @@ func TestApplyFileHyperVConfig(t *testing.T) {
   cpus: 6
   memory: 4096
   switch: Lab Switch
+  storage: E:\crabbox-hyperv
   guestPassword: file-secret
   initPassword: true
 `
@@ -32,7 +33,7 @@ func TestApplyFileHyperVConfig(t *testing.T) {
 	}
 	if cfg.HyperV.Image != `D:\images\win11.vhdx` || cfg.HyperV.User != "Administrator" ||
 		cfg.HyperV.WorkRoot != `D:\crabbox-work` || cfg.HyperV.CPUs != 6 || cfg.HyperV.Memory != 4096 ||
-		cfg.HyperV.Switch != "Lab Switch" || cfg.HyperV.GuestPassword != "file-secret" {
+		cfg.HyperV.Switch != "Lab Switch" || cfg.HyperV.Storage != `E:\crabbox-hyperv` || cfg.HyperV.GuestPassword != "file-secret" {
 		t.Fatalf("hyperv=%#v", cfg.HyperV)
 	}
 	if !cfg.HyperV.InitPassword {
@@ -67,6 +68,7 @@ func TestHyperVEnvConfig(t *testing.T) {
 	t.Setenv("CRABBOX_HYPERV_CPUS", "8")
 	t.Setenv("CRABBOX_HYPERV_MEMORY", "2048")
 	t.Setenv("CRABBOX_HYPERV_SWITCH", "Env Switch")
+	t.Setenv("CRABBOX_HYPERV_STORAGE", `E:\env-hyperv`)
 	t.Setenv("CRABBOX_HYPERV_GUEST_PASSWORD", "env-secret")
 	t.Setenv("CRABBOX_HYPERV_INIT_PASSWORD", "true")
 	cfg := baseConfig()
@@ -75,11 +77,30 @@ func TestHyperVEnvConfig(t *testing.T) {
 	}
 	if cfg.HyperV.Image != `E:\img\base.vhdx` || cfg.HyperV.User != "EnvUser" ||
 		cfg.HyperV.WorkRoot != `E:\work` || cfg.HyperV.CPUs != 8 || cfg.HyperV.Memory != 2048 ||
-		cfg.HyperV.Switch != "Env Switch" || cfg.HyperV.GuestPassword != "env-secret" {
+		cfg.HyperV.Switch != "Env Switch" || cfg.HyperV.Storage != `E:\env-hyperv` || cfg.HyperV.GuestPassword != "env-secret" {
 		t.Fatalf("hyperv=%#v", cfg.HyperV)
 	}
 	if !cfg.HyperV.InitPassword {
 		t.Fatal("CRABBOX_HYPERV_INIT_PASSWORD=true not applied")
+	}
+}
+
+// Lease disks and VM configuration are host-side writes, so only trusted
+// sources may move them; repository config keeps its existing reach.
+func TestRepositoryConfigCannotRedirectHyperVStorage(t *testing.T) {
+	cfg := baseConfig()
+	cfg.HyperV.Storage = `E:\trusted-hyperv`
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{HyperV: &fileHyperVConfig{
+		Image:   `D:\repo\template.vhdx`,
+		Storage: `C:\Windows\Temp\repo-hyperv`,
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HyperV.Image != `D:\repo\template.vhdx` {
+		t.Fatalf("repository image=%q, want repository override", cfg.HyperV.Image)
+	}
+	if cfg.HyperV.Storage != `E:\trusted-hyperv` {
+		t.Fatalf("repository config redirected Hyper-V storage to %q", cfg.HyperV.Storage)
 	}
 }
 
