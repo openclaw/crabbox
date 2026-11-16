@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { idleFixture } from "./fixtures/qualification-idle-controller.mjs";
+import { runSessionTags, runSessionPolicy } from "./image-qualification-run-session.mjs";
 import { fixtureAdmission, version } from "./fixtures/qualification-isolation.mjs";
 import { Cloudflare } from "./image-qualification-control.mjs";
 import {
@@ -82,6 +83,21 @@ function fixture(t, { secretProvenance = false } = {}) {
     previousSessionExpiresAt: new Date(start - 3600_000).toISOString(),
     tools,
   };
+  plan.runSession = {
+    profile: "first-walk-aws-session/v1",
+    repository: "example/repo",
+    workflowSha: "1".repeat(40),
+    candidateSha: "2".repeat(40),
+    runId: "image-qualification-42-1",
+    candidateArtifactId: "9",
+    candidateArtifactDigest: `sha256:${"3".repeat(64)}`,
+    manifestSha256: "4".repeat(64),
+    startsAt: new Date(start).toISOString(),
+    workExpiresAt: new Date(start + 130 * 60_000).toISOString(),
+    expiresAt: new Date(start + 150 * 60_000).toISOString(),
+    recoveryExpiresAt: new Date(start + 270 * 60_000).toISOString(),
+  };
+  plan.cycleRecoveryBy = plan.runSession.recoveryExpiresAt;
   const makeCustody = (authorityVersion) => ({
     profile: "idle-session-custody/v1",
     attemptId: plan.attemptId,
@@ -202,6 +218,15 @@ function fixture(t, { secretProvenance = false } = {}) {
       assert.equal(options.cwd, dir);
       await model.command?.(argv, env, input);
       if (argv.includes("assume-role")) {
+        assert.deepEqual(
+          JSON.parse(argv[argv.indexOf("--tags") + 1]),
+          Object.entries(runSessionTags(plan.runSession)).map(([Key, Value]) => ({ Key, Value })),
+        );
+        assert.deepEqual(
+          JSON.parse(argv[argv.indexOf("--policy") + 1]),
+          runSessionPolicy(plan.runSession),
+        );
+        assert.equal(argv[argv.indexOf("--role-session-name") + 1], plan.runSession.runId);
         assert.equal(model.saves.at(-1).phase, "issuance-intent");
         assert.ok(fs.existsSync(path.join(dir, "session-issuance-intent.json")));
         assert.equal(env.AWS_SESSION_TOKEN, undefined);
@@ -219,7 +244,7 @@ function fixture(t, { secretProvenance = false } = {}) {
       if (argv.includes("get-caller-identity"))
         return JSON.stringify({
           Account: f.record.aws.accountId,
-          Arn: `arn:aws:sts::${f.record.aws.accountId}:assumed-role/Qualification/cbx-session-${plan.attemptId}`,
+          Arn: `arn:aws:sts::${f.record.aws.accountId}:assumed-role/Qualification/${plan.runSession.runId}`,
           ...model.identity,
         });
       if (argv.includes("idle-controller-recover")) {
@@ -1003,3 +1028,26 @@ ${mode === "success" ? "process.exit(0)" : "setInterval(()=>{},1000)"}`;
     }
   },
 );
+
+for (const [label, alter] of Object.entries({
+  missingScope: (p) => {
+    delete p.runSession;
+  },
+  foreignRecoveryCutoff: (p) => {
+    p.runSession.recoveryExpiresAt = p.runSession.expiresAt;
+  },
+  malformedRun: (p) => {
+    p.runSession.runId = "image-qualification-*-1";
+  },
+  lateScope: (p) => {
+    p.runSession.startsAt = p.authorityRetentionEndsAt;
+  },
+}))
+  test(`run-scoped issuance refuses ${label} without issuing or delivering`, async (t) => {
+    const f = fixture(t);
+    alter(f.plan);
+    f.reset();
+    await assert.rejects(() => f.run("deliver"));
+    assert.equal(f.model.commands.length, 0);
+    assert.equal(f.model.delivery, undefined);
+  });

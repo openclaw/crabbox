@@ -24,6 +24,7 @@ import {
   assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
+import { handoffSession } from "./image-qualification-run-session.mjs";
 import {
   packageFile,
   qualificationPackagePath,
@@ -1152,6 +1153,8 @@ function qualificationConfig() {
 
 function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   const config = qualificationConfig();
+  const session = handoffSession(process.env, identityCheck, manifestSha256);
+  if (session) startsAt = session.scope.startsAt;
   const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
   const expiresAt = new Date(
     Date.parse(startsAt) +
@@ -1179,6 +1182,7 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
         account: required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
         config,
         isolation: readAdmission().sha256,
+        ...(session ? { awsSessionScopeSha256: session.sha256 } : {}),
       }),
     ),
     mode: config.firstWalk ? "first-walk" : config.retainedImage ? "retained" : "mint",
@@ -1220,6 +1224,7 @@ function publishHandoff(identityCheck, manifest) {
     manifest.manifestSha256,
     new Date(Date.now()).toISOString(),
   );
+  assertHandoffWindow(handoff);
   const handoffSha256 = digest(canonical(handoff));
   const executorIdentity = executorCredentialIdentity({
     ...process.env,
