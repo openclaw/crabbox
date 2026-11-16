@@ -477,7 +477,7 @@ index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c76
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d6077acc49a4da6f4b1397d7cea6d21be..e514fe97c758cdef37b788090ed4c4a02380273e 100644
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863cf3ed69a 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
 @@ -1,15 +1,32 @@
@@ -2093,7 +2093,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..e514fe97c758cdef37b788090ed4c4a0
        throw new Error("AWS qualification launch budget is exhausted");
      }
    }
-@@ -3252,3 +4264,145 @@ function isRetryableReconciliationError(error: unknown): boolean {
+@@ -3252,3 +4264,151 @@ function isRetryableReconciliationError(error: unknown): boolean {
  function sleep(ms: number): Promise<void> {
    return new Promise((resolve) => setTimeout(resolve, ms));
  }
@@ -2180,7 +2180,10 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..e514fe97c758cdef37b788090ed4c4a0
 +  if (!reader) throw new Error("missing authorization response");
 +  const chunks: Uint8Array[] = [];
 +  let bytes = 0;
-+  const abort = () => void reader.cancel().catch(() => {});
++  let cancellation: Promise<void> | undefined;
++  const abort = () => {
++    cancellation = reader.cancel().catch(() => {});
++  };
 +  signal.addEventListener("abort", abort, { once: true });
 +  try {
 +    while (true) {
@@ -2198,7 +2201,10 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..e514fe97c758cdef37b788090ed4c4a0
 +    );
 +  } finally {
 +    signal.removeEventListener("abort", abort);
-+    await reader.cancel().catch(() => {});
++    // A second cancel on an already-closed stream need not await the original
++    // underlying cancellation. Join the first promise before returning failure.
++    if (cancellation) await cancellation;
++    else await reader.cancel().catch(() => {});
 +    reader.releaseLock();
 +  }
 +}
@@ -3007,7 +3013,7 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5097237e2b4a3b9fdd7c53d3eaa961de31edc912 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..8b5fcb73567d30646fa06ee251aeed008bc8cbcc 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3861,7 +3867,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5097237e2b4a3b9fdd7c53d3eaa961de
    </item>`;
  }
 
-@@ -2914,3 +3623,1154 @@ function awsServerError(): Response {
+@@ -2914,3 +3623,1163 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -4632,7 +4638,9 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5097237e2b4a3b9fdd7c53d3eaa961de
 +    const abort = new AbortController();
 +    vi.spyOn(AbortSignal, "timeout").mockReturnValue(abort.signal);
 +    const entered = Promise.withResolvers<void>();
++    const finishCancel = Promise.withResolvers<void>();
 +    let cancelled = false;
++    let returned = false;
 +    const execute = f.signer.execute.bind(f.signer);
 +    vi.spyOn(f.signer, "execute").mockImplementation(
 +      async (service, action, region, parameters) => {
@@ -4642,7 +4650,8 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5097237e2b4a3b9fdd7c53d3eaa961de
 +            pull() {
 +              entered.resolve();
 +            },
-+            cancel() {
++            async cancel() {
++              await finishCancel.promise;
 +              cancelled = true;
 +            },
 +          }),
@@ -4654,8 +4663,14 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5097237e2b4a3b9fdd7c53d3eaa961de
 +      () => "unexpected success",
 +      (error) => String(error),
 +    );
++    void failure.then(() => {
++      returned = true;
++    });
 +    await entered.promise;
 +    abort.abort();
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    expect(returned).toBe(false);
++    finishCancel.resolve();
 +    expect(await failure).toContain("preflight requires finalization");
 +    expect(cancelled).toBe(true);
 +    expect((await f.run.attest(controller)).authorizationChecks?.[0]?.keyObservation?.outcome).toBe(

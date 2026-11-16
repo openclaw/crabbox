@@ -34,7 +34,7 @@
     {
       "path": "worker/src/aws-qualification-authority.ts",
       "beforeSha256": "f2fdb23770dc47c0168b14195ab69f80fba62924ccc9edd9b724d354f163c1de",
-      "afterSha256": "c99eea2b7281854999d09d9d0092e2a9f7aa7eeaff989985fc152d4564ce6fea"
+      "afterSha256": "9fc43da7b7f6b25d8bf554a5c914d3457ec0b3ee79981077d77c0343b49ef50e"
     },
     {
       "path": "worker/src/aws-qualification-contract.ts",
@@ -79,7 +79,7 @@
     {
       "path": "worker/test/aws-qualification-authority.test.ts",
       "beforeSha256": "50c0c7f751f0c7cd9b4211655f515d3593826c332dda35be2bb807e75b49f31c",
-      "afterSha256": "e62f6feda5ad191c35f9b8840947c880b2dd42b51965f15c7f8057e5c092efe6"
+      "afterSha256": "86715d0fcbdcec01592e37342ef231da3f2678bfbdef0f7d86f16ded717dd19c"
     },
     {
       "path": "worker/test/bootstrap-ownership.test.ts",
@@ -99,10 +99,10 @@
   ],
   "baselineCommit": "0e8e45f2dc6ecf5c9b062d83919dcca7f5feb6c6",
   "baselineTree": "094796f4b4964d5bc5bbd4605858c6ad154bb699",
-  "overlaySha256": "6b4faaa9fd883a397151b39ac6b9864cb678b4116d6e5eed75416f7c2cdfae37",
+  "overlaySha256": "c547d35d13c62fd4213d34ff5372e83767b585c864c9a37a057bede3f7e1e2f6",
   "preservedCandidate": "7033f4a72d1494ade990e7d7af913c829da5fe18",
   "privateConfigSha256": "ce68fd010139528843b250d9d7acd1c6c55fb8a063c3cefa38c874dd4c1fc2bb",
   "recipeSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4",
-  "workerSourceSha256": "934e500695bbf4e785c407fa097793866a7f4ada965c3fd24bd0a7bb33ce5a85",
+  "workerSourceSha256": "8da5be2636e002bbef9e031b4ac768951d0b35c1d1872ba8bf320351dd9c721f",
   "authorityConfigSha256": "fdc03224a2c52aa95d1b3cfd2be70d7bd7db08afe9fd5f61ce63c22ec47b990d"
 }
