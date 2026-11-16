@@ -185,6 +185,11 @@ function routeFor(request, env) {
   ];
   if (env.QUALIFICATION_MODE === "first-walk")
     rules.push(
+      {
+        method: "GET",
+        pattern: new RegExp(`^/v1/runs/${runId}/receipt$`),
+        maxBody: 0,
+      },
       { method: "POST", pattern: /^\/v1\/checkpoints$/, maxBody: 16 * 1024 },
       { method: "GET", pattern: /^\/v1\/checkpoints\/chk_[A-Za-z0-9_-]{1,128}$/, maxBody: 0 },
       {
