@@ -1183,11 +1183,34 @@ test("DryRun child accepts only exact exit254 ImportKeyPair authorization codes 
       await run(message(code).replace("An error occurred", "aws: [ERROR]: An error occurred")),
       code,
     );
+    for (const prefix of ["", "aws: [ERROR]: "])
+      assert.equal(
+        await run(
+          message(code)
+            .replace("An error occurred", `${prefix}An error occurred`)
+            .replace("operation:", "operation (reached max retries: 0):"),
+        ),
+        code,
+      );
   }
   for (const [stderr, exit, stdout] of [
     [message("DryRunOperation"), 0],
     [message("UnauthorizedOperation"), 255],
     [message("DryRunOperation", "RunInstances"), 254],
+    [message("DryRunOperation").replace("operation:", "operation (reached max retries: 1):"), 254],
+    [message("DryRunOperation").replace("operation:", "operation (reached max retries: 00):"), 254],
+    [message("DryRunOperation").replace("operation:", "operation (max retries: 0):"), 254],
+    [
+      message("DryRunOperation").replace("operation:", "operation (reached max retries: 0) extra:"),
+      254,
+    ],
+    [
+      message("DryRunOperation", "RunInstances").replace(
+        "operation:",
+        "operation (reached max retries: 0):",
+      ),
+      254,
+    ],
     [message("AccessDenied"), 254],
     [message("DryRunOperation") + message("UnauthorizedOperation"), 254],
     ["fake-secret DryRunOperation", 254],
