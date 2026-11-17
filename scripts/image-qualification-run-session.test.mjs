@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+
 import {
   reusableQualificationPolicies,
   validateRunSession,
@@ -247,38 +248,116 @@ test("multi-resource attach and launch require every supported resource check", 
   );
 });
 
-test("standalone tagging cannot adopt another run, change identity, remove tags or promote a copy", () => {
-  const resources = [arn("volume")];
-  assert.equal(allowed("ec2:CreateTags", resources, context), true);
-  for (const key of sessionTagKeys) {
+// Standalone CreateTags has an action-specific context: global resource tags
+// are present while EC2-prefixed resource tags and ec2:CreateAction are absent.
+const standaloneTagContext = Object.fromEntries(
+  Object.entries(context).filter(([key]) => !key.startsWith("ec2:ResourceTag/")),
+);
+Object.assign(
+  standaloneTagContext,
+  Object.fromEntries(Object.entries(tags).map(([key, value]) => [`aws:ResourceTag/${key}`, value])),
+);
+
+for (const [type, account] of [
+  ["key-pair", config.accountId],
+  ["instance", config.accountId],
+  ["volume", config.accountId],
+  ["image", ""],
+  ["snapshot", ""],
+])
+  test(`standalone CreateTags ${type} requires matching global resource, principal and request identity`, () => {
+    const resources = [arn(type, "test", account)];
+    assert.equal(allowed("ec2:CreateTags", resources, standaloneTagContext), true);
+    for (const prefix of ["aws:PrincipalTag", "aws:RequestTag", "aws:ResourceTag"])
+      for (const key of sessionTagKeys)
+        for (const value of [undefined, "foreign"])
+          assert.equal(
+            allowed("ec2:CreateTags", resources, {
+              ...standaloneTagContext,
+              [`${prefix}/${key}`]: value,
+            }),
+            false,
+            `${prefix}/${key}=${value}`,
+          );
+    // EC2-prefixed values cannot substitute for missing/mismatched global tags.
+    for (const key of sessionTagKeys)
+      for (const value of [undefined, "foreign"])
+        assert.equal(
+          allowed("ec2:CreateTags", resources, {
+            ...context,
+            ...standaloneTagContext,
+            [`aws:ResourceTag/${key}`]: value,
+          }),
+          false,
+        );
     assert.equal(
-      allowed("ec2:CreateTags", resources, { ...context, [`aws:RequestTag/${key}`]: "foreign" }),
+      allowed("ec2:CreateTags", [arn(type, "test", "999999999999")], standaloneTagContext),
       false,
     );
+    assert.equal(allowed("ec2:DeleteTags", resources, standaloneTagContext), false);
+    for (const existing of [undefined, "other", "first-walk-data"])
+      for (const requested of [undefined, "other", "first-walk-data"])
+        assert.equal(
+          allowed("ec2:CreateTags", resources, {
+            ...standaloneTagContext,
+            "aws:ResourceTag/crabbox_qualification_op": existing,
+            "aws:RequestTag/crabbox_qualification_op": requested,
+          }),
+          (existing === "first-walk-data") === (requested === "first-walk-data"),
+          `marker ${existing} -> ${requested}`,
+        );
+  });
+
+test("standalone CreateTags keeps creation contexts, session deadlines and cleanup distinct", () => {
+  const resources = [arn("key-pair")];
+  assert.equal(
+    allowed("ec2:CreateTags", resources, {
+      ...standaloneTagContext,
+      "ec2:CreateAction": "UnknownAction",
+    }),
+    false,
+  );
+  for (const at of [scope.startsAt, "2030-01-01T02:09:59.999Z"])
     assert.equal(
-      allowed("ec2:CreateTags", resources, { ...context, [`ec2:ResourceTag/${key}`]: "foreign" }),
+      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
+      true,
+    );
+  for (const at of [scope.workExpiresAt, scope.expiresAt]) {
+    assert.equal(
+      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
       false,
     );
+    // Cleanup retains its own action-specific EC2 resource-tag conditions.
     assert.equal(
-      allowed("ec2:CreateTags", resources, { ...context, [`aws:RequestTag/${key}`]: undefined }),
-      false,
+      allowed("ec2:DeleteKeyPair", resources, { ...context, "aws:CurrentTime": at }),
+      true,
     );
   }
-  assert.equal(allowed("ec2:DeleteTags", resources), false);
+  for (const at of ["2029-12-31T23:59:59.999Z", scope.recoveryExpiresAt])
+    assert.equal(
+      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
+      false,
+    );
   assert.equal(
     allowed("ec2:CreateTags", resources, {
-      ...context,
-      "aws:RequestTag/crabbox_qualification_op": "first-walk-data",
+      ...standaloneTagContext,
+      "aws:RequestedRegion": "eu-west-1",
     }),
     false,
   );
-  assert.equal(
-    allowed("ec2:CreateTags", resources, {
-      ...context,
-      "ec2:ResourceTag/crabbox_qualification_op": "first-walk-data",
-    }),
-    false,
+});
+
+test("CreateTags resource reference includes both documented resource-tag namespaces", () => {
+  const reference = JSON.parse(
+    fs.readFileSync(new URL("./image-qualification-ec2-authorization.json", import.meta.url)),
   );
+  for (const keys of Object.values(reference.actions.CreateTags.resources))
+    for (const key of [
+      "aws:RequestTag/${TagKey}",
+      "aws:ResourceTag/${TagKey}",
+      "ec2:ResourceTag/${TagKey}",
+    ])
+      assert.ok(keys.includes(key), key);
 });
 
 test("deadline ends forward work while same-run independent cleanup remains possible", () => {
