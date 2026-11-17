@@ -56,6 +56,9 @@ func authorityTestSetup(t *testing.T) authorityTestMaterial {
 	t.Setenv("TENKI_AUTH_TOKEN", authorityTestToken)
 	t.Setenv("TENKI_API_KEY", "")
 	t.Setenv("TENKI_API_ENDPOINT", "")
+	for _, name := range []string{"LUXORAI_CONFIG_FILE", "LUXORAI_AUTH_TOKEN", "LUXORAI_API_KEY", "LUXORAI_API_ENDPOINT"} {
+		t.Setenv(name, "")
+	}
 	ca, client := authorityTestSigner(t), authorityTestSigner(t)
 	cert := &ssh.Certificate{Key: client.PublicKey(), CertType: ssh.UserCert, ValidBefore: ssh.CertTimeInfinity}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {

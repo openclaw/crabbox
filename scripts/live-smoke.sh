@@ -952,7 +952,11 @@ tenki_smoke() {
   need_tool jq
   need_tool rg
 
-  local tenki_cli="${CRABBOX_TENKI_CLI:-${TENKI_CLI:-tenki}}"
+  local tenki_cli="${CRABBOX_TENKI_CLI:-${TENKI_CLI:-}}"
+  if [[ -z "$tenki_cli" ]]; then
+    tenki_cli=luxor
+    command -v luxor >/dev/null 2>&1 || tenki_cli=tenki
+  fi
   need_tool "$tenki_cli"
   local tenki_endpoint="${CRABBOX_TENKI_ENDPOINT:-${TENKI_ENDPOINT:-$(config_value tenki.endpoint || true)}}"
   local tenki_sandbox_args=()
@@ -963,7 +967,7 @@ tenki_smoke() {
   local auth
   capture_stdout auth "$tenki_cli" status --json
   if ! printf '%s\n' "$auth" | jq -e '.status | startswith("Logged in")' >/dev/null; then
-    echo "tenki smoke requires an authenticated Tenki CLI; run tenki login" >&2
+    echo "tenki smoke requires an authenticated Luxor CLI; run luxor login" >&2
     return 2
   fi
   "$tenki_cli" --version

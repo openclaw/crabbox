@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1266,8 +1267,8 @@ func TestTenkiBindingGuardsPrecedeForeignValues(t *testing.T) {
 
 func TestTenkiScalarFallbackValues(t *testing.T) {
 	for _, tc := range []struct{ cli, root, wantCLI, wantRoot string }{
-		{"", "", "tenki", "/home/tenki/crabbox"},
-		{"  ", "  ", "tenki", "/home/tenki/crabbox"},
+		{"", "", "luxor", "/home/tenki/crabbox"},
+		{"  ", "  ", "luxor", "/home/tenki/crabbox"},
 		{" custom-cli ", " /custom/root ", "custom-cli", "/custom/root"},
 	} {
 		cfg := core.Config{Tenki: core.TenkiConfig{CLIPath: tc.cli, WorkRoot: tc.root}}
@@ -1277,5 +1278,58 @@ func TestTenkiScalarFallbackValues(t *testing.T) {
 		if got := tenkiWorkRoot(cfg); got != tc.wantRoot {
 			t.Fatalf("root fallback=%q want=%q", got, tc.wantRoot)
 		}
+	}
+}
+
+func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, cli string
+		missing   bool
+		want      []string
+	}{
+		{name: "luxor found", want: []string{"luxor"}},
+		{name: "luxor missing", missing: true, want: []string{"luxor", "tenki"}},
+		{name: "explicit path missing", cli: "/opt/luxor/bin/luxor", missing: true, want: []string{"/opt/luxor/bin/luxor"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if tc.missing && req.Name != "tenki" {
+					return core.LocalCommandResult{ExitCode: 1}, &exec.Error{Name: req.Name, Err: exec.ErrNotFound}
+				}
+				return core.LocalCommandResult{}, nil
+			}}
+			var names []string
+			recording := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				names = append(names, req.Name)
+				return runner.Run(context.Background(), req)
+			}}
+			cfg := core.BaseConfig()
+			if tc.cli != "" {
+				cfg.Tenki.CLIPath = tc.cli
+			}
+			backend := &tenkiBackend{cfg: cfg, rt: core.Runtime{Exec: recording, Stdout: io.Discard, Stderr: io.Discard}}
+			_, err := backend.runTenki(context.Background(), []string{"sandbox", "list"}, io.Discard, io.Discard)
+			if !reflect.DeepEqual(names, tc.want) {
+				t.Fatalf("commands=%q want %q", names, tc.want)
+			}
+			if wantErr := tc.cli != ""; (err != nil) != wantErr {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestTenkiFixedRouteStableAcrossCLIRename(t *testing.T) {
+	route := func(cli string) string {
+		cfg := core.BaseConfig()
+		cfg.Provider = tenkiProvider
+		cfg.Tenki.CLIPath = cli
+		return tenkiFixedRoute(cfg)
+	}
+	if route("luxor") != route("tenki") || route("") != route("tenki") {
+		t.Fatal("default luxor CLI changed the pre-rebrand fixed route")
+	}
+	if route("/opt/custom/luxor") == route("tenki") {
+		t.Fatal("custom CLI path must remain part of the fixed route")
 	}
 }

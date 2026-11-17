@@ -18,12 +18,15 @@ func TestTenkiNativeCredentialPrecedence(t *testing.T) {
 		{name: "stored", wantKey: "tk_test_stored"},
 		{name: "API key overrides stored", env: map[string]string{"TENKI_API_KEY": "tk_test_api"}, wantKey: "tk_test_api"},
 		{name: "auth token overrides API key", env: map[string]string{"TENKI_AUTH_TOKEN": "tk_test_auth", "TENKI_API_KEY": "tk_test_api"}, wantKey: "tk_test_auth"},
-		{name: "empty auth clears stored", env: map[string]string{"TENKI_AUTH_TOKEN": ""}},
+		{name: "empty auth preserves stored", env: map[string]string{"TENKI_AUTH_TOKEN": ""}, wantKey: "tk_test_stored"},
 		{name: "empty auth allows API key", env: map[string]string{"TENKI_AUTH_TOKEN": "", "TENKI_API_KEY": "tk_test_api"}, wantKey: "tk_test_api"},
-		{name: "whitespace auth blocks API key", env: map[string]string{"TENKI_AUTH_TOKEN": " \t", "TENKI_API_KEY": "tk_test_api"}},
+		{name: "whitespace auth allows API key", env: map[string]string{"TENKI_AUTH_TOKEN": " \t", "TENKI_API_KEY": "tk_test_api"}, wantKey: "tk_test_api"},
 		{name: "empty API key preserves stored", env: map[string]string{"TENKI_API_KEY": ""}, wantKey: "tk_test_stored"},
 		{name: "whitespace API key preserves stored", env: map[string]string{"TENKI_API_KEY": " \t"}, wantKey: "tk_test_stored"},
-		{name: "empty auth and whitespace API key remain logged out", env: map[string]string{"TENKI_AUTH_TOKEN": "", "TENKI_API_KEY": " \t"}},
+		{name: "Luxor API key overrides Tenki auth token", env: map[string]string{"LUXORAI_API_KEY": "lx_test_api", "TENKI_AUTH_TOKEN": "tk_test_auth"}, wantKey: "lx_test_api"},
+		{name: "Luxor auth token overrides Luxor API key", env: map[string]string{"LUXORAI_AUTH_TOKEN": "lx_test_auth", "LUXORAI_API_KEY": "lx_test_api"}, wantKey: "lx_test_auth"},
+		{name: "blank Luxor values fall back to Tenki", env: map[string]string{"LUXORAI_AUTH_TOKEN": " ", "LUXORAI_API_KEY": "", "TENKI_API_KEY": "tk_test_api"}, wantKey: "tk_test_api"},
+		{name: "invalid Luxor key is not skipped", env: map[string]string{"LUXORAI_API_KEY": "invalid_test_key", "TENKI_API_KEY": "tk_test_api"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := tenkiCredentialTestHome(t)
@@ -33,7 +36,7 @@ func TestTenkiNativeCredentialPrecedence(t *testing.T) {
 			}
 			got, err := tenkiNativeCredentialContext(core.Config{})
 			if tc.wantKey == "" {
-				assertTenkiCredentialFailure(t, got, err, 3, "tk_test_stored", "tk_test_api")
+				assertTenkiCredentialFailure(t, got, err, 3, "tk_test_stored", "tk_test_api", "invalid_test_key")
 				return
 			}
 			if err != nil || got.key != tc.wantKey || got.endpoint == nil || got.endpoint.String() != tenkiProductionAPI {
@@ -136,7 +139,9 @@ func TestTenkiNativeCredentialEndpointPrecedence(t *testing.T) {
 	}{
 		{name: "stored endpoint", want: "https://stored.example.test"},
 		{name: "environment endpoint", env: map[string]string{"TENKI_API_ENDPOINT": "https://environment.example.test"}, want: "https://environment.example.test"},
-		{name: "empty environment resets production", env: map[string]string{"TENKI_API_ENDPOINT": ""}, want: tenkiProductionAPI},
+		{name: "empty environment preserves stored", env: map[string]string{"TENKI_API_ENDPOINT": ""}, want: "https://stored.example.test"},
+		{name: "Luxor environment overrides Tenki", env: map[string]string{"LUXORAI_API_ENDPOINT": "https://luxor.example.test", "TENKI_API_ENDPOINT": "https://environment.example.test"}, want: "https://luxor.example.test"},
+		{name: "blank Luxor environment falls back to Tenki", env: map[string]string{"LUXORAI_API_ENDPOINT": " ", "TENKI_API_ENDPOINT": "https://environment.example.test"}, want: "https://environment.example.test"},
 		{name: "SDK API URL ignored", env: map[string]string{"TENKI_API_URL": "https://wrong.example.test"}, want: "https://stored.example.test"},
 		{name: "explicit endpoint overrides both", env: map[string]string{"TENKI_API_ENDPOINT": "https://environment.example.test", "TENKI_API_URL": "https://wrong.example.test"}, override: "https://explicit.example.test/api/", want: "https://explicit.example.test/api/"},
 		{name: "explicit endpoint overrides malformed environment", env: map[string]string{"TENKI_API_ENDPOINT": " "}, override: "https://explicit.example.test", want: "https://explicit.example.test"},
@@ -159,7 +164,7 @@ func TestTenkiNativeCredentialRejectsUnsafeEndpoints(t *testing.T) {
 	for _, endpoint := range []string{
 		"http://api.example.test", "//api.example.test", "https:///path", "https://",
 		"https://private-user:private-password@api.example.test", "https://api.example.test?private_query=value",
-		"https://api.example.test#private_fragment", " \t", "https://api.example.test/%zz",
+		"https://api.example.test#private_fragment", "https://api.example.test/%zz",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
 			tenkiCredentialTestHome(t)
@@ -187,7 +192,10 @@ func tenkiCredentialTestHome(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	for _, name := range []string{"TENKI_CONFIG_FILE", "TENKI_AUTH_TOKEN", "TENKI_API_KEY", "TENKI_API_ENDPOINT", "TENKI_API_URL", "XDG_CONFIG_HOME"} {
+	for _, name := range []string{
+		"LUXORAI_CONFIG_FILE", "LUXORAI_AUTH_TOKEN", "LUXORAI_API_KEY", "LUXORAI_API_ENDPOINT", "LUXORAI_API_URL",
+		"TENKI_CONFIG_FILE", "TENKI_AUTH_TOKEN", "TENKI_API_KEY", "TENKI_API_ENDPOINT", "TENKI_API_URL", "XDG_CONFIG_HOME",
+	} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -198,7 +206,12 @@ func tenkiCredentialTestHome(t *testing.T) string {
 
 func writeTenkiCredentialTestConfig(t *testing.T, home, name, data string) {
 	t.Helper()
-	dir := filepath.Join(home, ".config", "tenki")
+	writeTenkiCredentialTestConfigIn(t, home, "tenki", name, data)
+}
+
+func writeTenkiCredentialTestConfigIn(t *testing.T, home, dirName, name, data string) {
+	t.Helper()
+	dir := filepath.Join(home, ".config", dirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +232,60 @@ func assertTenkiCredentialFailure(t *testing.T, got tenkiCredentialContext, err 
 		if strings.Contains(err.Error(), value) {
 			t.Fatal("error exposed credential or endpoint details")
 		}
+	}
+}
+
+func TestTenkiNativeCredentialConfigDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		luxor   string
+		marker  bool
+		tenki   string
+		wantKey string
+	}{
+		{name: "Luxor directory", luxor: "lx_test_luxor", wantKey: "lx_test_luxor"},
+		{name: "Luxor preferred over legacy", luxor: "lx_test_luxor", tenki: "tk_test_legacy", wantKey: "lx_test_luxor"},
+		{name: "legacy before migration", tenki: "tk_test_legacy", wantKey: "tk_test_legacy"},
+		{name: "legacy while Luxor directory lacks config", luxor: "-", tenki: "tk_test_legacy", wantKey: "tk_test_legacy"},
+		{name: "migrated Luxor logout ignores legacy", luxor: "-", marker: true, tenki: "tk_test_legacy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := tenkiCredentialTestHome(t)
+			if tc.luxor != "" {
+				if err := os.MkdirAll(filepath.Join(home, ".config", "luxor"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.luxor != "-" {
+					writeTenkiCredentialTestConfigIn(t, home, "luxor", "config.yaml", "auth_token: "+tc.luxor+"\n")
+				}
+			}
+			if tc.marker {
+				writeTenkiCredentialTestConfigIn(t, home, "luxor", ".migrated-from-tenki", "")
+			}
+			if tc.tenki != "" {
+				writeTenkiCredentialTestConfig(t, home, "config.yaml", "auth_token: "+tc.tenki+"\n")
+			}
+			got, err := tenkiNativeCredentialContext(core.Config{})
+			if tc.wantKey == "" {
+				assertTenkiCredentialFailure(t, got, err, 3, "tk_test_legacy")
+				return
+			}
+			if err != nil || got.key != tc.wantKey {
+				t.Fatalf("credential context: key=%q err=%v", got.key, err)
+			}
+		})
+	}
+}
+
+func TestTenkiNativeCredentialLuxorConfigFile(t *testing.T) {
+	home := tenkiCredentialTestHome(t)
+	writeTenkiCredentialTestConfigIn(t, home, "luxor", "config.yaml", "auth_token: lx_test_default\n")
+	writeTenkiCredentialTestConfigIn(t, home, "luxor", "luxor.yaml", "auth_token: lx_test_luxor_file\n")
+	writeTenkiCredentialTestConfigIn(t, home, "luxor", "tenki.yaml", "auth_token: tk_test_tenki_file\n")
+	t.Setenv("TENKI_CONFIG_FILE", "tenki.yaml")
+	t.Setenv("LUXORAI_CONFIG_FILE", "luxor.yaml")
+	got, err := tenkiNativeCredentialContext(core.Config{})
+	if err != nil || got.key != "lx_test_luxor_file" {
+		t.Fatalf("credential context: key=%q err=%v", got.key, err)
 	}
 }

@@ -143,9 +143,10 @@ Per-provider smoke prerequisites:
   in the environment. `scripts/live-smoke.sh` refuses to call Sprites until the
   CLI is available, then creates one sprite, verifies SSH, runs one command,
   lists normalized inventory, and stops the lease.
-- **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and
-  complete the browser flow. `scripts/live-smoke.sh` refuses to call Crabbox
-  Tenki lifecycle commands until `tenki status --json` reports a logged-in CLI,
+- **Tenki** — the authenticated Luxor CLI on `PATH` (`luxor`, or the legacy
+  `tenki` command); run `luxor login` and complete the browser flow.
+  `scripts/live-smoke.sh` refuses to call Crabbox Tenki lifecycle commands
+  until `luxor status --json` reports a logged-in CLI,
   then creates one session, runs one no-sync command, verifies paused-session
   status waits do not resume it, and stops the lease.
 - **Machine0** — the authenticated `machine0` CLI on `PATH` or

@@ -50,7 +50,7 @@ type tenkiCreateAttempt struct {
 }
 
 func tenkiFixedRoute(cfg core.Config) string {
-	data, _ := json.Marshal([]string{(Provider{}).ClaimScope(cfg), tenkiCLIPath(cfg), strings.TrimSpace(cfg.Tenki.Gateway), tenkiWorkRoot(cfg)})
+	data, _ := json.Marshal([]string{(Provider{}).ClaimScope(cfg), tenkiRouteCLIPath(cfg), strings.TrimSpace(cfg.Tenki.Gateway), tenkiWorkRoot(cfg)})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 

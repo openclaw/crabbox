@@ -1307,7 +1307,7 @@ esac
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.match(
     result.stderr,
-    /tenki smoke requires an authenticated Tenki CLI; run tenki login/,
+    /tenki smoke requires an authenticated Luxor CLI; run luxor login/,
   );
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /^config path$/m);
