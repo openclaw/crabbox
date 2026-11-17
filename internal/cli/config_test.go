@@ -18588,7 +18588,7 @@ func TestHostingerBindingEnvironmentAliasesAndMarkers(t *testing.T) {
 
 func TestTenkiBindingDefaultsAndFileValues(t *testing.T) {
 	clearConfigEnv(t)
-	wantDefaults := TenkiConfig{CLIPath: "luxor", WorkRoot: "/home/tenki/crabbox"}
+	wantDefaults := TenkiConfig{WorkRoot: "/home/tenki/crabbox"}
 	if got := baseConfig().Tenki; !reflect.DeepEqual(got, wantDefaults) {
 		t.Fatalf("Tenki defaults=%#v", got)
 	}

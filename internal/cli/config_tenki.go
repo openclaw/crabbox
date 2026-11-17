@@ -5,7 +5,7 @@ package cli
 // TenkiConfig owns mechanical bindings; destination provenance and provider
 // normalization and validation remain in their existing policy phases.
 type TenkiConfig struct {
-	CLIPath   string `config:"cliPath" env:"CRABBOX_TENKI_CLI" envAlias:"TENKI_CLI" flag:"tenki-cli" sources:"user,repo,env,flag" help:"Luxor CLI path (the legacy tenki command also works)" default:"luxor" fileIgnoreEmpty:"true" fileStorage:"value"`
+	CLIPath   string `config:"cliPath" env:"CRABBOX_TENKI_CLI" envAlias:"TENKI_CLI" flag:"tenki-cli" sources:"user,repo,env,flag" help:"Luxor CLI path (default luxor, falling back to the legacy tenki command)" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Endpoint  string `config:"endpoint" env:"CRABBOX_TENKI_ENDPOINT" envAlias:"TENKI_ENDPOINT" flag:"tenki-endpoint" sources:"user,repo,env,flag" help:"Tenki sandbox API endpoint" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	Gateway   string `config:"gateway" env:"CRABBOX_TENKI_GATEWAY" envAlias:"TENKI_GATEWAY" flag:"tenki-gateway" sources:"user,repo,env,flag" help:"Tenki sandbox SSH gateway WebSocket URL" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	Workspace string `config:"workspace" env:"CRABBOX_TENKI_WORKSPACE" flag:"tenki-workspace" sources:"user,repo,env,flag" help:"legacy Tenki workspace claim scope for existing leases" fileIgnoreEmpty:"true" fileStorage:"value"`
