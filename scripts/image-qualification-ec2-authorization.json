@@ -19,11 +19,31 @@
     "CreateTags": {
       "conditions": ["ec2:CreateAction"],
       "resources": {
-        "image": ["aws:RequestTag/${TagKey}", "ec2:ResourceTag/${TagKey}"],
-        "instance": ["aws:RequestTag/${TagKey}", "ec2:ResourceTag/${TagKey}"],
-        "key-pair": ["aws:RequestTag/${TagKey}", "ec2:ResourceTag/${TagKey}"],
-        "snapshot": ["aws:RequestTag/${TagKey}", "ec2:ResourceTag/${TagKey}"],
-        "volume": ["aws:RequestTag/${TagKey}", "ec2:ResourceTag/${TagKey}"]
+        "image": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "ec2:ResourceTag/${TagKey}"
+        ],
+        "instance": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "ec2:ResourceTag/${TagKey}"
+        ],
+        "key-pair": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "ec2:ResourceTag/${TagKey}"
+        ],
+        "snapshot": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "ec2:ResourceTag/${TagKey}"
+        ],
+        "volume": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "ec2:ResourceTag/${TagKey}"
+        ]
       }
     },
     "CreateVolume": {

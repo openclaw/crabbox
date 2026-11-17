@@ -1,6 +1,7 @@
 // Qualification-only, credential-free policy and scope construction. No AWS effects.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+
 import { canonical, digest } from "./image-qualification-isolation.mjs";
 
 export const sessionTagKeys = ["run", "owner", "sha", "expiry"].map(
@@ -280,13 +281,14 @@ export function reusableQualificationPolicies(config) {
     ...request,
     "ec2:CreateAction": ["RunInstances", "ImportKeyPair", "CreateImage", "CreateVolume"],
   });
-  // Four ownership fields can only be restated, never replaced. The typed
+  // Standalone CreateTags uses global resource tags in its request context.
+  // All four ownership fields can only be restated, never replaced. The typed
   // authority still injects its operation ID and checks exact ledger targets.
   allow(
     "RestateOwnedTags",
     "CreateTags",
     tagged,
-    { ...owned, ...request },
+    { ...identity("aws:ResourceTag"), ...request },
     { Null: { "ec2:CreateAction": "true" } },
   );
   for (const [action, type, account] of [
@@ -328,7 +330,7 @@ export function reusableQualificationPolicies(config) {
       Condition: {
         Null: { "ec2:CreateAction": "true" },
         StringEquals: { "aws:RequestTag/crabbox_qualification_op": "first-walk-data" },
-        StringNotEquals: { "ec2:ResourceTag/crabbox_qualification_op": "first-walk-data" },
+        StringNotEquals: { "aws:ResourceTag/crabbox_qualification_op": "first-walk-data" },
       },
     },
     {
@@ -337,7 +339,7 @@ export function reusableQualificationPolicies(config) {
       Action: "ec2:CreateTags",
       Resource: tagged,
       Condition: {
-        StringEquals: { "ec2:ResourceTag/crabbox_qualification_op": "first-walk-data" },
+        StringEquals: { "aws:ResourceTag/crabbox_qualification_op": "first-walk-data" },
         StringNotEquals: { "aws:RequestTag/crabbox_qualification_op": "first-walk-data" },
       },
     },
