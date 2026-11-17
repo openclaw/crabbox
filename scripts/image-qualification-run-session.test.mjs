@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  keyAuthorizationProfile,
   reusableQualificationPolicies,
   validateRunSession,
   runSessionTags,
@@ -531,4 +532,98 @@ test("trust uses action-supported keys and admits only the issuer with complete 
     "${aws:RequestTag/crabbox_qualification_run}",
   );
   assert.equal(fixed.trust.Statement[1].Condition.StringEquals["sts:RoleSessionName"], undefined);
+});
+
+const keyScope = { ...scope, profile: keyAuthorizationProfile };
+function keyPermitted(action, resource, ctx = context, cleanup = false) {
+  const session = (cleanup ? cleanupSessionPolicy(keyScope) : runSessionPolicy(keyScope)).Statement;
+  return [all, session].every((statements) => {
+    const matching = statements.filter((s) => matches(s, action, resource, ctx));
+    return matching.some((s) => s.Effect === "Allow") && !matching.some((s) => s.Effect === "Deny");
+  });
+}
+test("key-only profile intersects reusable ownership and never permits compute/storage/image effects", () => {
+  assert.ok(JSON.stringify(runSessionPolicy(keyScope)).length <= 2048);
+  assert.ok(JSON.stringify(cleanupSessionPolicy(keyScope)).length <= 2048);
+  for (const action of [...forwardActions, ...cleanupActions].filter(
+    (a) => !["ec2:ImportKeyPair", "ec2:CreateTags", "ec2:DeleteKeyPair"].includes(a),
+  ))
+    for (const resource of [
+      arn("instance"),
+      arn("volume"),
+      arn("image"),
+      arn("snapshot"),
+      arn("key-pair"),
+    ])
+      assert.equal(keyPermitted(action, resource), false);
+  assert.equal(keyPermitted("ec2:ImportKeyPair", arn("key-pair")), true);
+  assert.equal(keyPermitted("ec2:DeleteKeyPair", arn("key-pair")), true);
+  for (const key of sessionTagKeys) {
+    const missing = { ...context };
+    delete missing[`ec2:ResourceTag/${key}`];
+    assert.equal(keyPermitted("ec2:DeleteKeyPair", arn("key-pair"), missing), false);
+    assert.equal(
+      keyPermitted("ec2:DeleteKeyPair", arn("key-pair"), {
+        ...context,
+        [`ec2:ResourceTag/${key}`]: "foreign",
+      }),
+      false,
+    );
+  }
+  assert.equal(
+    keyPermitted("ec2:ImportKeyPair", arn("key-pair"), {
+      ...context,
+      "aws:CurrentTime": scope.workExpiresAt,
+    }),
+    false,
+  );
+  assert.equal(
+    keyPermitted(
+      "ec2:DeleteKeyPair",
+      arn("key-pair"),
+      { ...context, "aws:CurrentTime": scope.workExpiresAt },
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    keyPermitted(
+      "ec2:DeleteKeyPair",
+      arn("key-pair"),
+      { ...context, "aws:CurrentTime": scope.recoveryExpiresAt },
+      true,
+    ),
+    false,
+  );
+  assert.equal(keyPermitted("ec2:ImportKeyPair", arn("key-pair"), context, true), false);
+  for (const action of ["iam:PutRolePolicy", "sts:AssumeRole", "sts:TagSession", "ec2:DeleteTags"])
+    assert.equal(keyPermitted(action, arn("key-pair")), false);
+});
+test("key-only handoff profile cannot be dropped or substituted by another mode", () => {
+  const identity = {
+    repository: scope.repository,
+    workflowSha: scope.workflowSha,
+    candidateSha: scope.candidateSha,
+    runId: "42",
+    artifactId: scope.candidateArtifactId,
+    artifactDigest: scope.candidateArtifactDigest,
+  };
+  const env = {
+    QUALIFICATION_MODE: "key-authorization",
+    GITHUB_RUN_ATTEMPT: "1",
+    QUALIFICATION_AWS_SESSION_JSON: JSON.stringify(keyScope),
+  };
+  assert.deepEqual(handoffSession(env, identity, scope.manifestSha256).scope, keyScope);
+  assert.throws(() =>
+    handoffSession({ ...env, QUALIFICATION_MODE: "first-walk" }, identity, scope.manifestSha256),
+  );
+  assert.throws(() =>
+    handoffSession(
+      { ...env, QUALIFICATION_AWS_SESSION_JSON: JSON.stringify(scope) },
+      identity,
+      scope.manifestSha256,
+    ),
+  );
+  for (const profile of [null, "", "key-tag-authorization-aws-session/v2"])
+    assert.throws(() => validateRunSession({ ...keyScope, profile }));
 });

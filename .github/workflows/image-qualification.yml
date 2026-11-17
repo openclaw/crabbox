@@ -12,10 +12,10 @@ on:
         required: true
         type: string
       mode:
-        description: Mint/retained image qualification or one-copy synthetic first-walk
+        description: Image qualification, synthetic first-walk or protected key-only authorization
         type: choice
         default: mint
-        options: [mint, retained, first-walk]
+        options: [mint, retained, first-walk, key-authorization]
       retained_image_id:
         description: Retained mode only, exact borrowed AMI
         type: string
@@ -101,10 +101,10 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Check out pinned private diagnostic baseline
-        if: inputs.mode == 'first-walk'
+        if: inputs.mode == 'first-walk' || inputs.mode == 'key-authorization'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 0e8e45f2dc6ecf5c9b062d83919dcca7f5feb6c6
+          ref: 7b67cd5da03d22622516aa6a712e22dfaa4734b8
           path: private-baseline
           persist-credentials: false
       - name: Set up Go
@@ -127,7 +127,7 @@ jobs:
           package-manager-cache: false
       - name: Install protected Worker toolchain
         run: |
-          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+          if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then
             npm ci --prefix private-baseline/worker --ignore-scripts
           else
             npm ci --prefix harness/worker --ignore-scripts
@@ -143,7 +143,7 @@ jobs:
             [[ -z "${!name+x}" ]]
           done
           mkdir -p "$ARTIFACT/bin" "$ARTIFACT/worker" "$ARTIFACT/candidate/scripts"
-          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+          if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then
             node harness/scripts/image-qualification-control.mjs prepare-build \
               harness candidate "$ARTIFACT/build-inputs.json" private-baseline
           else
@@ -154,17 +154,17 @@ jobs:
             node harness/scripts/image-qualification-control.mjs retained-capsule \
               retained candidate "$ARTIFACT/retained-capsule.json"
           fi
-          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+          if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then
             node harness/scripts/image-qualification-control.mjs first-walk-recipe \
               candidate "$ARTIFACT"
           fi
           (
-            if [[ "$QUALIFICATION_MODE" == first-walk ]]; then cd private-baseline; else cd candidate; fi
+            if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then cd private-baseline; else cd candidate; fi
             GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly \
               go build -trimpath -ldflags='-s -w' -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox
           )
           (
-            if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+            if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then
               cd private-baseline/worker
               ./node_modules/.bin/wrangler deploy --dry-run --minify \
                 --outdir "$ARTIFACT/worker" --config wrangler.qualification.json
@@ -179,7 +179,7 @@ jobs:
           # The deployer uploads executable modules only; omit unused debug maps
           # before sealing so the combined CLI/Worker stays within the 128 MiB cap.
           find "$ARTIFACT/worker" -type f -name '*.map' -delete
-          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+          if [[ "$QUALIFICATION_MODE" == first-walk || "$QUALIFICATION_MODE" == key-authorization ]]; then
             find "$ARTIFACT/authority" -type f -name '*.map' -delete
           fi
           cp candidate/scripts/mint-aws-devtools-image.sh \
@@ -424,6 +424,7 @@ jobs:
           retention-days: 30
 
   execute:
+    if: inputs.mode != 'key-authorization'
     name: Execute candidate without cloud credentials
     needs: [authorize, build-candidate, admit, deploy-enroll, arm]
     # This separate protected environment contains only the exact-run credential.

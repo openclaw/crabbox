@@ -84,3 +84,24 @@ Those require their own applicable evidence. Historical attestations remain
 valid without the additive private `authorizationChecks` field. A changed
 package requires a fresh protected build, reviewed source admission and exact
 serving-version binding; old artifacts cannot substitute.
+
+## Protected key authorization
+
+The `key-authorization` workflow mode reuses this private package and the existing
+qualification owner, registry, finalizer and reaper. Its immutable purpose permits
+one fixed public-key import and the authority's thirteen existing tagging DryRuns.
+The protected arm job invokes that operation; the candidate executor is skipped.
+No guest, image, snapshot or volume may be created in this mode. The authority
+rejects candidate AWS requests and first-walk preparation, while the temporary
+session policy independently denies compute and storage effects. Only trusted
+controller code constructs tagging probes; IAM is not a DryRun-only boundary.
+
+This mode requires the distinct `key-tag-authorization-aws-session/v1` session
+profile with matching handoff and recovery identity. It keeps the existing
+130/150/270-minute lifecycle offsets; the diagnostic itself has a ten-minute
+forward-work bound and does not reopen after an uncertain result. Preserve the
+original run's credential margin and independent cleanup authority. Final success
+requires all thirteen checks and authoritative zero-residue finalization. It is
+an authorization diagnostic, not evidence of first-walk performance improvement.
+Installation, namespace-preserving deployment and execution require separate
+operator admission; merging tooling performs none of those actions.

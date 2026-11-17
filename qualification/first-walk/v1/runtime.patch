@@ -477,7 +477,7 @@ index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c76
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863cf3ed69a 100644
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..cdfce70dc325cc12241040e3af3d31ac41b49404 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
 @@ -1,15 +1,32 @@
@@ -572,7 +572,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
    CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
-@@ -134,17 +175,20 @@ interface AWSQualificationAuthorityEnv {
+@@ -134,28 +175,34 @@ interface AWSQualificationAuthorityEnv {
    CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
    CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
    CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
@@ -593,7 +593,12 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
  }
 
  interface AWSQualificationRunState {
-@@ -156,6 +200,8 @@ interface AWSQualificationRunState {
+   identity: AWSQualificationRunIdentity;
+   enrolledAt: string;
++  keyAuthorizationStartedAt?: number;
+   operationCount: number;
+   signerSequence: number;
+   authoritySha: string;
    authorityVersion: string;
    policy: AWSQualificationPolicy;
    policyHash: string;
@@ -602,7 +607,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    retainedRootDeviceName?: string;
    finalizationSource?: "automatic" | "controller";
    finalizingAt?: string;
-@@ -204,6 +250,7 @@ interface AuthoritySigner {
+@@ -204,6 +251,7 @@ interface AuthoritySigner {
      action: string,
      region: string,
      parameters: Record<string, unknown>,
@@ -610,7 +615,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    ): Promise<Response>;
  }
 
-@@ -211,10 +258,46 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
+@@ -211,10 +259,46 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationRunIdentity
  > {
@@ -657,7 +662,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
  }
 
  export default AWSQualificationTransport;
-@@ -223,6 +306,34 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -223,10 +307,42 @@ export class AWSQualificationController extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationControllerProps
  > {
@@ -692,7 +697,15 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
      await this.claim(identity);
    }
-@@ -246,16 +357,40 @@ export class AWSQualificationController extends WorkerEntrypoint<
+
++  async keyAuthorization(runId: string): Promise<{ passed: true; checks: number }> {
++    return await qualificationRun(this.env, runId).keyAuthorization(this.ctx.props);
++  }
++
+   async beginFinalization(runId: string): Promise<void> {
+     const run = qualificationRun(this.env, runId);
+     await run.beginFinalization(this.ctx.props);
+@@ -246,16 +362,40 @@ export class AWSQualificationController extends WorkerEntrypoint<
    }
 
    async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
@@ -737,7 +750,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    async retire(runId: string): Promise<void> {
      const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
      if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
-@@ -264,7 +399,161 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -264,7 +404,161 @@ export class AWSQualificationController extends WorkerEntrypoint<
  }
 
  export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
@@ -899,7 +912,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      validateRunIdentity(identity);
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      if (
-@@ -279,6 +568,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -279,6 +573,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
    async discover(
      controller: AWSQualificationControllerProps,
    ): Promise<AWSQualificationRegistryRecord | undefined> {
@@ -907,7 +920,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      if (active) validateController(controller, active.deploymentHash);
      else validateControllerShape(controller);
-@@ -289,6 +579,15 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -289,6 +584,15 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
      controller: AWSQualificationControllerProps,
      identity: AWSQualificationRunIdentity,
    ): Promise<AWSQualificationRegistryRecord> {
@@ -923,7 +936,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      validateController(controller, identity.deploymentHash);
      validateRunIdentity(identity);
      validateRunWindow(identity);
-@@ -417,6 +716,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -417,6 +721,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
    ): Promise<void> {
      return await this.serialized(async () => {
@@ -931,7 +944,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        const policy = authorityPolicy(this.env);
        const authority = authorityIdentity(this.env);
        validateController(controller, identity.deploymentHash);
-@@ -446,6 +746,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -446,6 +751,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          return;
        }
        const policyHash = await qualificationPolicyHash(policy);
@@ -939,7 +952,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
        validateRunWindow(identity);
        await this.ctx.storage.put({
-@@ -463,7 +764,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -463,7 +769,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          [ledgerKey]: emptyLedger(),
        });
        await this.ctx.storage.setAlarm(
@@ -953,7 +966,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        );
        // Keep persisted ownership and its alarm if storage crossed the cutoff.
        // A refused registry claim must not orphan a run that already owns cleanup.
-@@ -475,7 +781,160 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -475,7 +786,207 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
      request: AWSQualificationRequest,
    ): Promise<AWSQualificationResponse> {
@@ -977,6 +990,52 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +        }
 +      }
 +      return result;
++    });
++  }
++
++  // Protected controller only. No candidate-selected key, target, action or probe.
++  async keyAuthorization(
++    controller: AWSQualificationControllerProps,
++  ): Promise<{ passed: true; checks: number }> {
++    return await this.serialized(async () => {
++      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++      if (!run) throw new Error("key authorization run is not enrolled");
++      validateController(controller, run.identity.deploymentHash);
++      if (!run.identity.keyAuthorizationOnly) throw new Error("key-only purpose is required");
++      await qualificationRegistry(this.env).assertActive(run.identity);
++      await this.requireActiveRun(run.identity, "ImportKeyPair");
++      const prior = await this.ctx.storage.get<{ phase: string; startedAt: number }>(
++        "key-authorization",
++      );
++      if (prior?.phase === "passed") return { passed: true, checks: 13 };
++      if (prior) throw new Error("key authorization requires finalization");
++      const intent = { phase: "started", startedAt: Date.now() };
++      run.keyAuthorizationStartedAt = intent.startedAt;
++      await this.ctx.storage.put(stateKey, run);
++      await this.ctx.storage.put("key-authorization", intent);
++      const result = await this.executeSerialized(
++        run.identity,
++        {
++          opId: "00000000-0000-4000-8000-000000000001",
++          region: run.policy.region,
++          service: "ec2",
++          action: "ImportKeyPair",
++          parameters: {
++            KeyName: "crabbox-key-authorization",
++            PublicKeyMaterial:
++              "c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSU1hYTluUndGUXhQS1ZCOVliNVM4YmsyU0k2OW8rWXZpcWNUbElKMzlROVYgcXVhbGlmaWNhdGlvbi1kaWFnbm9zdGlj",
++          },
++        },
++        true,
++      );
++      if (result.status !== 200) throw new Error("diagnostic key import requires finalization");
++      const ledger = await this.ledger();
++      if (ledger.keyPairIds.length !== 1 || ledger.keyPairNames.length !== 1)
++        throw new Error("key authorization requires one exact owned key");
++      await this.checkKeyTagAuthorization(run, ledger.keyPairIds[0]!, ledger.keyPairNames[0]!);
++      await this.requireActiveRun(run.identity, "KeyAuthorization");
++      await this.ctx.storage.put("key-authorization", { ...intent, phase: "passed" });
++      return { passed: true, checks: 13 };
 +    });
 +  }
 +
@@ -1005,7 +1064,8 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +  ): Promise<AWSQualificationFirstWalkStatus> {
 +    return await this.serialized(async () => {
 +      const run = await this.requireActiveRun(identity, "FirstWalk");
-+      if (!identity.firstWalk) throw new Error("first-walk is not enabled");
++      if (!identity.firstWalk || identity.keyAuthorizationOnly)
++        throw new Error("first-walk is not enabled");
 +      if (
 +        !isPlainRecord(input) ||
 +        Object.keys(input).toSorted().join(",") !==
@@ -1115,7 +1175,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    }
 
    async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
-@@ -492,6 +951,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -492,6 +1003,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      return await this.serialized(async () => {
        const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
        if (!run) throw new Error("AWS qualification run is not enrolled");
@@ -1123,7 +1183,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        validateController(controller, run.identity.deploymentHash);
        const operations = [
          ...(await this.ctx.storage.list<AWSQualificationOperationEvidence>({
-@@ -505,6 +965,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -505,6 +1017,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
        return {
          version: awsQualificationAttestationVersion,
@@ -1136,10 +1196,11 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +              ),
 +            }
 +          : {}),
++        ...(run.identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true as const } : {}),
          runId: run.identity.runId,
          candidateSha: run.identity.candidateSha,
          candidateWorker: run.identity.candidateWorker,
-@@ -518,6 +987,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -518,6 +1040,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          finalized: Boolean(run.finalizedAt),
          ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
          operations,
@@ -1154,7 +1215,19 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
          ...(finalReceipt ? { finalReceipt } : {}),
        };
      });
-@@ -606,6 +1083,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -530,8 +1060,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   private async executeSerialized(
+     identity: AWSQualificationRunIdentity,
+     request: AWSQualificationRequest,
++    keyController = false,
+   ): Promise<AWSQualificationResponse> {
+     const run = await this.requireActiveRun(identity, request.action);
++    if (run.identity.keyAuthorizationOnly && (!keyController || request.action !== "ImportKeyPair"))
++      throw new Error("key-only run permits only its fixed protected controller diagnostic");
+     const policy = run.policy;
+     const normalizedRequest = validateRequestShape(request, policy.region);
+     const requestHash = await sha256Hex(
+@@ -606,6 +1139,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
 
      const ledger = await this.ledger();
@@ -1168,7 +1241,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      try {
        if (!priorIntent) {
-@@ -646,6 +1130,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -646,6 +1186,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        if (normalizedRequest.service !== "sts") {
          await this.ensureAccount(policy);
        }
@@ -1186,7 +1259,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      } catch (error) {
        await this.ctx.storage.put(evidenceKey, {
          ...evidence,
-@@ -670,6 +1165,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -670,6 +1221,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        });
      }
 
@@ -1204,7 +1277,15 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      if (authorized.mutating) {
        await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
      }
-@@ -725,6 +1231,220 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -682,6 +1244,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       normalizedRequest.action,
+       policy.region,
+       authorized.parameters,
++      run.identity.keyAuthorizationOnly ? AbortSignal.timeout(30_000) : undefined,
+     );
+     const result = await boundedResponse(response);
+     await this.finishSignerDispatch(run, evidenceKey, evidence, result);
+@@ -725,6 +1288,220 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      return result;
    }
 
@@ -1425,7 +1506,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    private async recordImportedKey(
      run: AWSQualificationRunState,
      request: AWSQualificationRequest,
-@@ -911,6 +1631,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -911,6 +1688,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    }
 
    private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
@@ -1483,7 +1564,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
      const result = await boundedResponse(response);
      if (result.status < 200 || result.status >= 300) {
-@@ -922,6 +1693,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -922,6 +1750,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      if (asString(identity["Account"]) !== policy.accountId) {
        throw new Error("AWS qualification authority is authenticated to the wrong account");
      }
@@ -1500,7 +1581,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    }
 
    private async verifyRetainedImage(
-@@ -1084,7 +1865,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1084,7 +1922,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      run: AWSQualificationRunState,
      intentKey: string,
    ): Promise<void> {
@@ -1509,8 +1590,17 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
        this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
      }
-@@ -1099,8 +1880,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1097,10 +1935,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   private assertCandidateDispatchWindow(run: AWSQualificationRunState, action: string): void {
+     const now = Date.now();
      const expiresAt = Date.parse(run.identity.expiresAt);
++    if (
++      run.identity.keyAuthorizationOnly &&
++      run.keyAuthorizationStartedAt !== undefined &&
++      action !== "DeleteKeyPair" &&
++      now >= run.keyAuthorizationStartedAt + 10 * 60_000
++    )
++      throw new Error("key authorization ten-minute work bound expired");
      if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
      if (
 -      run.identity.retainedImage &&
@@ -1521,7 +1611,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        !retainedCleanupReads.has(action) &&
        !["TerminateInstances", "DeleteKeyPair"].includes(action)
      ) {
-@@ -1112,6 +1894,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1112,6 +1958,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
      action: string,
    ): Promise<AWSQualificationRunState> {
@@ -1529,7 +1619,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
      if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
        throw new Error("AWS qualification service binding is not enrolled for this run");
-@@ -1136,6 +1919,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1136,6 +1983,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
        throw new Error("AWS qualification authority deployment changed after enrollment");
      }
@@ -1544,7 +1634,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      return run;
    }
 
-@@ -1150,6 +1941,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1150,6 +2005,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      const failures: string[] = [];
      await this.beginFinalReceipt(ledger);
      try {
@@ -1552,7 +1642,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        await this.ensureAccount(policy);
        await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
      } catch (error) {
-@@ -1168,6 +1960,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1168,6 +2024,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "pre-cleanup",
      );
      await this.ctx.storage.put(ledgerKey, recoveredLedger);
@@ -1591,7 +1681,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      for (const imageId of ownedWithRetired(
        recoveredLedger.imageIds,
        recoveredLedger.retiredImageIds,
-@@ -1242,7 +2066,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1242,7 +2130,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      controller?: AWSQualificationControllerProps,
    ): Promise<AWSQualificationRunState | undefined> {
      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
@@ -1605,7 +1695,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      if (controller) validateController(controller, run.identity.deploymentHash);
      if (!run.finalizingAt && !run.finalizedAt) {
        run.finalizingAt = new Date().toISOString();
-@@ -1443,6 +2272,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1443,6 +2336,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    private async recordVerificationEvidence(
      action: string,
      outcome: "accepted" | "absent" | "present" | "rejected" | "error",
@@ -1613,7 +1703,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    ): Promise<void> {
      const receipt = await this.requireFinalReceipt();
      const sequence = receipt.verificationTotal + 1;
-@@ -1453,6 +2283,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1453,6 +2347,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          action,
          at: new Date().toISOString(),
          outcome,
@@ -1621,7 +1711,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        },
        maxVerificationEvidence,
      );
-@@ -1491,12 +2322,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1491,12 +2386,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        const result = await boundedResponse(response);
        if (
          result.status >= 300 &&
@@ -1646,7 +1736,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        } else {
          await this.finishCleanupEvidence(
            evidenceSequence,
-@@ -1512,6 +2351,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1512,6 +2415,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
    }
 
@@ -1701,7 +1791,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    private async inventoryRunResources(
      run: AWSQualificationRunState,
      ledger: AWSQualificationLedger,
-@@ -1547,6 +2434,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1547,6 +2498,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        for (const result of [instances, images, snapshots, volumes, keys]) {
          if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
        }
@@ -1720,7 +1810,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
          .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
          .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
-@@ -1581,6 +2480,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1581,6 +2544,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          ledger.instanceIds.length > maxActiveInstances ||
          ledger.imageIds.length > maxActiveImages ||
          ledger.snapshotIds.length > maxActiveSnapshots ||
@@ -1728,7 +1818,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
          ledger.keyPairIds.length > 1
        ) {
          failures.push("run-tag inventory exceeds qualification resource bounds");
-@@ -1662,7 +2562,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1662,7 +2626,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
        for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
          const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1737,7 +1827,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        }
      }
      await this.ctx.storage.put(ledgerKey, ledger);
-@@ -1780,6 +2680,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1780,6 +2744,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      );
    }
 
@@ -1780,7 +1870,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    private async retireUnresolvedIntents(): Promise<void> {
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
-@@ -1808,14 +2744,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1808,14 +2808,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "reservationSet",
        failures,
      );
@@ -1796,7 +1886,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      await this.verifyAbsent(
        policy,
        "DescribeSnapshots",
-@@ -1832,7 +2761,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1832,7 +2825,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "volumeSet",
        failures,
      );
@@ -1805,7 +1895,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      try {
        const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
          "GroupId.1": policy.securityGroupId,
-@@ -1862,51 +2791,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1862,51 +2855,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
    }
 
@@ -1889,7 +1979,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      }
    }
 
-@@ -1986,6 +2910,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1986,6 +2974,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
      action: string,
      region: string,
      parameters: Record<string, unknown>,
@@ -1897,7 +1987,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    ): Promise<Response> {
      const credentials = authorityCredentials(this.env);
      const client = new AwsClient({ ...credentials, service, region, retries: 0 });
-@@ -1999,6 +2924,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1999,6 +2988,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
        }
        return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
          method: "POST",
@@ -1905,7 +1995,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
          headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
          body: body.toString(),
        });
-@@ -2236,9 +3162,11 @@ function authorizedRunInstances(
+@@ -2236,9 +3226,11 @@ function authorizedRunInstances(
    }
    const imageId = input["ImageId"] ?? "";
    if (
@@ -1920,7 +2010,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    ) {
      throw new Error("AWS qualification image is outside the run ledger");
    }
-@@ -2262,7 +3190,7 @@ function authorizedRunInstances(
+@@ -2262,7 +3254,7 @@ function authorizedRunInstances(
    );
    const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
    if (
@@ -1929,7 +2019,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        ? rootGB !== awsQualificationRetainedRootGB
        : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
    ) {
-@@ -2283,11 +3211,14 @@ function authorizedRunInstances(
+@@ -2283,11 +3275,14 @@ function authorizedRunInstances(
      MaxCount: "1",
      MinCount: "1",
      UserData: userData,
@@ -1945,7 +2035,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      "MetadataOptions.HttpEndpoint": "enabled",
      "MetadataOptions.HttpPutResponseHopLimit": "1",
      "MetadataOptions.HttpTokens": "required",
-@@ -2445,7 +3376,7 @@ function updateLedgerFromResponse(
+@@ -2445,7 +3440,7 @@ function updateLedgerFromResponse(
          }
          for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
            const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1954,7 +2044,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
          }
        }
      }
-@@ -2526,6 +3457,59 @@ function updateLedgerFromResponse(
+@@ -2526,6 +3521,60 @@ function updateLedgerFromResponse(
    }
  }
 
@@ -1974,6 +2064,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +          "deploymentHash",
 +          "expiresAt",
 +          "firstWalk",
++          "keyAuthorizationOnly",
 +          "retainedImage",
 +        ].includes(key),
 +    )
@@ -2014,16 +2105,23 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
  function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
      throw new Error("AWS qualification run id is malformed");
-@@ -2545,6 +3529,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2545,6 +3594,15 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!Number.isFinite(Date.parse(identity.expiresAt))) {
      throw new Error("AWS qualification expiry is malformed");
    }
 +  if (identity.firstWalk !== undefined && identity.firstWalk !== true)
 +    throw new Error("first-walk mode is malformed");
++  if (
++    identity.keyAuthorizationOnly !== undefined &&
++    (identity.keyAuthorizationOnly !== true ||
++      identity.firstWalk !== true ||
++      identity.retainedImage !== undefined)
++  )
++    throw new Error("key-only purpose is malformed");
    if (identity.retainedImage !== undefined) {
      const retained = identity.retainedImage;
      if (
-@@ -2563,11 +3549,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2563,11 +3621,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
  function validateRunWindow(identity: AWSQualificationRunIdentity): void {
    const expiresAt = Date.parse(identity.expiresAt);
    const now = Date.now();
@@ -2044,7 +2142,24 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
      throw new Error("AWS qualification retained work window expired");
    }
  }
-@@ -2671,11 +3664,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
+@@ -2633,9 +3698,15 @@ function registryIdentity(
+   value: AWSQualificationRunIdentity | AWSQualificationRegistryRecord,
+ ): Pick<
+   AWSQualificationRegistryRecord,
+-  "runId" | "candidateSha" | "candidateWorker" | "deploymentHash" | "expiresAt"
++  | "runId"
++  | "candidateSha"
++  | "candidateWorker"
++  | "deploymentHash"
++  | "expiresAt"
++  | "keyAuthorizationOnly"
+ > {
+   return {
++    ...(value.keyAuthorizationOnly ? { keyAuthorizationOnly: true as const } : {}),
+     runId: value.runId,
+     candidateSha: value.candidateSha,
+     candidateWorker: value.candidateWorker,
+@@ -2671,11 +3742,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
  function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
    const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
    const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
@@ -2063,7 +2178,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
    if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
      throw new Error("AWS qualification base AMI is malformed");
    if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
-@@ -2687,7 +3687,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
+@@ -2687,7 +3765,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
    if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
      throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
    }
@@ -2084,7 +2199,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
  }
 
  function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
-@@ -3053,7 +4065,7 @@ function assertLifecycleCapacity(
+@@ -3053,7 +4143,7 @@ function assertLifecycleCapacity(
      if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
        throw new Error("AWS qualification allows one active instance");
      }
@@ -2093,7 +2208,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
        throw new Error("AWS qualification launch budget is exhausted");
      }
    }
-@@ -3252,3 +4264,151 @@ function isRetryableReconciliationError(error: unknown): boolean {
+@@ -3252,3 +4342,152 @@ function isRetryableReconciliationError(error: unknown): boolean {
  function sleep(ms: number): Promise<void> {
    return new Promise((resolve) => setTimeout(resolve, ms));
  }
@@ -2153,6 +2268,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +  if (raw.length > 4096) throw new Error("invalid recovery binding");
 +  const expected = JSON.parse(raw) as Record<string, unknown>;
 +  const actual = {
++    ...(run.identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
 +    runId: run.identity.runId,
 +    candidateSha: run.identity.candidateSha,
 +    candidateWorker: run.identity.candidateWorker,
@@ -2246,7 +2362,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..c83696a5aff3f100a0309340c0958863
 +  return result;
 +}
 diff --git a/worker/src/aws-qualification-contract.ts b/worker/src/aws-qualification-contract.ts
-index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e120d0f51 100644
+index 08236b760efe065be427f4705a15e144327e50cc..8bd957e4c4b92c32eaa523e1c717cb467f65a825 100644
 --- a/worker/src/aws-qualification-contract.ts
 +++ b/worker/src/aws-qualification-contract.ts
 @@ -1,4 +1,6 @@
@@ -2256,12 +2372,13 @@ index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e
  export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
  export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
  export const awsQualificationRetainedRootGB = 400;
-@@ -24,12 +26,40 @@ export interface AWSQualificationRunIdentity {
+@@ -24,12 +26,41 @@ export interface AWSQualificationRunIdentity {
    deploymentHash: string;
    expiresAt: string;
    retainedImage?: AWSQualificationRetainedImage;
 +  // Opt-in one-copy first-walk qualification. Normal image qualification is unchanged.
 +  firstWalk?: true;
++  keyAuthorizationOnly?: true;
  }
 
  export interface AWSQualificationControllerProps {
@@ -2297,7 +2414,7 @@ index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e
  export interface AWSQualificationRequest {
    opId: string;
    region: string;
-@@ -43,8 +73,31 @@ export interface AWSQualificationResponse {
+@@ -43,8 +74,31 @@ export interface AWSQualificationResponse {
    body: string;
  }
 
@@ -2329,7 +2446,15 @@ index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e
  }
 
  export type AWSQualificationCleanupState = "claimed" | "finalizing" | "finalized";
-@@ -69,6 +122,28 @@ export interface AWSQualificationResourceCounts {
+@@ -56,6 +110,7 @@ export interface AWSQualificationRegistryRecord {
+   candidateWorker: string;
+   deploymentHash: string;
+   expiresAt: string;
++  keyAuthorizationOnly?: true;
+   cleanupState: AWSQualificationCleanupState;
+   claimedAt: string;
+   finalizedAt?: string;
+@@ -69,6 +124,28 @@ export interface AWSQualificationResourceCounts {
    volumes: number;
  }
 
@@ -2358,7 +2483,7 @@ index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e
  export interface AWSQualificationOperationEvidence {
    version: 1;
    opDigest: string;
-@@ -123,6 +198,7 @@ export interface AWSQualificationFinalReceipt {
+@@ -123,6 +200,7 @@ export interface AWSQualificationFinalReceipt {
    verification: Array<{
      sequence: number;
      action: string;
@@ -2366,15 +2491,16 @@ index 08236b760efe065be427f4705a15e144327e50cc..742ff355096bcdf6aa113a064bb5365e
      at: string;
      outcome: "accepted" | "absent" | "present" | "rejected" | "error";
    }>;
-@@ -133,6 +209,7 @@ export interface AWSQualificationFinalReceipt {
+@@ -133,6 +211,8 @@ export interface AWSQualificationFinalReceipt {
 
  export interface AWSQualificationAttestation {
    version: 1;
 +  firstWalk?: AWSQualificationFirstWalkStatus;
++  keyAuthorizationOnly?: true;
    runId: string;
    candidateSha: string;
    candidateWorker: string;
-@@ -146,5 +223,6 @@ export interface AWSQualificationAttestation {
+@@ -146,5 +226,6 @@ export interface AWSQualificationAttestation {
    finalized: boolean;
    finalizedAt?: string;
    operations: AWSQualificationOperationEvidence[];
@@ -3013,7 +3139,7 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5b7d3265d684c4cc97b73b9f3f5fed42e37d86c0 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4137de188 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3867,7 +3993,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5b7d3265d684c4cc97b73b9f3f5fed42
    </item>`;
  }
 
-@@ -2914,3 +3623,1164 @@ function awsServerError(): Response {
+@@ -2914,3 +3623,1334 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -5028,6 +5154,176 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..5b7d3265d684c4cc97b73b9f3f5fed42
 +    );
 +    await expect(f.launch()).rejects.toThrow("preflight budget exhausted");
 +    expect(f.signer.authorizationCalls).toEqual([]);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++});
++
++describe("protected key-only qualification", () => {
++  async function keyFixture(options: Parameters<typeof authorityFixture>[0] = {}) {
++    useImmediateTimeouts();
++    const f = authorityFixture(options);
++    const runIdentity = {
++      ...identity,
++      firstWalk: true as const,
++      keyAuthorizationOnly: true as const,
++    };
++    const assertActive = vi.fn(async (value: AWSQualificationRunIdentity) => {
++      expect(value).toEqual(runIdentity);
++    });
++    Object.assign(f.env, {
++      AWS_QUALIFICATION_REGISTRY: { idFromName: (v: string) => v, get: () => ({ assertActive }) },
++    });
++    await f.run.enroll(controller, runIdentity);
++    return { ...f, runIdentity, assertActive };
++  }
++  it("imports one fixed key, performs thirteen existing probes, remains replay safe and settles", async () => {
++    const f = await keyFixture();
++    await expect(f.run.keyAuthorization(controller)).resolves.toEqual({ passed: true, checks: 13 });
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++    expect(f.signer.authorizationCalls).toHaveLength(13);
++    expect(f.signer.authorizationCalls.every((c) => c.parameters["DryRun"] === "true")).toBe(true);
++    expect(
++      f.signer.calls.some((c) =>
++        [
++          "RunInstances",
++          "CreateTags",
++          "DeleteTags",
++          "CreateImage",
++          "CreateVolume",
++          "AttachVolume",
++          "ModifyInstanceAttribute",
++        ].includes(c.action),
++      ),
++    ).toBe(false);
++    await f.run.keyAuthorization(controller);
++    expect(f.signer.authorizationCalls).toHaveLength(13);
++    await f.run.finalize(controller);
++    const a = await f.run.attest(controller);
++    expect(a).toMatchObject({
++      keyAuthorizationOnly: true,
++      finalized: true,
++      finalReceipt: {
++        finalCounts: { instances: 0, keyPairs: 0, images: 0, snapshots: 0, volumes: 0 },
++      },
++    });
++    expect(f.signer.calls.filter((c) => c.action === "DeleteKeyPair")).toHaveLength(1);
++  });
++  for (const action of [
++    "ImportKeyPair",
++    "CreateTags",
++    "DeleteTags",
++    "RunInstances",
++    "CreateImage",
++    "CreateVolume",
++    "AttachVolume",
++    "ModifyInstanceAttribute",
++    "GetCallerIdentity",
++  ])
++    it(`rejects candidate ${action} before any signer call`, async () => {
++      const f = await keyFixture();
++      const before = f.signer.calls.length;
++      await expect(
++        f.run.execute(
++          f.runIdentity,
++          request(action, {}, action === "GetCallerIdentity" ? "sts" : "ec2"),
++        ),
++      ).rejects.toThrow("fixed protected controller");
++      expect(f.signer.calls).toHaveLength(before);
++    });
++  it("rejects forged purpose, controller identity, and first-walk attachment", async () => {
++    const f = await keyFixture();
++    await expect(f.run.keyAuthorization({ deploymentHash: "e".repeat(64) })).rejects.toThrow();
++    await expect(
++      f.run.execute(
++        { ...f.runIdentity, keyAuthorizationOnly: undefined },
++        request("GetCallerIdentity"),
++      ),
++    ).rejects.toThrow("not enrolled");
++    await expect(f.run.prepareFirstWalk(f.runIdentity, {} as never)).rejects.toThrow("not enabled");
++    await expect(
++      f.run.enroll(controller, { ...identity, keyAuthorizationOnly: true }),
++    ).rejects.toThrow("purpose");
++  });
++  for (const fault of ["failOnce", "loseAfterEffect", "http500AfterEffect"] as const)
++    it(`settles an uncertain ${fault} import after process loss without another import`, async () => {
++      const f = await keyFixture({ [fault]: "ImportKeyPair" });
++      await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++      const reopened = new AWSQualificationRun(
++        { storage: f.storage } as never,
++        f.env as never,
++        f.signer,
++      );
++      await expect(reopened.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++      await reopened.finalize(controller);
++      expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++      expect((await reopened.attest(controller)).finalized).toBe(true);
++    });
++  it("stops at the first denied positive gate, retains evidence and recovers after cancellation", async () => {
++    const f = await keyFixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) =>
++      parameters["DryRun"] === "true"
++        ? awsError("UnauthorizedOperation")
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++    await f.run.beginFinalization(controller);
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).authorizationChecks).toHaveLength(1);
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++  });
++  it("persists uncertain probes and never retries them after executor replacement", async () => {
++    const f = await keyFixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (parameters["DryRun"] === "true") throw new Error("lost diagnostic reply");
++        return execute(service, action, region, parameters);
++      },
++    );
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(reopened.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).authorizationChecks).toHaveLength(1);
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++  });
++  it("refuses cancellation before import and retains independent cleanup", async () => {
++    const f = await keyFixture();
++    await f.run.beginFinalization(controller);
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("finalizing");
++    expect(f.signer.calls.some((c) => c.action === "ImportKeyPair")).toBe(false);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++  it("reconciles uncertain deletion after a cleanup process failure", async () => {
++    const f = await keyFixture({ loseAfterEffect: "DeleteKeyPair" });
++    await f.run.keyAuthorization(controller);
++    try {
++      await f.run.finalize(controller);
++    } catch {
++      /* Existing recovery owns the uncertain delete. */
++    }
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("enforces the ten-minute diagnostic bound without losing cleanup", async () => {
++    const f = await keyFixture();
++    const state = await f.storage.get<Record<string, unknown>>("run");
++    expect(state).toBeDefined();
++    await f.storage.put("run", { ...state, keyAuthorizationStartedAt: Date.now() - 10 * 60_000 });
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("ten-minute");
 +    await f.run.finalize(controller);
 +    expect((await f.run.attest(controller)).finalized).toBe(true);
 +  });

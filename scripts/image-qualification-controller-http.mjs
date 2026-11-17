@@ -2,6 +2,7 @@
 // replay: the original journal and canonical owner still decide settlement.
 const actions = new Set([
   "claim",
+  "key-authorization",
   "attest",
   "discover",
   "finalize",
@@ -43,14 +44,14 @@ export async function requestControllerJSON({
   value = {},
   signal,
   deadline,
-  timeoutMs = action === "finalize" ? 300_000 : 30_000,
+  timeoutMs = ["finalize", "key-authorization"].includes(action) ? 300_000 : 30_000,
   invoke = fetch,
 }) {
   if (
     !actions.has(action) ||
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
-    timeoutMs > (action === "finalize" ? 300_000 : 30_000) ||
+    timeoutMs > (["finalize", "key-authorization"].includes(action) ? 300_000 : 30_000) ||
     (deadline !== undefined && !Number.isFinite(deadline))
   )
     throw new Error("invalid qualification controller request bounds or action");

@@ -123,6 +123,10 @@ export default {
           return json(
             await bounded(env.AUTHORITY.settleTransportProbe(input.challenge, input.verified)),
           );
+        case "/key-authorization":
+          if (Object.keys(input).join(",") !== "runId" || typeof input.runId !== "string")
+            throw new Error("invalid key authorization input");
+          return json(await env.AUTHORITY.keyAuthorization(input.runId));
         case "/claim":
           return json(await env.AUTHORITY.claim(input.identity));
         case "/begin-finalization":

@@ -1,3 +1,4 @@
+import { verifyQualificationEvidence } from "./image-qualification-control.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -129,6 +130,11 @@ function installAPI(file) {
           state.probe.observedAt = new Date(state.now).toISOString();
         }
         return json({ identity: state.probe.identity, challenge: state.probe.challenge });
+      }
+      if (route === "/key-authorization") {
+        assert.equal(state.identity.keyAuthorizationOnly, true);
+        state.keyAuthorization = true;
+        return json({ passed: true, checks: 13 });
       }
       if (route === "/claim") {
         if (state.probe) assert.equal(state.probe.state, "verified");
@@ -488,7 +494,9 @@ function fixture(t, mode = "retained") {
     };
   });
   const capsuleSha256 = digest(canonical(sourceFiles));
-  const qualification = mode === "first-walk" ? qualificationIdentity(root) : undefined;
+  const qualification = ["first-walk", "key-authorization"].includes(mode)
+    ? qualificationIdentity(root)
+    : undefined;
   write("build-inputs.json", {
     version: qualification ? 2 : 1,
     ...(qualification ? { qualification } : {}),
@@ -508,7 +516,7 @@ function fixture(t, mode = "retained") {
       bakedInputsIdentical: true,
     });
   }
-  if (mode === "first-walk") {
+  if (["first-walk", "key-authorization"].includes(mode)) {
     write(
       "authority/aws-qualification-authority.js",
       "throw new Error('inert authority fixture');",
@@ -554,7 +562,7 @@ function fixture(t, mode = "retained") {
     GITHUB_RUN_ID: "42",
     GITHUB_RUN_ATTEMPT: "1",
     GITHUB_WORKFLOW_REF: "example/repo/.github/workflows/image-qualification.yml@refs/heads/main",
-    QUALIFICATION_PULL_REQUEST: mode === "first-walk" ? "" : "7",
+    QUALIFICATION_PULL_REQUEST: ["first-walk", "key-authorization"].includes(mode) ? "" : "7",
     QUALIFICATION_CANDIDATE_SHA: candidateSha,
     QUALIFICATION_WORKFLOW_SHA: workflowSha,
     QUALIFICATION_DEFAULT_BRANCH: "main",
@@ -590,7 +598,10 @@ function fixture(t, mode = "retained") {
   // Protected environment variables persist across modes. Mint and retained
   // admission/deploy/arm must ignore this first-walk-only descriptor.
   env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify({
-    profile: "first-walk-aws-session/v1",
+    profile:
+      mode === "key-authorization"
+        ? "key-tag-authorization-aws-session/v1"
+        : "first-walk-aws-session/v1",
     repository: env.GITHUB_REPOSITORY,
     workflowSha,
     candidateSha,
@@ -967,7 +978,7 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.deepEqual(f.state().workers, {});
     });
 
-  for (const mode of ["retained", "mint", "first-walk"]) {
+  for (const mode of ["retained", "mint", "first-walk", "key-authorization"]) {
     test(`${mode} CLI publishes one immutable handoff before deployment and preserves it through arm`, (t) => {
       const f = fixture(t, mode);
       const admitted = f.invoke("admit");
@@ -984,9 +995,13 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
       assert.equal(
         Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt),
-        (mode === "first-walk" ? 150 : mode === "retained" ? 38 : 120) * 60_000,
+        (["first-walk", "key-authorization"].includes(mode)
+          ? 150
+          : mode === "retained"
+            ? 38
+            : 120) * 60_000,
       );
-      if (mode === "first-walk")
+      if (["first-walk", "key-authorization"].includes(mode))
         assert.equal(
           Date.parse(handoff.expiresAt) - Date.parse(handoff.workExpiresAt),
           20 * 60_000,
@@ -1036,6 +1051,15 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       const armed = f.invoke("arm", f.armEnv());
       assert.equal(armed.status, 0, armed.stderr);
       assert.deepEqual(f.prepared(), handoff);
+      if (mode === "key-authorization") {
+        assert.equal(f.state().keyAuthorization, true);
+        assert.equal(f.state().identity.keyAuthorizationOnly, true);
+        assert.equal(f.prepared().mode, "key-authorization");
+        assert.equal(
+          fs.existsSync(path.join(f.directory, "arm-proof/key-authorization.json")),
+          true,
+        );
+      }
     });
   }
 
@@ -1397,3 +1421,41 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     });
   }
 }
+
+test("key-only result requires all fixed probes and explicit complete settlement", () => {
+  const probes = [
+    "tags-restated",
+    ...Array.from({ length: 4 }, (_, i) => [
+      `tag-missing-${i}`,
+      `tag-changed-${i}`,
+      `tag-removed-${i}`,
+    ]).flat(),
+  ];
+  const a = {
+    keyAuthorizationOnly: true,
+    finalized: true,
+    operations: [{ action: "ImportKeyPair" }],
+    finalReceipt: {
+      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+    },
+    authorizationChecks: probes.map((probe, i) => ({
+      probe,
+      outcome: "passed",
+      action: i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags",
+      code: i === 0 ? "DryRunOperation" : "UnauthorizedOperation",
+    })),
+  };
+  assert.doesNotThrow(() => verifyQualificationEvidence(a, {}, undefined, true, true));
+  for (const change of [
+    (x) => delete x.finalReceipt.finalCounts,
+    (x) => x.finalReceipt.finalCounts.volumes++,
+    (x) => x.authorizationChecks.pop(),
+    (x) => (x.authorizationChecks[1].code = "DryRunOperation"),
+    (x) => (x.authorizationChecks[1].probe = "selected-probe"),
+    (x) => (x.keyAuthorizationOnly = false),
+  ]) {
+    const b = structuredClone(a);
+    change(b);
+    assert.throws(() => verifyQualificationEvidence(b, {}, undefined, true, true));
+  }
+});

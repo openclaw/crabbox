@@ -32,6 +32,10 @@ const refuse = () => {
   throw new Error("qualification AWS run scope is invalid");
 };
 
+export const privateQualificationMode = (mode) =>
+  ["first-walk", "key-authorization"].includes(mode);
+export const keyAuthorizationProfile = "key-tag-authorization-aws-session/v1";
+
 // Private protected input, never candidate-provided or an operational repo record.
 export function validateRunSession(scope) {
   const fields = [
@@ -51,7 +55,7 @@ export function validateRunSession(scope) {
   if (
     !scope ||
     !equal(Object.keys(scope).toSorted(), fields.toSorted()) ||
-    scope.profile !== "first-walk-aws-session/v1" ||
+    !["first-walk-aws-session/v1", keyAuthorizationProfile].includes(scope.profile) ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository ?? "") ||
     ![scope.workflowSha, scope.candidateSha].every((v) => /^[0-9a-f]{40}$/.test(v ?? "")) ||
     !/^image-qualification-[1-9][0-9]*-1$/.test(scope.runId ?? "") ||
@@ -116,6 +120,27 @@ export function runSessionPolicy(scope) {
       },
     ],
   };
+  if (scope.profile === keyAuthorizationProfile) {
+    policy.Statement[0].Action = [
+      "ec2:Describe*",
+      "ec2:GetEbsEncryptionByDefault",
+      "ec2:GetEbsDefaultKmsKeyId",
+      "servicequotas:GetServiceQuota",
+      "sts:GetCallerIdentity",
+    ];
+    policy.Statement.push({
+      Effect: "Allow",
+      Action: ["ec2:ImportKeyPair", "ec2:CreateTags", "ec2:DeleteKeyPair"],
+      Resource: "arn:aws:ec2:*:*:key-pair/*",
+    });
+    policy.Statement.push({
+      Effect: "Deny",
+      Action: [...forwardActions, ...cleanupActions].filter(
+        (a) => !["ec2:ImportKeyPair", "ec2:CreateTags", "ec2:DeleteKeyPair"].includes(a),
+      ),
+      Resource: "*",
+    });
+  }
   if (JSON.stringify(policy).length > 2048) refuse();
   return policy;
 }
@@ -131,9 +156,11 @@ export function cleanupSessionPolicy(scope) {
 
 export function handoffSession(env, identity, manifestSha256) {
   // Shared protected variables persist when operators select another mode.
-  if (env.QUALIFICATION_MODE !== "first-walk") return undefined;
+  if (!privateQualificationMode(env.QUALIFICATION_MODE)) return undefined;
   const scope = validateRunSession(JSON.parse(env.QUALIFICATION_AWS_SESSION_JSON ?? "null"));
   if (
+    (scope.profile === keyAuthorizationProfile) !==
+      (env.QUALIFICATION_MODE === "key-authorization") ||
     scope.repository !== identity.repository ||
     scope.workflowSha !== identity.workflowSha ||
     scope.candidateSha !== identity.candidateSha ||
