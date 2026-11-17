@@ -28,6 +28,7 @@ import { handoffSession, privateQualificationMode } from "./image-qualification-
 import {
   ControllerHTTPError,
   requestControllerJSON,
+  observeControllerDiscovery,
 } from "./image-qualification-controller-http.mjs";
 import {
   packageFile,
@@ -962,6 +963,14 @@ export class Cloudflare {
   ) {
     const response = await fetch(`${this.base}${pathname}`, {
       ...init,
+      ...(this.discoverySignal
+        ? {
+            signal: init.signal
+              ? AbortSignal.any([init.signal, this.discoverySignal])
+              : this.discoverySignal,
+            redirect: "error",
+          }
+        : {}),
       headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
     });
     const ray = response.headers.get("cf-ray");
@@ -1075,8 +1084,11 @@ export class Cloudflare {
     const version = await this.latestVersion(controllerName);
     await verifyOwned(this, controllerName);
     if (this.beforeRecoveryCall) await this.beforeRecoveryCall("controller-content");
+    const contentSignals = [this.discoverySignal, this.recoverySignal?.()].filter(Boolean);
     const response = await fetch(`${this.base}/workers/scripts/${controllerName}/content/v2`, {
-      ...(this.recoverySignal ? { signal: this.recoverySignal(), redirect: "error" } : {}),
+      ...(contentSignals.length
+        ? { signal: AbortSignal.any(contentSignals), redirect: "error" }
+        : {}),
       headers: { authorization: `Bearer ${this.token}` },
     });
     if (!response.ok) throw new Error("controller source unavailable");
@@ -1643,41 +1655,71 @@ async function verifyExecutionDeployment(cf, expected) {
   };
 }
 
-async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
-  await verifyAuthority(authorityCF);
-  await cf.verifyController();
-  if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
-  const deadlines = [
-    cf.controllerDeadline,
-    action === "transport-open" ? Date.parse(value.expiresAt) : undefined,
-    action === "claim" ? Date.parse(value.identity?.expiresAt) : undefined,
-  ].filter((value) => value !== undefined);
-  try {
-    return await requestControllerJSON({
-      url,
-      token,
-      action,
-      value,
-      signal: cf.recoverySignal?.(action),
-      ...(deadlines.length ? { deadline: Math.min(...deadlines) } : {}),
-    });
-  } catch (error) {
-    if (error instanceof ControllerHTTPError && process.env.QUALIFICATION_PROOF_DIR) {
+export async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
+  const signal = action === "discover" ? cf.recoverySignal?.(action) : undefined;
+  const request = async (observation = {}) => {
+    const previousSignals = [cf.discoverySignal, authorityCF.discoverySignal];
+    if (observation.signal) {
+      cf.discoverySignal = observation.signal;
+      authorityCF.discoverySignal = observation.signal;
+    }
+    try {
+      observation.signal?.throwIfAborted();
+      await verifyAuthority(authorityCF);
+      await cf.verifyController();
+      if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
+      observation.signal?.throwIfAborted();
+      const deadlines = [
+        cf.controllerDeadline,
+        observation.deadline,
+        action === "transport-open" ? Date.parse(value.expiresAt) : undefined,
+        action === "claim" ? Date.parse(value.identity?.expiresAt) : undefined,
+      ].filter((value) => value !== undefined);
       try {
-        writeJSON(
-          path.join(
-            path.resolve(process.env.QUALIFICATION_PROOF_DIR),
-            `controller-http-failure-${crypto.randomUUID()}.json`,
-          ),
-          error.receipt,
-        );
-      } catch {
-        // Diagnostics cannot replace the original failure or obstruct recovery.
-        console.error("qualification controller HTTP failure receipt could not be written");
+        return await requestControllerJSON({
+          url,
+          token,
+          action,
+          value,
+          signal: observation.signal ?? cf.recoverySignal?.(action),
+          ...(deadlines.length ? { deadline: Math.min(...deadlines) } : {}),
+        });
+      } catch (error) {
+        if (error instanceof ControllerHTTPError && process.env.QUALIFICATION_PROOF_DIR) {
+          try {
+            writeJSON(
+              path.join(
+                path.resolve(process.env.QUALIFICATION_PROOF_DIR),
+                `controller-http-failure-${crypto.randomUUID()}.json`,
+              ),
+              error.receipt,
+            );
+          } catch {
+            console.error("qualification controller HTTP failure receipt could not be written");
+          }
+        }
+        throw error;
+      }
+    } finally {
+      if (observation.signal) {
+        cf.discoverySignal = previousSignals[0];
+        authorityCF.discoverySignal = previousSignals[1];
       }
     }
-    throw error;
-  }
+  };
+  if (action !== "discover") return await request();
+  if (
+    !value ||
+    Object.getPrototypeOf(value) !== Object.prototype ||
+    Reflect.ownKeys(value).length !== 0
+  )
+    throw new Error("discovery requires an empty input");
+  const result = await observeControllerDiscovery(request, {
+    deadline: cf.controllerDeadline,
+    signal,
+  });
+  discoveredRun(result);
+  return result;
 }
 
 async function cloudflareFromEnv() {

@@ -1,3 +1,5 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 // Trusted qualification controller transport only. A failed reply never permits
 // replay: the original journal and canonical owner still decide settlement.
 const actions = new Set([
@@ -163,5 +165,53 @@ export async function requestControllerJSON({
     cancelBody();
     await cancellation;
     reader?.releaseLock();
+  }
+}
+
+// Only canonical discovery is read-only. Never wrap a mutating controller action
+// in this observation loop, even when its HTTP result is unconfirmed.
+export async function observeControllerDiscovery(
+  observe,
+  { deadline = Infinity, signal, pause = delay } = {},
+) {
+  if (typeof observe !== "function" || !(Number.isFinite(deadline) || deadline === Infinity))
+    throw new Error("invalid discovery observation bounds");
+  const stopsAt = Math.min(Date.now() + 60_000, deadline);
+  const stop = new AbortController();
+  const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+  const check = () => {
+    if (combined.aborted || Date.now() >= stopsAt)
+      throw new Error("controller discovery cancelled or readiness deadline exhausted");
+  };
+  const timer = setTimeout(() => stop.abort(), Math.max(1, stopsAt - Date.now()));
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      check();
+      try {
+        const result = await observe({ deadline: stopsAt, signal: combined });
+        check();
+        return result;
+      } catch (error) {
+        const r = error instanceof ControllerHTTPError ? error.receipt : undefined;
+        // HTML404 can precede workers.dev activation. It is never evidence of
+        // an idle registry. Preserve the original error for all other outcomes.
+        if (
+          r?.action !== "discover" ||
+          r.reason !== "http-error" ||
+          r.status !== 404 ||
+          r.contentType !== "html" ||
+          r.bodyFormat !== "html" ||
+          r.dispatched !== true ||
+          r.outcome !== "unconfirmed" ||
+          attempt === 11
+        )
+          throw error;
+        check();
+        await pause(Math.min(5_000, stopsAt - Date.now()), undefined, { signal: combined });
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    stop.abort();
   }
 }
