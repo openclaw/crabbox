@@ -1,4 +1,3 @@
-import { verifyQualificationEvidence } from "./image-qualification-control.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -17,8 +16,10 @@ const encodeExecutorCredential = (value) =>
 // its entrypoint deliberately runs when argv names the control script.
 let canonical;
 let digest;
+let verifyQualificationEvidence;
 if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
-  ({ canonical, digest } = await import("./image-qualification-control.mjs"));
+  ({ canonical, digest, verifyQualificationEvidence } =
+    await import("./image-qualification-control.mjs"));
 }
 
 import {
@@ -1422,40 +1423,41 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   }
 }
 
-test("key-only result requires all fixed probes and explicit complete settlement", () => {
-  const probes = [
-    "tags-restated",
-    ...Array.from({ length: 4 }, (_, i) => [
-      `tag-missing-${i}`,
-      `tag-changed-${i}`,
-      `tag-removed-${i}`,
-    ]).flat(),
-  ];
-  const a = {
-    keyAuthorizationOnly: true,
-    finalized: true,
-    operations: [{ action: "ImportKeyPair" }],
-    finalReceipt: {
-      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
-    },
-    authorizationChecks: probes.map((probe, i) => ({
-      probe,
-      outcome: "passed",
-      action: i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags",
-      code: i === 0 ? "DryRunOperation" : "UnauthorizedOperation",
-    })),
-  };
-  assert.doesNotThrow(() => verifyQualificationEvidence(a, {}, undefined, true, true));
-  for (const change of [
-    (x) => delete x.finalReceipt.finalCounts,
-    (x) => x.finalReceipt.finalCounts.volumes++,
-    (x) => x.authorizationChecks.pop(),
-    (x) => (x.authorizationChecks[1].code = "DryRunOperation"),
-    (x) => (x.authorizationChecks[1].probe = "selected-probe"),
-    (x) => (x.keyAuthorizationOnly = false),
-  ]) {
-    const b = structuredClone(a);
-    change(b);
-    assert.throws(() => verifyQualificationEvidence(b, {}, undefined, true, true));
-  }
-});
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
+  test("key-only result requires all fixed probes and explicit complete settlement", () => {
+    const probes = [
+      "tags-restated",
+      ...Array.from({ length: 4 }, (_, i) => [
+        `tag-missing-${i}`,
+        `tag-changed-${i}`,
+        `tag-removed-${i}`,
+      ]).flat(),
+    ];
+    const a = {
+      keyAuthorizationOnly: true,
+      finalized: true,
+      operations: [{ action: "ImportKeyPair" }],
+      finalReceipt: {
+        finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+      },
+      authorizationChecks: probes.map((probe, i) => ({
+        probe,
+        outcome: "passed",
+        action: i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags",
+        code: i === 0 ? "DryRunOperation" : "UnauthorizedOperation",
+      })),
+    };
+    assert.doesNotThrow(() => verifyQualificationEvidence(a, {}, undefined, true, true));
+    for (const change of [
+      (x) => delete x.finalReceipt.finalCounts,
+      (x) => x.finalReceipt.finalCounts.volumes++,
+      (x) => x.authorizationChecks.pop(),
+      (x) => (x.authorizationChecks[1].code = "DryRunOperation"),
+      (x) => (x.authorizationChecks[1].probe = "selected-probe"),
+      (x) => (x.keyAuthorizationOnly = false),
+    ]) {
+      const b = structuredClone(a);
+      change(b);
+      assert.throws(() => verifyQualificationEvidence(b, {}, undefined, true, true));
+    }
+  });

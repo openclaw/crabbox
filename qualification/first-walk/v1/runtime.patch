@@ -3139,7 +3139,7 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4137de188 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..a43301821db2f47d5f808476f3ee9dc6269f1bc6 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3993,7 +3993,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
    </item>`;
  }
 
-@@ -2914,3 +3623,1334 @@ function awsServerError(): Response {
+@@ -2914,3 +3623,1342 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -5168,9 +5168,11 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
 +      firstWalk: true as const,
 +      keyAuthorizationOnly: true as const,
 +    };
-+    const assertActive = vi.fn(async (value: AWSQualificationRunIdentity) => {
-+      expect(value).toEqual(runIdentity);
-+    });
++    const assertActive = vi.fn<(value: AWSQualificationRunIdentity) => Promise<void>>(
++      async (value) => {
++        expect(value).toEqual(runIdentity);
++      },
++    );
 +    Object.assign(f.env, {
 +      AWS_QUALIFICATION_REGISTRY: { idFromName: (v: string) => v, get: () => ({ assertActive }) },
 +    });
@@ -5233,7 +5235,9 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
 +    });
 +  it("rejects forged purpose, controller identity, and first-walk attachment", async () => {
 +    const f = await keyFixture();
-+    await expect(f.run.keyAuthorization({ deploymentHash: "e".repeat(64) })).rejects.toThrow();
++    await expect(f.run.keyAuthorization({ deploymentHash: "e".repeat(64) })).rejects.toThrow(
++      "not bound",
++    );
 +    await expect(
 +      f.run.execute(
 +        { ...f.runIdentity, keyAuthorizationOnly: undefined },
@@ -5248,7 +5252,9 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
 +  for (const fault of ["failOnce", "loseAfterEffect", "http500AfterEffect"] as const)
 +    it(`settles an uncertain ${fault} import after process loss without another import`, async () => {
 +      const f = await keyFixture({ [fault]: "ImportKeyPair" });
-+      await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++      await expect(f.run.keyAuthorization(controller)).rejects.toThrow(
++        fault === "http500AfterEffect" ? "response is ambiguous" : "lost response",
++      );
 +      const reopened = new AWSQualificationRun(
 +        { storage: f.storage } as never,
 +        f.env as never,
@@ -5269,7 +5275,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
 +    );
 +    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("requires finalization");
 +    await f.run.beginFinalization(controller);
-+    await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("finalizing");
 +    await f.run.finalize(controller);
 +    expect((await f.run.attest(controller)).authorizationChecks).toHaveLength(1);
 +    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
@@ -5283,7 +5289,9 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..804f1f47b9c461e92c8af46ba80cffd4
 +        return execute(service, action, region, parameters);
 +      },
 +    );
-+    await expect(f.run.keyAuthorization(controller)).rejects.toThrow();
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow(
++      "authorization preflight requires finalization",
++    );
 +    const reopened = new AWSQualificationRun(
 +      { storage: f.storage } as never,
 +      f.env as never,
