@@ -152,7 +152,12 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	var c *core.CoordinatorClient
 	var err error
 	if action != "serve" {
-		c, err = core.NewCoordinatorClient(cfg)
+		client := core.NewCoordinatorClient
+		switch action {
+		case "enroll", "enable", "disable", "drain", "resume", "remove":
+			client = core.NewAdminCoordinatorClient
+		}
+		c, err = client(cfg)
 		if err != nil {
 			return err
 		}
