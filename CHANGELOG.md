@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
+
 ## 0.83.2 - 2026-11-15
 
 ### Added

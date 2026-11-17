@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,7 +100,7 @@ func TestHostEnrollmentPersistsSecretBeforePostAndRetriesSameCredential(t *testi
 		t.Fatal(err)
 	}
 	o := hostCredentialOptions{action: "enroll", descriptor: descriptor, output: path, ttl: time.Hour}
-	cfg := core.Config{Coordinator: server.URL, CoordToken: "synthetic-admin"}
+	cfg := core.Config{Coordinator: server.URL, CoordToken: "synthetic-user", CoordAdminToken: "synthetic-admin", CoordTokenCommand: []string{"must-not-run"}}
 	rt := core.Runtime{Stdout: &output, Stderr: &output}
 	if err := runCredentialCommand(t.Context(), cfg, rt, o, nil); err == nil {
 		t.Fatal("expected first enrollment failure")
@@ -127,6 +128,75 @@ func TestHostEnrollmentPersistsSecretBeforePostAndRetriesSameCredential(t *testi
 	after, _ := os.ReadFile(path)
 	if !bytes.Equal(saved, after) {
 		t.Fatal("existing credential changed")
+	}
+}
+
+func TestHostManagementSelectsAdminAuthWithoutChangingList(t *testing.T) {
+	const hostID = "11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name, action, method, path, token string
+		adminToken, denied                bool
+	}{
+		{"list stays on user login", "list", http.MethodGet, "/v1/ssh-hosts", "user-token", true, false},
+		{"legacy enroll", "enroll", http.MethodPost, "/v1/ssh-hosts", "admin-token", true, false},
+		{"enable", "enable", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "admin-token", true, false},
+		{"disable", "disable", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "admin-token", true, false},
+		{"drain", "drain", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "admin-token", true, false},
+		{"resume", "resume", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "admin-token", true, false},
+		{"remove", "remove", http.MethodDelete, "/v1/ssh-hosts/" + hostID, "admin-token", true, false},
+		{"revoke", "revoke", http.MethodPost, "/v1/ssh-hosts/" + hostID + "/credential/revoke", "admin-token", true, false},
+		{"normal admin login fallback", "enable", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "user-token", false, false},
+		{"denied admin token does not fall back", "enable", http.MethodPatch, "/v1/ssh-hosts/" + hostID, "admin-token", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != tt.method || r.URL.Path != tt.path || r.Header.Get("Authorization") != "Bearer "+tt.token {
+					t.Errorf("unexpected host request: %s %s, auth matched=%t", r.Method, r.URL.Path, r.Header.Get("Authorization") == "Bearer "+tt.token)
+				}
+				if tt.denied {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = io.WriteString(w, `{"error":"forbidden"}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"hosts":[]}`)
+			}))
+			defer server.Close()
+			cfg := core.Config{Coordinator: server.URL, CoordToken: "user-token", CoordTokenCommand: []string{"must-not-run"}}
+			if tt.adminToken {
+				cfg.CoordAdminToken = "admin-token"
+			}
+			if !tt.adminToken || tt.action == "list" {
+				cfg.CoordTokenCommand = nil
+			}
+			args := []string{tt.action}
+			switch tt.action {
+			case "enroll":
+				dir := t.TempDir()
+				if err := os.Chmod(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--state-dir", dir, "--name", "builder", "--template", "tools-v1")
+			case "list":
+				// Listing remains available to ordinary users.
+			default:
+				args = append(args, "--id", hostID)
+			}
+			err := (Provider{}).RunAgent(t.Context(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, args)
+			if tt.denied {
+				var httpErr core.CoordinatorHTTPError
+				if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusForbidden {
+					t.Fatalf("err=%v, want coordinator denial", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d, want one request", calls)
+			}
+		})
 	}
 }
 
@@ -162,7 +232,7 @@ func TestHostInstallUsesOnlyBoundCredentialAndVerifiesServerIdentity(t *testing.
 	var output bytes.Buffer
 	rt := core.Runtime{Stdout: &output, Stderr: &output}
 	o := hostCredentialOptions{action: "install", dir: dir, stdin: true}
-	cfg := core.Config{Coordinator: "https://wrong.example.com", CoordToken: "synthetic-admin", CoordTokenCommand: []string{"must-not-run"}}
+	cfg := core.Config{Coordinator: "https://wrong.example.com", CoordToken: "synthetic-admin", CoordAdminToken: "unrelated-admin", CoordTokenCommand: []string{"must-not-run"}}
 	data, _ := json.Marshal(credential)
 	badIdentity = true
 	if err := runCredentialCommand(t.Context(), cfg, rt, o, bytes.NewReader(data)); err == nil {
@@ -241,7 +311,7 @@ func TestHostInstallRejectsCustodyAndWrongDescriptorWithoutNetwork(t *testing.T)
 
 func TestScopedHostClientNeverFallsBackAndAllowsExpiredCleanup(t *testing.T) {
 	state := preparedHostFixture(t, "https://broker.example.com")
-	cfg := core.Config{Coordinator: "https://other.example.com", CoordToken: "synthetic-admin", CoordTokenCommand: []string{"must-not-run"}}
+	cfg := core.Config{Coordinator: "https://other.example.com", CoordToken: "synthetic-admin", CoordAdminToken: "unrelated-admin", CoordTokenCommand: []string{"must-not-run"}}
 	if _, err := hostCoordinator(cfg, state); err == nil {
 		t.Fatal("missing scoped credential fell back")
 	}

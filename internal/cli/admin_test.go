@@ -111,6 +111,35 @@ func TestAdminLeasesUsesConfiguredAuthorization(t *testing.T) {
 	}
 }
 
+func TestAgentAdminCoordinatorClientSelectsExplicitToken(t *testing.T) {
+	cfg := Config{
+		Coordinator:       "https://broker.example.com",
+		CoordToken:        "user-token",
+		CoordAdminToken:   "admin-token",
+		CoordTokenCommand: []string{"must-not-run"},
+	}
+	c, err := NewAdminCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Token != "admin-token" || len(c.TokenCommand) != 0 {
+		t.Fatal("explicit admin token did not replace ordinary authentication")
+	}
+	if cfg.CoordToken != "user-token" || len(cfg.CoordTokenCommand) != 1 {
+		t.Fatal("changed caller authentication")
+	}
+	cfg.CoordAdminToken = ""
+	cfg.CoordTokenCommand = nil
+	c, err = NewAdminCoordinatorClient(cfg)
+	if err != nil || c.Token != "user-token" {
+		t.Fatalf("ordinary admin login fallback: client=%v err=%v", c != nil, err)
+	}
+	cfg.CoordToken = ""
+	if _, err = NewAdminCoordinatorClient(cfg); err == nil || !strings.Contains(err.Error(), "broker authentication") {
+		t.Fatalf("missing authentication error=%v", err)
+	}
+}
+
 func TestAdminMacHostsRequiresForceForAllocate(t *testing.T) {
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	err := app.adminMacHosts(context.Background(), []string{"allocate", "--availability-zone", "eu-west-1a"})

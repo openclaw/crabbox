@@ -153,7 +153,7 @@ func runCredentialCommand(ctx context.Context, cfg core.Config, rt core.Runtime,
 		if !hostUUIDPattern.MatchString(o.id) {
 			return fmt.Errorf("--id must be the host UUID")
 		}
-		c, err := core.NewCoordinatorClient(cfg)
+		c, err := core.NewAdminCoordinatorClient(cfg)
 		if err != nil {
 			return err
 		}
@@ -337,7 +337,7 @@ func enrollHostDescriptor(ctx context.Context, cfg core.Config, rt core.Runtime,
 	if json.Unmarshal(data, &descriptor) != nil || validateDescriptor(descriptor) != nil {
 		return fmt.Errorf("invalid prepared host descriptor")
 	}
-	c, err := core.NewCoordinatorClient(cfg)
+	c, err := core.NewAdminCoordinatorClient(cfg)
 	if err != nil {
 		return err
 	}

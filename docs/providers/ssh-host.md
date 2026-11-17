@@ -52,6 +52,11 @@ response is safe to retry with the same descriptor and output path. A changed
 hash, key, or enrollment metadata conflicts; an existing output file is never
 silently replaced with a new secret. Inventory starts disabled. Owner and
 organization come from the administrator's authenticated identity.
+Host enrollment, credential revocation/reissue/recovery, and inventory changes
+prefer an explicitly configured coordinator admin token; without one, they use
+the normal login, which must be an administrator. `host list` keeps the normal
+login. In this scoped flow, the admin credential stays on the workstation;
+`host serve` uses only its installed host credential.
 
 Transfer the credential file through a private channel to the prepared host,
 then install it through stdin:
