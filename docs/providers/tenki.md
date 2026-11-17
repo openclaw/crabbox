@@ -8,11 +8,10 @@ Read when:
 
 Tenki is now Luxor Agent Cloud (Luxor Sandbox); the provider keeps the `tenki`
 name so existing config, flags, and leases continue to work. The CLI command is
-now `luxor`. When `cliPath` is unset, Crabbox runs `luxor` and falls back to the
-legacy `tenki` command when `luxor` is not on `PATH`. Pre-rebrand `tenki`
-installs do not accept `lx_` keys or `LUXORAI_*` settings; upgrade to the Luxor
-CLI. An explicit `cliPath` is part of fixed-lease identity, so changing it does
-not reuse existing fixed leases.
+now `luxor`. Crabbox runs `luxor` by default and falls back to the legacy `tenki`
+command when `luxor` is not on `PATH`. Pre-rebrand `tenki` installs do not accept
+`lx_` keys or `LUXORAI_*` settings; upgrade to the Luxor CLI. Switching between
+the `luxor` and `tenki` commands keeps existing fixed leases.
 
 Tenki is an SSH-lease provider. Crabbox asks the Luxor CLI to create and delete
 sandbox sessions, then runs normal Crabbox sync/commands over SSH through
@@ -137,7 +136,7 @@ pass Luxor auth tokens as command-line arguments.
 provider: tenki
 target: linux
 tenki:
-  cliPath: /usr/local/bin/luxor # optional; omit for luxor with tenki fallback
+  cliPath: luxor
   endpoint: https://api.example.test
   gateway: wss://sandbox-gateway.example.test
   image: ubuntu:tenki

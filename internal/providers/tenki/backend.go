@@ -1100,7 +1100,7 @@ func (b *tenkiBackend) runTenki(ctx context.Context, args []string, stdout, stde
 	}
 	cli := tenkiCLIPath(b.cfg)
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: cli, Args: args, Stdout: stdout, Stderr: stderr})
-	if strings.TrimSpace(b.cfg.Tenki.CLIPath) == "" && tenkiCLIMissing(err) {
+	if cli == core.TenkiConfigDefaultCLIPath && tenkiCLIMissing(err) {
 		// CLI installs from before the Luxor rebrand only provide the tenki command.
 		legacy, legacyErr := b.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: tenkiLegacyCLIPath, Args: args, Stdout: stdout, Stderr: stderr})
 		if !tenkiCLIMissing(legacyErr) {
@@ -1261,23 +1261,23 @@ func tenkiWorkRoot(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.Tenki.WorkRoot), core.TenkiConfigDefaultWorkRoot)
 }
 
-const (
-	tenkiCLICommand    = "luxor"
-	tenkiLegacyCLIPath = "tenki"
-)
+const tenkiLegacyCLIPath = "tenki"
 
 func tenkiCLIMissing(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, exec.ErrDot)
 }
 
 func tenkiCLIPath(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Tenki.CLIPath), tenkiCLICommand)
+	return core.Blank(strings.TrimSpace(cfg.Tenki.CLIPath), core.TenkiConfigDefaultCLIPath)
 }
 
-// tenkiRouteCLIPath is the CLI identity bound into fixed-lease routes. An unset
-// cliPath keeps the pre-rebrand tenki route; an explicit cliPath is bound as is.
+// tenkiRouteCLIPath is the CLI identity bound into fixed-lease routes. The
+// luxor and tenki commands run the same CLI, so both keep pre-rebrand routes.
 func tenkiRouteCLIPath(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Tenki.CLIPath), tenkiLegacyCLIPath)
+	if cli := tenkiCLIPath(cfg); cli != core.TenkiConfigDefaultCLIPath {
+		return cli
+	}
+	return tenkiLegacyCLIPath
 }
 
 func cleanTenkiWorkRoot(workRoot string) error {

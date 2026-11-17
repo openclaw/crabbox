@@ -20,10 +20,12 @@ type fileTenkiConfig struct {
 	DiskGB    int    `yaml:"diskGB,omitempty"`
 }
 
+const TenkiConfigDefaultCLIPath string = "luxor"
 const TenkiConfigDefaultWorkRoot string = "/home/tenki/crabbox"
 
 func defaultTenkiConfig() TenkiConfig {
 	return TenkiConfig{
+		CLIPath:  TenkiConfigDefaultCLIPath,
 		WorkRoot: TenkiConfigDefaultWorkRoot,
 	}
 }

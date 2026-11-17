@@ -1292,7 +1292,7 @@ func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
 		{name: "luxor missing", lookupErr: exec.ErrNotFound, want: []string{"luxor", "tenki"}},
 		{name: "luxor relative to cwd", lookupErr: exec.ErrDot, want: []string{"luxor", "tenki"}},
 		{name: "both missing", lookupErr: exec.ErrNotFound, legacyMissing: true, want: []string{"luxor", "tenki"}},
-		{name: "explicit luxor missing", cli: "luxor", lookupErr: exec.ErrNotFound, want: []string{"luxor"}},
+		{name: "explicit luxor missing", cli: "luxor", lookupErr: exec.ErrNotFound, want: []string{"luxor", "tenki"}},
 		{name: "explicit path missing", cli: "/opt/luxor/bin/luxor", lookupErr: exec.ErrNotFound, want: []string{"/opt/luxor/bin/luxor"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1319,7 +1319,7 @@ func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
 			if !reflect.DeepEqual(names, tc.want) {
 				t.Fatalf("commands=%q want %q", names, tc.want)
 			}
-			if wantErr := (tc.cli != "" && tc.lookupErr != nil) || tc.legacyMissing; (err != nil) != wantErr {
+			if wantErr := (tc.cli != "" && tc.cli != "luxor" && tc.lookupErr != nil) || tc.legacyMissing; (err != nil) != wantErr {
 				t.Fatalf("err=%v", err)
 			}
 			if tc.legacyMissing && !strings.Contains(err.Error(), `"luxor"`) {
@@ -1333,17 +1333,17 @@ func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
 	}
 }
 
-func TestTenkiFixedRouteKeepsPreRebrandIdentity(t *testing.T) {
+func TestTenkiFixedRouteStableAcrossCLIRename(t *testing.T) {
 	route := func(cli string) string {
 		cfg := core.BaseConfig()
 		cfg.Provider = tenkiProvider
 		cfg.Tenki.CLIPath = cli
 		return tenkiFixedRoute(cfg)
 	}
-	if route("") != route("tenki") || route("  ") != route("tenki") {
-		t.Fatal("unset cliPath changed the pre-rebrand default fixed route")
+	if route("luxor") != route("tenki") || route("") != route("tenki") {
+		t.Fatal("default luxor CLI changed the pre-rebrand fixed route")
 	}
-	if route("luxor") == route("") || route("/opt/custom/luxor") == route("") {
-		t.Fatal("explicit cliPath must remain part of the fixed route")
+	if route("/opt/custom/luxor") == route("tenki") {
+		t.Fatal("custom CLI path must remain part of the fixed route")
 	}
 }
