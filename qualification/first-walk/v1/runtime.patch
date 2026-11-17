@@ -477,7 +477,7 @@ index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c76
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d6077acc49a4da6f4b1397d7cea6d21be..cdfce70dc325cc12241040e3af3d31ac41b49404 100644
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..ecc5e1f6bb98e771a2e9224ab15b1a0138cd5529 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
 @@ -1,15 +1,32 @@
@@ -1009,7 +1009,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..cdfce70dc325cc12241040e3af3d31ac
 +      );
 +      if (prior?.phase === "passed") return { passed: true, checks: 13 };
 +      if (prior) throw new Error("key authorization requires finalization");
-+      const intent = { phase: "started", startedAt: Date.now() };
++      const intent = { phase: "started", startedAt: run.keyAuthorizationStartedAt ?? Date.now() };
 +      run.keyAuthorizationStartedAt = intent.startedAt;
 +      await this.ctx.storage.put(stateKey, run);
 +      await this.ctx.storage.put("key-authorization", intent);
@@ -3139,7 +3139,7 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..a43301821db2f47d5f808476f3ee9dc6269f1bc6 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..73f629dd57fd3e9b1cada8b9b61d0d8675a32d60 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3993,7 +3993,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..a43301821db2f47d5f808476f3ee9dc6
    </item>`;
  }
 
-@@ -2914,3 +3623,1342 @@ function awsServerError(): Response {
+@@ -2914,3 +3623,1358 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -5323,6 +5323,22 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..a43301821db2f47d5f808476f3ee9dc6
 +      f.env as never,
 +      f.signer,
 +    );
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("retains the first durable start after a crash before the diagnostic marker write", async () => {
++    const f = await keyFixture();
++    const state = await f.storage.get<Record<string, unknown>>("run");
++    const startedAt = Date.now() - 9 * 60_000;
++    await f.storage.put("run", { ...state, keyAuthorizationStartedAt: startedAt });
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.keyAuthorization(controller);
++    expect(await f.storage.get("key-authorization")).toMatchObject({ startedAt });
++    expect(await f.storage.get("run")).toMatchObject({ keyAuthorizationStartedAt: startedAt });
 +    await reopened.finalize(controller);
 +    expect((await reopened.attest(controller)).finalized).toBe(true);
 +  });
