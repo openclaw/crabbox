@@ -1941,6 +1941,181 @@ async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
   );
 }
 
+// This gate belongs only to the initial, acknowledged relay deployment. A
+// stale read may be observed again; an uncertain exposure write is never replayed.
+export async function enableRelaySubdomain(
+  cf,
+  worker,
+  expectedVersion,
+  expectedBindings,
+  handoff,
+  { signal: callerSignal, pause = delay } = {},
+) {
+  if (
+    !runIdPattern.test(handoff.runId ?? "") ||
+    worker !== handoff.relayWorker ||
+    worker !==
+      `crabbox-image-qualification-relay-${handoff.runId.slice("image-qualification-".length)}` ||
+    !Number.isFinite(Date.parse(handoff.workExpiresAt))
+  )
+    throw new Error("qualification relay exposure identity is invalid");
+  workerVersion(expectedVersion);
+  const startedAt = Date.now();
+  const stopsAt = Math.min(startedAt + 60_000, assertRelayReadbackReserve(handoff));
+  const receipt = {
+    version: 1,
+    worker,
+    runId: handoff.runId,
+    expectedVersion,
+    bindingDigest: digest(canonical(expectedBindings)),
+    state: "new",
+    observations: [],
+  };
+  return await withQualificationJournal(
+    path.resolve(required("QUALIFICATION_PROOF_DIR")),
+    {
+      stateName: "relay-exposure.json",
+      lockName: "relay-exposure.lock",
+      create: true,
+      initial: () => receipt,
+    },
+    async (retained, save) => {
+      if (canonical(retained) !== canonical(receipt))
+        throw new Error(
+          "relay exposure receipt already exists; use recovery, never replay deployment",
+        );
+      // Claim local custody before any request, including on a no-write failure.
+      receipt.state = "checking";
+      await save(receipt);
+      const stop = new AbortController();
+      const timer = setTimeout(() => stop.abort(), Math.max(1, stopsAt - Date.now()));
+      const cancel = () => stop.abort();
+      const signal = AbortSignal.any([stop.signal, ...(callerSignal ? [callerSignal] : [])]);
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+      let requests = 0;
+      const check = () => {
+        if (signal.aborted || Date.now() >= stopsAt)
+          throw new Error("qualification relay exposure cancelled or deadline exhausted");
+        assertRelayReadbackReserve(handoff);
+      };
+      const request = async (pathname, init = {}, options = {}) => {
+        check();
+        if (requests >= 400)
+          throw new Error("qualification relay exposure request budget exhausted");
+        requests++;
+        const result = await cf.request(
+          pathname,
+          { ...init, signal, redirect: "error" },
+          {
+            ...options,
+            boundedBytes: 64 * 1024,
+          },
+        );
+        check();
+        return result;
+      };
+      // Reuse the existing validators with bounded, GET-only management access.
+      // Do not mutate the original client's signals or generic subdomain methods.
+      const reader = Object.create(cf);
+      reader.request = async (pathname, init = {}, options = {}) => {
+        if ((init.method ?? "GET") !== "GET") throw new Error("relay exposure fence is read-only");
+        return await request(pathname, init, options);
+      };
+      const fence = async () => {
+        await verifyAuthority(reader);
+        if ((await reader.latestVersion(worker)) !== expectedVersion)
+          throw new Error("qualification relay exposure version drifted");
+        const settings = await verifyOwned(reader, worker);
+        if (canonical(publicBindingShape(settings.bindings)) !== canonical(expectedBindings))
+          throw new Error("qualification relay exposure bindings drifted");
+        const [routes, schedules, domains] = await Promise.all([
+          reader.request(
+            `/workers/services/${worker}/environments/production/routes?show_zonename=true`,
+          ),
+          reader.request(`/workers/scripts/${worker}/schedules`),
+          reader.list(`/workers/domains?service=${worker}`),
+        ]);
+        if (
+          canonical(routes) !== "[]" ||
+          canonical(schedules?.schedules) !== "[]" ||
+          domains.length !== 0 ||
+          (await reader.latestVersion(worker)) !== expectedVersion
+        )
+          throw new Error("qualification relay exposure isolation or version drifted");
+      };
+      const exposure = (value) => {
+        if (typeof value?.enabled !== "boolean" || typeof value?.previews_enabled !== "boolean")
+          throw new Error("qualification relay exposure readback is malformed");
+        return { enabled: value.enabled, previews_enabled: value.previews_enabled };
+      };
+      const endpoint = `/workers/scripts/${worker}/subdomain`;
+      try {
+        await fence();
+        receipt.initial = exposure(await reader.request(endpoint));
+        receipt.state = "write-intent";
+        await save(receipt);
+        // No catch/retry path can issue another POST, even after an uncertain response.
+        const ack = await request(
+          endpoint,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled: true, previews_enabled: false }),
+          },
+          { envelope: true },
+        );
+        if (ack?.success !== true)
+          throw new Error("qualification relay exposure write is unconfirmed");
+        receipt.state = "acknowledged";
+        await save(receipt);
+        for (let round = 0; round < 12; round++) {
+          await fence();
+          const result = await reader.request(endpoint, {}, { responseMetadata: true });
+          const actual = exposure(result.result);
+          receipt.observations.push({
+            exposure: actual,
+            response: result.response,
+            elapsedMs: Date.now() - startedAt,
+          });
+          await save(receipt);
+          if (actual.enabled === true && actual.previews_enabled === false) {
+            // Bracket the successful exposure read with the same complete fence.
+            await fence();
+            const account = await reader.request("/workers/subdomain");
+            if (
+              typeof account?.subdomain !== "string" ||
+              !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(account.subdomain)
+            )
+              throw new Error("Cloudflare account workers.dev subdomain is invalid");
+            receipt.state = "verified";
+            await save(receipt);
+            check();
+            return `https://${worker}.${account.subdomain}.workers.dev`;
+          }
+          if (canonical(actual) !== canonical(receipt.initial))
+            throw new Error("qualification relay exposure changed to an unexpected state");
+          if (round < 11) {
+            check();
+            await pause(5_000, undefined, { signal });
+            check();
+          }
+        }
+        throw new Error(
+          "qualification relay exposure remains unresolved after twelve observations",
+        );
+      } finally {
+        stop.abort();
+        clearTimeout(timer);
+        process.removeListener("SIGINT", cancel);
+        process.removeListener("SIGTERM", cancel);
+        receipt.requests = requests;
+        await save(receipt);
+      }
+    },
+  );
+}
+
 async function deploy() {
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
@@ -2115,7 +2290,13 @@ async function deploy() {
     expectedRelayBindings,
     handoff,
   );
-  const relayURL = await cf.enableSubdomain(relayWorker);
+  const relayURL = await enableRelaySubdomain(
+    cf,
+    relayWorker,
+    relayVersion,
+    expectedRelayBindings,
+    handoff,
+  );
   const relayBindingDigest = digest(canonical(expectedRelayBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
   await Promise.all([
