@@ -66,7 +66,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(buildJob, /build-inputs\.json/);
   assert.match(
     buildJob,
-    /if \[\[ "\$QUALIFICATION_MODE" == first-walk \]\]; then\n            node harness\/scripts\/image-qualification-control\.mjs first-walk-recipe \\\n              candidate "\$ARTIFACT"\n          fi/,
+    /if \[\[ "\$QUALIFICATION_MODE" == first-walk \|\| "\$QUALIFICATION_MODE" == key-authorization \]\]; then\n            node harness\/scripts\/image-qualification-control\.mjs first-walk-recipe \\\n              candidate "\$ARTIFACT"\n          fi/,
   );
   const setupGo = buildJob.slice(
     buildJob.indexOf("      - name: Set up Go"),
@@ -250,13 +250,13 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /instanceTypes: \["t3\.small", "t3a\.small"\]/);
   assert.match(
     control,
-    /maxMinutes: process\.env\.QUALIFICATION_MODE === "first-walk" \? 150 : retainedImage \? 38 : 120/,
+    /maxMinutes: privateQualificationMode\(process\.env\.QUALIFICATION_MODE\)\s*\? 150\s*: retainedImage\s*\? 38\s*: 120/,
   );
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
   assert.match(
     control,
-    /maxLaunches: process\.env\.QUALIFICATION_MODE === "first-walk" \? 2 : retainedImage \? 1 : 3/,
+    /maxLaunches: privateQualificationMode\(process\.env\.QUALIFICATION_MODE\)\s*\? 2\s*: retainedImage\s*\? 1\s*: 3/,
   );
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
@@ -266,8 +266,8 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /candidate changed protected build inputs/);
   assert.match(control, /candidate build-input receipt mismatch/);
   assert.match(control, /deleted_classes: \["FleetDurableObject"\]/);
-  assert.match(control, /controllerCall\(cf, controllerURL, token, "finalize"/);
-  assert.match(control, /controllerCall\(cf, controllerURL, token, "retire"/);
+  assert.match(control, /call\(controllerURL, "finalize"/);
+  assert.match(control, /call\(controllerURL, "retire"/);
   assert.match(control, /workers\/scripts/);
   assert.match(control, /candidate Worker version changed after protected deployment/);
   assert.match(control, /await preparePrivateCandidate\(cf, candidateWorker, stagingBindings\)/);
@@ -281,7 +281,7 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   );
   assert.match(
     control,
-    /controllerCall\(cf, controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(cf, controllerURL, token, "finalize"/,
+    /call\(controllerURL, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*call\(controllerURL, "finalize"/,
   );
   assert.match(
     control,
@@ -336,12 +336,14 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       fs.mkdirSync(path.join(directory, "scripts"), { recursive: true });
       for (const file of [
         "image-qualification-control.mjs",
+        "image-qualification-controller-http.mjs",
         "image-qualification-isolation.mjs",
         "image-qualification-transport.mjs",
         "image-qualification-journal.mjs",
         "image-qualification-executor-token.mjs",
         "image-qualification-network.ts",
         "image-qualification-package.mjs",
+        "image-qualification-run-session.mjs",
       ])
         fs.copyFileSync(path.join(root, "scripts", file), path.join(directory, "scripts", file));
       fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");

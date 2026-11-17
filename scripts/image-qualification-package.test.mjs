@@ -92,6 +92,40 @@ function fixture() {
   return { temp, baseline, candidate, protectedRoot, contract };
 }
 
+test("checked-in package preserves the pinned baseline host credential guards", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "qualification-current-package-"));
+  try {
+    const { contract } = readQualificationPackage(root);
+    const baseline = path.join(temp, "baseline");
+    const candidate = path.join(temp, "candidate");
+    for (const directory of [baseline, candidate]) {
+      git(temp, "clone", "--quiet", "--shared", "--no-checkout", root, directory);
+      git(directory, "checkout", "--quiet", "--detach", contract.baselineCommit);
+    }
+    fs.cpSync(path.join(root, pkg), path.join(candidate, pkg), { recursive: true });
+    const guards = [
+      [
+        "worker/src/coordinator-entry.ts",
+        /  \/\/ Host credentials[\s\S]*?(?=  if \(request\.method)/,
+      ],
+      [
+        "worker/src/fleet.ts",
+        /      if \(hostCredentialRequest\(request\)\) \{[\s\S]*?(?=      if \(isDeviceTokenRequest)/,
+      ],
+    ].map(([file, pattern]) => {
+      const guard = fs.readFileSync(path.join(baseline, file), "utf8").match(pattern)?.[0];
+      assert.ok(guard, `missing pinned host credential guard: ${file}`);
+      return [file, guard];
+    });
+    const result = prepareQualificationBuild(root, candidate, baseline);
+    assert.deepEqual(result.qualification, qualificationIdentity(root));
+    for (const [file, guard] of guards)
+      assert.ok(fs.readFileSync(path.join(baseline, file), "utf8").includes(guard));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("private build applies only protected pinned data in a separate exact baseline", () => {
   const f = fixture();
   try {

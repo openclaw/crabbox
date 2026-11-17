@@ -51,9 +51,10 @@ const env = {
   CRABBOX_COORDINATOR: relay,
   CRABBOX_COORDINATOR_TOKEN: token,
   CRABBOX_COORDINATOR_ADMIN_TOKEN: token,
+  CRABBOX_AWS_REGION: region,
   CRABBOX_ENV_ALLOW: "CI",
 };
-const scope = ["--provider", "aws", "--target", "linux", "--region", region];
+const scope = ["--provider", "aws", "--target", "linux"];
 const logs = new Map();
 const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 function remaining() {
@@ -75,6 +76,69 @@ async function api(method, endpoint, body) {
   const data = await response.json();
   if (!response.ok) throw new Error(`candidate ${endpoint}: http ${response.status}`);
   return data;
+}
+function redact(text) {
+  return text
+    .replaceAll(token, "[executor-token]")
+    .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
+    .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/g, "[aws-resource]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]");
+}
+async function observeSourceRelease(id) {
+  // One observation, not another release or a reason to continue. Never export
+  // the raw lease: it can contain access/configuration unrelated to cleanup.
+  const receipt = { leaseID: id, observation: "unavailable" };
+  try {
+    const response = await fetch(`${relay}/v1/leases/${id}`, {
+      headers: { authorization: `Bearer ${token}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(Math.min(5000, remaining())),
+    });
+    receipt.httpStatus = response.status;
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      receipt.observation = "http-error";
+    } else {
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.length;
+        if (size > 64 * 1024) throw new Error("cleanup response exceeds limit");
+        chunks.push(chunk);
+      }
+      receipt.observation = "invalid-response";
+      const lease = JSON.parse(Buffer.concat(chunks).toString("utf8")).lease;
+      if (lease?.id === id) {
+        const selected = {};
+        for (const key of [
+          "state",
+          "cleanupStatus",
+          "cleanupError",
+          "cleanupRetryAt",
+          "cleanupFailedAt",
+          "cleanupStartedAt",
+          "cleanupCompletedAt",
+        ]) {
+          if (typeof lease[key] !== "string") continue;
+          const text = redact(lease[key]);
+          selected[key] = text.slice(0, 4096);
+          if (text.length > 4096) selected[`${key}Truncated`] = true;
+        }
+        if (Number.isSafeInteger(lease.cleanupAttempts) && lease.cleanupAttempts >= 0)
+          selected.cleanupAttempts = lease.cleanupAttempts;
+        receipt.observation = "observed";
+        receipt.cleanup = selected;
+      }
+    }
+  } catch {
+    // Lost, oversized, invalid and expired reads do not prove cleanup. Do not
+    // include exception text or response bodies in a public proof artifact.
+  }
+  fs.writeFileSync(
+    path.join(proof, "source-release-status.json"),
+    JSON.stringify(receipt, null, 2),
+    { mode: 0o600, flag: "wx" },
+  );
 }
 async function cli(name, args, input) {
   const output = path.join(raw, name + ".log");
@@ -124,7 +188,22 @@ async function create(id, name) {
   return { lease: (await api("GET", `/v1/leases/${id}`)).lease, readiness: sha(output) };
 }
 async function run(name, id, script) {
-  return await cli(name, ["run", ...scope, "--id", id, "--no-sync", "--script-stdin"], script);
+  return await cli(
+    name,
+    [
+      "run",
+      ...scope,
+      "--class",
+      "standard",
+      "--type",
+      "t3.small",
+      "--id",
+      id,
+      "--no-sync",
+      "--script-stdin",
+    ],
+    script,
+  );
 }
 let successful = false;
 try {
@@ -169,7 +248,15 @@ try {
   }
   if (capture?.state !== "ready" || capture.image?.snapshotIDs?.length !== 1)
     throw new Error("single synthetic capture not ready");
-  await cli("source-release", ["stop", ...scope, sourceID]);
+  try {
+    await cli("source-release", ["stop", ...scope, "--id", sourceID]);
+  } catch (error) {
+    // Even evidence-write failure must preserve the original stop failure.
+    try {
+      await observeSourceRelease(sourceID);
+    } catch {}
+    throw error;
+  }
   const { readiness } = await create(targetID, "target-stock-ready");
   const use = await api("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" });
   const intent = {
@@ -251,12 +338,7 @@ try {
           throw new Error(
             "first-walk log was replaced; let the independent finalizer settle the run and investigate the changed log before any separately authorized retry",
           );
-        const text = fs
-          .readFileSync(fd, "utf8")
-          .replaceAll(token, "[executor-token]")
-          .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
-          .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/g, "[aws-resource]")
-          .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]");
+        const text = redact(fs.readFileSync(fd, "utf8"));
         fs.writeFileSync(path.join(proof, name), text, { mode: 0o600 });
       } finally {
         fs.closeSync(fd);

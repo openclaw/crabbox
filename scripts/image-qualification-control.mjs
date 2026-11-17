@@ -5,28 +5,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-
-import {
-  transportMarkers,
-  transportProfile,
-  transportBindingShape,
-  proveCandidateTransport,
-  settleCandidateTransport,
-} from "./image-qualification-transport.mjs";
-import { withQualificationJournal } from "./image-qualification-journal.mjs";
-import {
-  packageFile,
-  qualificationPackagePath,
-  qualificationIdentity,
-  prepareQualificationBuild,
-} from "./image-qualification-package.mjs";
 
 import {
   executorCredentialIdentity,
   readExecutorCredential,
 } from "./image-qualification-executor-token.mjs";
-
 import {
   readAdmission,
   bindingShape,
@@ -36,7 +21,27 @@ import {
   requireAbsent,
   ownershipTags,
   verifyOwned,
+  assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
+import { withQualificationJournal } from "./image-qualification-journal.mjs";
+import { handoffSession, privateQualificationMode } from "./image-qualification-run-session.mjs";
+import {
+  ControllerHTTPError,
+  requestControllerJSON,
+} from "./image-qualification-controller-http.mjs";
+import {
+  packageFile,
+  qualificationPackagePath,
+  qualificationIdentity,
+  prepareQualificationBuild,
+} from "./image-qualification-package.mjs";
+import {
+  transportMarkers,
+  transportProfile,
+  transportBindingShape,
+  proveCandidateTransport,
+  settleCandidateTransport,
+} from "./image-qualification-transport.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
@@ -191,7 +196,7 @@ export function retainedImageFromEnv() {
     "QUALIFICATION_RETAINED_SOURCE_SHA",
     "QUALIFICATION_RETAINED_CAPSULE_SHA256",
   ];
-  if (mode === "mint" || mode === "first-walk") {
+  if (mode === "mint" || privateQualificationMode(mode)) {
     if (names.some((name) => process.env[name])) {
       throw new Error("mint mode cannot accept retained-image inputs");
     }
@@ -417,8 +422,11 @@ async function candidateArtifact(repository, workflowSha, defaultBranch) {
 
 export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
   retainedImageFromEnv();
+  const firstWalk = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
-  const number = required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
+  const number = firstWalk ? undefined : required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
+  if (firstWalk && process.env.QUALIFICATION_PULL_REQUEST?.trim())
+    throw new Error("first-walk selects an accepted source commit, not a pull request");
   const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
   const workflowSha = required("QUALIFICATION_WORKFLOW_SHA", sha40);
   const workflowRef = required("GITHUB_WORKFLOW_REF");
@@ -430,20 +438,34 @@ export async function verifyCandidateIdentity({ artifact = false, cleanup = fals
     if (workflowRef !== expectedRef)
       throw new Error("workflow is not the protected default-branch copy");
   }
-  const [pull, branch] = await Promise.all([
-    github(`/repos/${repository}/pulls/${number}`),
+  const [source, branch] = await Promise.all([
+    github(
+      firstWalk
+        ? `/repos/${repository}/compare/${candidateSha}...${workflowSha}`
+        : `/repos/${repository}/pulls/${number}`,
+    ),
     github(`/repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`),
   ]);
   const exact =
-    pull.state === "open" &&
-    pull.head?.repo?.full_name === repository &&
-    pull.head?.sha === candidateSha &&
-    pull.base?.sha === workflowSha &&
-    branch.sha === workflowSha;
-  if (!exact) throw new Error("pull request, candidate SHA, or protected workflow SHA changed");
-  if (!artifact) return { candidateSha, number, repository, workflowSha };
+    branch.sha === workflowSha &&
+    (firstWalk
+      ? source.base_commit?.sha === candidateSha &&
+        source.merge_base_commit?.sha === candidateSha &&
+        source.status === (candidateSha === workflowSha ? "identical" : "ahead")
+      : source.state === "open" &&
+        source.head?.repo?.full_name === repository &&
+        source.head?.sha === candidateSha &&
+        source.base?.sha === workflowSha);
+  if (!exact)
+    throw new Error(
+      firstWalk
+        ? "first-walk source admission failed: select a compatible accepted ancestor SHA; finish any existing-run cleanup before a fresh dispatch from current protected main"
+        : "pull request, candidate SHA, or protected workflow SHA changed",
+    );
+  const identity = { candidateSha, ...(firstWalk ? {} : { number }), repository, workflowSha };
+  if (!artifact) return identity;
   const candidate = await candidateArtifact(repository, workflowSha, defaultBranch);
-  return { candidateSha, number, repository, workflowSha, ...candidate };
+  return { ...identity, ...candidate };
 }
 
 function filesUnder(directory, label = "artifact") {
@@ -623,7 +645,7 @@ export function prepareCandidateBuild(
   if (checkoutSha(harnessDir) !== workflowSha || checkoutSha(candidateDir) !== candidateSha) {
     throw new Error("protected build checkout SHA mismatch");
   }
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     if (!baselineDir) throw new Error("first-walk build requires pinned baseline checkout");
     const privateBuild = prepareQualificationBuild(harnessDir, candidateDir, baselineDir);
     const receipt = {
@@ -677,7 +699,7 @@ export function prepareCandidateBuild(
 
 function verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha) {
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
-  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const privateBuild = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const expected = privateBuild ? qualificationIdentity(root) : null;
   const sourceSha = privateBuild
     ? expected.workerSourceSha256
@@ -702,7 +724,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
   const buildReceipt = verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
   verifyRetainedCapsule(artifactDir, candidateSha);
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     if (
       !readPackagedRecipe(candidateDir).equals(
         readFirstWalkRecipe(path.join(artifactDir, "candidate")),
@@ -753,7 +775,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
 export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow) {
   const manifest = readJSON(path.join(artifactDir, "manifest.json"));
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
-  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const privateBuild = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const expectedPackage = privateBuild ? qualificationIdentity(root) : null;
   const unsigned = { ...manifest };
   delete unsigned.manifestSha256;
@@ -796,7 +818,7 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
   verifyRetainedCapsule(artifactDir, expectedCandidate);
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     readFirstWalkRecipe(path.join(artifactDir, "candidate"));
     if (!manifest.files.some((file) => file.path === "authority/aws-qualification-authority.js"))
       throw new Error("private authority bundle is absent");
@@ -935,13 +957,22 @@ export class Cloudflare {
       probeContentIdentity = false,
       contentIdentityBytes,
       boundedBytes,
+      responseMetadata = false,
     } = {},
   ) {
     const response = await fetch(`${this.base}${pathname}`, {
       ...init,
       headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
     });
-    if (allow404 && response.status === 404) return undefined;
+    const ray = response.headers.get("cf-ray");
+    const responseInfo = {
+      status: response.status,
+      ...(ray && /^[a-zA-Z0-9-]{1,128}$/.test(ray) ? { ray } : {}),
+    };
+    if (allow404 && response.status === 404) {
+      await response.body?.cancel();
+      return responseMetadata ? { result: undefined, response: responseInfo } : undefined;
+    }
     if ((probeContentIdentity || contentIdentityBytes) && response.ok) {
       const probe = await import("./image-qualification-binding-probe.mjs");
       return await probe.probeContentIdentity(response, contentIdentityBytes);
@@ -958,11 +989,14 @@ export class Cloudflare {
       parsed = { raw: text.slice(0, 200) };
     }
     if (!response.ok || parsed.success === false) {
-      throw new Error(`Cloudflare API ${pathname} returned ${response.status}`);
+      throw Object.assign(new Error(`Cloudflare API ${pathname} returned ${response.status}`), {
+        status: response.status,
+      });
     }
     if (allow404 && (init.method ?? "GET") === "GET" && parsed.result === undefined) {
       throw new Error(`Cloudflare API ${pathname} did not confirm existence or absence`);
     }
+    if (responseMetadata) return { result: parsed.result, response: responseInfo };
     return envelope ? parsed : parsed.result;
   }
 
@@ -992,8 +1026,22 @@ export class Cloudflare {
     throw new Error("Cloudflare inventory pagination exceeded bound");
   }
 
-  async upload(name, moduleFile, metadata, extraModules = []) {
-    metadata = { ...metadata, tags: ownershipTags(this, name, metadata.bindings) };
+  async upload(name, moduleFile, metadata, extraModules = [], options = {}) {
+    let retained = [];
+    if (metadata.keep_bindings !== undefined) {
+      if (canonical(metadata.keep_bindings) !== canonical(["secret_text"]))
+        throw new Error("qualification upload may retain only verified secret bindings");
+      const existing = await verifyOwned(this, name);
+      retained = bindingShape(existing.bindings.filter((b) => b.type === "secret_text"));
+      if (retained.some((b) => metadata.bindings.some((n) => n.name === b.name)))
+        throw new Error("qualification upload cannot replace a retained secret binding");
+    }
+    // Secrets are retained by type without reading or resending their values.
+    // Bind ownership to the effective returned settings, including those names.
+    metadata = {
+      ...metadata,
+      tags: ownershipTags(this, name, [...metadata.bindings, ...retained]),
+    };
     const form = new FormData();
     form.set("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
     form.set(
@@ -1008,7 +1056,7 @@ export class Cloudflare {
         module.name,
       );
     }
-    return await this.request(`/workers/scripts/${name}`, { method: "PUT", body: form });
+    return await this.request(`/workers/scripts/${name}`, { method: "PUT", body: form }, options);
   }
 
   async settings(name) {
@@ -1026,7 +1074,9 @@ export class Cloudflare {
   async verifyController() {
     const version = await this.latestVersion(controllerName);
     await verifyOwned(this, controllerName);
+    if (this.beforeRecoveryCall) await this.beforeRecoveryCall("controller-content");
     const response = await fetch(`${this.base}/workers/scripts/${controllerName}/content/v2`, {
+      ...(this.recoverySignal ? { signal: this.recoverySignal(), redirect: "error" } : {}),
       headers: { authorization: `Bearer ${this.token}` },
     });
     if (!response.ok) throw new Error("controller source unavailable");
@@ -1071,13 +1121,8 @@ export class Cloudflare {
   }
 
   async deleteScript(name) {
-    // References to the recovery controller must block its deletion.
-    const query = name === controllerName ? "" : "?force=true";
-    await this.request(
-      `/workers/scripts/${name}${query}`,
-      { method: "DELETE" },
-      { allow404: true },
-    );
+    // References to any owned caller must block ordinary deletion.
+    await this.request(`/workers/scripts/${name}`, { method: "DELETE" }, { allow404: true });
     if (
       (await this.request(`/workers/scripts/${name}/settings`, {}, { allow404: true })) !==
       undefined
@@ -1100,18 +1145,31 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: process.env.QUALIFICATION_MODE === "first-walk" ? 150 : retainedImage ? 38 : 120,
+    maxMinutes: privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? 150
+      : retainedImage
+        ? 38
+        : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
-    maxLaunches: process.env.QUALIFICATION_MODE === "first-walk" ? 2 : retainedImage ? 1 : 3,
+    maxLaunches: privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? 2
+      : retainedImage
+        ? 1
+        : 3,
     fastSnapshotRestore: false,
-    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(process.env.QUALIFICATION_MODE === "key-authorization"
+      ? { keyAuthorizationOnly: true }
+      : {}),
     ...(retainedImage ? { retainedImage } : {}),
   };
 }
 
 function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   const config = qualificationConfig();
+  const session = handoffSession(process.env, identityCheck, manifestSha256);
+  if (session) startsAt = session.scope.startsAt;
   const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
   const expiresAt = new Date(
     Date.parse(startsAt) +
@@ -1139,9 +1197,16 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
         account: required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
         config,
         isolation: readAdmission().sha256,
+        ...(session ? { awsSessionScopeSha256: session.sha256 } : {}),
       }),
     ),
-    mode: config.firstWalk ? "first-walk" : config.retainedImage ? "retained" : "mint",
+    mode: config.keyAuthorizationOnly
+      ? "key-authorization"
+      : config.firstWalk
+        ? "first-walk"
+        : config.retainedImage
+          ? "retained"
+          : "mint",
     ...(config.retainedImage ? { retainedCapsuleSha256: config.retainedImage.capsuleSha256 } : {}),
     startsAt,
     workExpiresAt: new Date(
@@ -1180,6 +1245,7 @@ function publishHandoff(identityCheck, manifest) {
     manifest.manifestSha256,
     new Date(Date.now()).toISOString(),
   );
+  assertHandoffWindow(handoff);
   const handoffSha256 = digest(canonical(handoff));
   const executorIdentity = executorCredentialIdentity({
     ...process.env,
@@ -1379,7 +1445,11 @@ function relayMetadata(
             {
               name: "QUALIFICATION_MODE",
               type: "plain_text",
-              text: config.firstWalk ? "first-walk" : "retained",
+              text: config.keyAuthorizationOnly
+                ? "key-authorization"
+                : config.firstWalk
+                  ? "first-walk"
+                  : "retained",
             },
           ]
         : []),
@@ -1412,6 +1482,7 @@ function executionManifest(identity) {
     expiresAt: identity.expiresAt,
     ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
     ...(identity.firstWalk ? { firstWalk: true } : {}),
+    ...(identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
 }
 
@@ -1441,7 +1512,10 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
     ...(retainedImage ? { retainedImage } : {}),
-    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(process.env.QUALIFICATION_MODE === "key-authorization"
+      ? { keyAuthorizationOnly: true }
+      : {}),
   };
 }
 
@@ -1461,6 +1535,8 @@ export function verifyAttestationIdentity(attestation, expected, { finalized } =
   if (fields.some((field) => attestation?.[field] !== expected[field])) {
     throw new Error("authority attestation identity does not match protected expectations");
   }
+  if (Boolean(attestation?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly))
+    throw new Error("authority key-only purpose differs from protected expectations");
   const enrolledAt = Date.parse(attestation.enrolledAt);
   const expiresAt = Date.parse(attestation.expiresAt);
   const finalizingAt = Date.parse(attestation.finalizingAt ?? "");
@@ -1545,6 +1621,7 @@ async function verifyExecutionDeployment(cf, expected) {
     transportProps?.deploymentHash !== expected.deploymentHash ||
     transportProps?.expiresAt !== expected.expiresAt ||
     Boolean(transportProps?.firstWalk) !== Boolean(expected.firstWalk) ||
+    Boolean(transportProps?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     canonical(transportProps?.retainedImage ?? null) !==
       canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
@@ -1566,23 +1643,41 @@ async function verifyExecutionDeployment(cf, expected) {
   };
 }
 
-async function controllerCall(cf, url, token, action, value = {}) {
-  await verifyAuthority(cf);
+async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
+  await verifyAuthority(authorityCF);
   await cf.verifyController();
-  const response = await fetch(`${url}/${action}`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(value),
-  });
-  const data = await response.json();
-  if (!response.ok)
-    throw new Error(
-      `qualification controller ${action} failed: ${data.message ?? response.status}`,
-    );
-  return data;
+  if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
+  const deadlines = [
+    cf.controllerDeadline,
+    action === "transport-open" ? Date.parse(value.expiresAt) : undefined,
+    action === "claim" ? Date.parse(value.identity?.expiresAt) : undefined,
+  ].filter((value) => value !== undefined);
+  try {
+    return await requestControllerJSON({
+      url,
+      token,
+      action,
+      value,
+      signal: cf.recoverySignal?.(action),
+      ...(deadlines.length ? { deadline: Math.min(...deadlines) } : {}),
+    });
+  } catch (error) {
+    if (error instanceof ControllerHTTPError && process.env.QUALIFICATION_PROOF_DIR) {
+      try {
+        writeJSON(
+          path.join(
+            path.resolve(process.env.QUALIFICATION_PROOF_DIR),
+            `controller-http-failure-${crypto.randomUUID()}.json`,
+          ),
+          error.receipt,
+        );
+      } catch {
+        // Diagnostics cannot replace the original failure or obstruct recovery.
+        console.error("qualification controller HTTP failure receipt could not be written");
+      }
+    }
+    throw error;
+  }
 }
 
 async function cloudflareFromEnv() {
@@ -1642,6 +1737,168 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
   }
 }
 
+// Only first-upload visibility for this run's relay is reconciled. No writes,
+// credential changes, enrollment, deadline resets or general API retries here.
+function assertRelayReadbackReserve(handoff) {
+  assertHandoffWindow(handoff);
+  const end = Date.parse(handoff.workExpiresAt) - 60_000;
+  if (Date.now() >= end) throw new Error("relay readback has no subsequent-gate reserve");
+  return end;
+}
+
+function relayDeploymentList(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return undefined;
+  if (Object.hasOwn(value, "deployments")) return value.deployments;
+  return value.items;
+}
+
+// Persist structure and typed identifiers only, never arbitrary provider fields.
+function relayDeploymentSummary(value) {
+  const list = relayDeploymentList(value);
+  if (!Array.isArray(list)) return { classification: "malformed", count: null };
+  if (list.length === 0) return { classification: "empty", count: 0 };
+  const identifier = (id) => {
+    if (typeof id !== "string") return null;
+    try {
+      return workerVersion(id);
+    } catch {
+      return null;
+    }
+  };
+  const active = list[0];
+  const versions = Array.isArray(active?.versions) ? active.versions : null;
+  return {
+    classification: versions ? "nonempty" : "malformed",
+    count: list.length,
+    activeDeploymentId: identifier(active?.id),
+    versionCount: versions?.length ?? null,
+    versions:
+      versions?.slice(0, 2).map((version) => ({
+        id: identifier(version?.version_id),
+        percentage:
+          typeof version?.percentage === "number" && Number.isFinite(version.percentage)
+            ? version.percentage
+            : null,
+      })) ?? null,
+  };
+}
+
+async function readbackRelay(cf, worker, upload, expectedBindings, handoff) {
+  const directory = path.resolve(required("QUALIFICATION_PROOF_DIR"));
+  const readbackStopsAt = Date.now() + 10_000;
+  const receipt = {
+    version: 1,
+    worker,
+    upload: upload.response,
+    // Acknowledged creation is never proof of serving state.
+    state: "unresolved",
+    reads: [],
+  };
+  return await withQualificationJournal(
+    directory,
+    {
+      stateName: "relay-readback.json",
+      lockName: "relay-readback.lock",
+      create: true,
+      initial: () => receipt,
+    },
+    async (retained, save) => {
+      if (canonical(retained) !== canonical(receipt))
+        throw new Error(
+          "relay readback receipt already exists; use recovery, never replay deployment",
+        );
+      receipt.acknowledgedVersion = workerVersion(upload.result?.deployment_id);
+      await save(receipt);
+      const stopsAt = Math.min(readbackStopsAt, assertRelayReadbackReserve(handoff));
+      const stop = new AbortController();
+      const cancel = () => stop.abort();
+      const signal = AbortSignal.any([
+        stop.signal,
+        AbortSignal.timeout(Math.max(1, stopsAt - Date.now())),
+      ]);
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+      const check = () => {
+        if (signal.aborted || Date.now() >= stopsAt)
+          throw new Error("qualification relay readback cancelled or deadline exhausted");
+      };
+      const read = async (suffix) => {
+        check();
+        const observed = { endpoint: suffix, state: "pending" };
+        receipt.reads.push(observed);
+        await save(receipt);
+        // HTTP404 and a valid empty deployment list are unresolved visibility.
+        // Denial, malformed data and nonempty drift still fail without retries.
+        let result;
+        try {
+          const response = await cf.request(
+            `/workers/scripts/${worker}/${suffix}`,
+            { signal, redirect: "error" },
+            { allow404: true, boundedBytes: 64 * 1024, responseMetadata: true },
+          );
+          observed.response = response.response;
+          result = response.result;
+          observed.state = result === undefined ? "http404" : "visible";
+          if (suffix === "deployments" && result !== undefined)
+            observed.deployment = relayDeploymentSummary(result);
+        } catch (error) {
+          observed.state = "failed";
+          if (Number.isInteger(error.status)) observed.response = { status: error.status };
+          await save(receipt);
+          throw error;
+        }
+        await save(receipt);
+        check();
+        return result;
+      };
+      try {
+        for (let round = 0; round < 6; round++) {
+          const settings = await read("settings");
+          if (settings !== undefined) {
+            assertOwnedSettings(cf, worker, settings);
+            if (canonical(publicBindingShape(settings.bindings)) !== canonical(expectedBindings))
+              throw new Error(
+                "qualification relay settings do not match the reviewed binding contract",
+              );
+          }
+          const deployments = await read("deployments");
+          let deploymentVerified = false;
+          if (deployments !== undefined) {
+            const list = relayDeploymentList(deployments);
+            if (!Array.isArray(list))
+              throw new Error("qualification relay deployments are malformed");
+            if (list.length !== 0) {
+              const active = list[0];
+              if (
+                !Array.isArray(active?.versions) ||
+                active.versions.length !== 1 ||
+                active.versions[0]?.percentage !== 100 ||
+                workerVersion(active.versions[0]?.version_id) !== receipt.acknowledgedVersion
+              )
+                throw new Error(
+                  "qualification relay active version differs from acknowledged upload",
+                );
+              deploymentVerified = true;
+            }
+          }
+          if (settings !== undefined && deploymentVerified) {
+            check();
+            receipt.state = "verified";
+            await save(receipt);
+            return receipt.acknowledgedVersion;
+          }
+          if (round < 5) await delay(250, undefined, { signal });
+        }
+        throw new Error("qualification relay readback remains unresolved after six rounds");
+      } finally {
+        process.removeListener("SIGINT", cancel);
+        process.removeListener("SIGTERM", cancel);
+      }
+    },
+  );
+}
+
 async function deploy() {
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
@@ -1669,6 +1926,7 @@ async function deploy() {
     expiresAt,
     ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
     ...(config.firstWalk ? { firstWalk: true } : {}),
+    ...(config.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
@@ -1700,6 +1958,7 @@ async function deploy() {
       type: entry.path.endsWith(".wasm") ? "application/wasm" : "application/javascript+module",
     }));
   const cf = await cloudflareFromEnv();
+  cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   await Promise.all(
     [candidateWorker, relayWorker, controllerName].map((name) => requireAbsent(cf, name)),
   );
@@ -1801,21 +2060,19 @@ async function deploy() {
     expiresAt,
   );
   await requireAbsent(cf, relayWorker);
-  const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata);
-  const [relaySettings, relayVersion] = await Promise.all([
-    cf.settings(relayWorker),
-    cf.latestVersion(relayWorker),
-    Promise.resolve(undefined),
-  ]);
-  const relayBindings = publicBindingShape(relaySettings.bindings ?? []);
+  // Acknowledgement is required: uncertain PUTs never enter a replay/retry path.
+  assertRelayReadbackReserve(handoff);
+  const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata, [], {
+    responseMetadata: true,
+  });
   const expectedRelayBindings = publicBindingShape(expectedRelayMetadata.bindings);
-  if (
-    workerVersion(relayUpload.deployment_id) !== relayVersion ||
-    canonical(relayBindings) !== canonical(expectedRelayBindings)
-  ) {
-    throw new Error("qualification relay settings do not match the reviewed binding contract");
-  }
-  await verifyOwned(cf, relayWorker);
+  const relayVersion = await readbackRelay(
+    cf,
+    relayWorker,
+    relayUpload,
+    expectedRelayBindings,
+    handoff,
+  );
   const relayURL = await cf.enableSubdomain(relayWorker);
   const relayBindingDigest = digest(canonical(expectedRelayBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
@@ -2000,6 +2257,7 @@ async function arm() {
       throw new Error("deployment differs from prepared handoff");
   }
   const cf = await cloudflareFromEnv();
+  cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   await verifyExecutionDeployment(cf, expected);
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
   await cf.verifyController();
@@ -2011,6 +2269,7 @@ async function arm() {
     discovered.run?.candidateWorker !== expected.candidateWorker ||
     discovered.run?.deploymentHash !== expected.deploymentHash ||
     discovered.run?.expiresAt !== expected.expiresAt ||
+    Boolean(discovered.run?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     discovered.run?.cleanupState !== "claimed"
   ) {
     throw new Error("authority registry identity does not match protected expectations");
@@ -2040,6 +2299,19 @@ async function arm() {
     armedAt,
   });
   appendOutput("armed_at", armedAt);
+  if (expected.keyAuthorizationOnly) {
+    // Protected code alone owns this fixed diagnostic; no candidate execution.
+    const result = await controllerCall(cf, controllerURL, token, "key-authorization", {
+      runId: expected.runId,
+    });
+    if (result?.passed !== true || result?.checks !== 13 || Object.keys(result).length !== 2)
+      throw new Error("key-only authorization proof is incomplete; finalize original owner");
+    writeJSON(path.join(proofDir, "key-authorization.json"), {
+      version: 1,
+      passed: true,
+      checks: 13,
+    });
+  }
 }
 
 async function namespaceResidue(cf, worker) {
@@ -2064,6 +2336,7 @@ async function deleteCandidate(cf, worker) {
       await cf.upload(worker, tombstone, {
         main_module: "tombstone.mjs",
         compatibility_date: "2026-09-03",
+        keep_bindings: ["secret_text"],
         bindings: existing.bindings.filter((binding) =>
           [
             "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
@@ -2077,6 +2350,7 @@ async function deleteCandidate(cf, worker) {
           deleted_classes: ["FleetDurableObject"],
         },
       });
+    await verifyOwned(cf, worker);
     await cf.deleteScript(worker);
   } finally {
     fs.rmSync(tombstone, { force: true });
@@ -2288,9 +2562,12 @@ async function cleanupRun({
   requireProof = false,
   expected,
   initialQualificationFailure,
+  recovery,
 } = {}) {
-  const cf = await cloudflareFromEnv();
-  const token = required("QUALIFICATION_CONTROLLER_TOKEN");
+  const cf = recovery?.callerCF ?? (await cloudflareFromEnv());
+  const token = recovery?.token ?? required("QUALIFICATION_CONTROLLER_TOKEN");
+  const call = (url, action, value = {}) =>
+    controllerCall(cf, url, token, action, value, recovery?.authorityCF ?? cf);
   let controllerURL;
   let discovered;
   let idleProbe = false;
@@ -2303,10 +2580,20 @@ async function cleanupRun({
     if (settings !== undefined) {
       await cf.verifyController();
       controllerURL = await cf.enableSubdomain(controllerName);
-      if (transportProfile(settings.bindings ?? [])?.profile === "controller-v2")
+      if (!recovery && transportProfile(settings.bindings ?? [])?.profile === "controller-v2")
         await recoverTransportProbe(cf, controllerURL, token);
-      discovered = await controllerCall(cf, controllerURL, token, "discover");
+      discovered = await call(controllerURL, "discover");
     } else {
+      if (recovery) {
+        if (!recovery.state.retired)
+          throw new Error("original controller unavailable before verified retirement");
+        await recovery.verifyAbsentCallers();
+        return {
+          result: "finalized",
+          runId: expected.runId,
+          attestation: recovery.state.attestation,
+        };
+      }
       if (!reaper) throw new Error("qualification controller is unavailable");
       const candidates = await qualificationCandidates(cf);
       for (const candidate of candidates) {
@@ -2371,6 +2658,21 @@ async function cleanupRun({
     };
   }
   if (discovered.run === null) {
+    if (recovery) {
+      if (!recovery.state.attestation)
+        throw new Error("idle registry without original finalization proof");
+      await recovery.checkpoint("retired", recovery.state.attestation);
+      await deleteRelay(cf, relayNameForRun(expected.runId));
+      await deleteCandidate(cf, expected.candidateWorker);
+      await cf.verifyController();
+      await cf.deleteScript(controllerName);
+      await recovery.verifyAbsentCallers();
+      return {
+        result: "finalized",
+        runId: expected.runId,
+        attestation: recovery.state.attestation,
+      };
+    }
     try {
       for (const relay of await qualificationRelays(cf)) {
         await deleteRelay(cf, relay.worker);
@@ -2402,6 +2704,13 @@ async function cleanupRun({
     return { result: "idle", reason: "registry has no active run" };
   }
   const run = discovered.run;
+  if (recovery) {
+    for (const key of ["runId", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"])
+      if (run[key] !== expected[key]) throw new Error("recovery registry owner differs");
+    const original = await call(controllerURL, "attest", { runId: run.runId });
+    verifyAttestationIdentity(original, expected);
+    if (!original.finalizingAt) throw new Error("recovery owner is not already finalizing");
+  }
   const relayWorker = relayNameForRun(run.runId);
   let failure;
   let firstAttestation;
@@ -2420,7 +2729,8 @@ async function cleanupRun({
         run.candidateSha !== expected.candidateSha ||
         run.candidateWorker !== expected.candidateWorker ||
         run.deploymentHash !== expected.deploymentHash ||
-        run.expiresAt !== expected.expiresAt
+        run.expiresAt !== expected.expiresAt ||
+        Boolean(run.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly)
       ) {
         throw new Error("authority registry identity does not match protected expectations");
       }
@@ -2433,10 +2743,10 @@ async function cleanupRun({
     // Persist the authority fence before revoking ingress. Requests already admitted
     // by the relay can then reach neither the signer nor a reopened run.
     await cf.verifyController();
-    await controllerCall(cf, controllerURL, token, "begin-finalization", { runId: run.runId });
+    await call(controllerURL, "begin-finalization", { runId: run.runId });
     await deleteRelay(cf, relayWorker);
-    await controllerCall(cf, controllerURL, token, "finalize", { runId: run.runId });
-    firstAttestation = await controllerCall(cf, controllerURL, token, "attest", {
+    await call(controllerURL, "finalize", { runId: run.runId });
+    firstAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
     });
     if (requireProof) {
@@ -2444,17 +2754,18 @@ async function cleanupRun({
         verifyAttestationIdentity(firstAttestation, expected, { finalized: true });
         verifyQualificationEvidence(
           firstAttestation,
-          readExecutionProof(),
+          expected?.keyAuthorizationOnly ? {} : readExecutionProof(),
           expected?.retainedImage,
           expected?.firstWalk,
+          expected?.keyAuthorizationOnly,
         );
       } catch (error) {
         recordQualificationFailure(error);
       }
     }
     await deleteCandidate(cf, run.candidateWorker);
-    await controllerCall(cf, controllerURL, token, "finalize", { runId: run.runId });
-    const finalAttestation = await controllerCall(cf, controllerURL, token, "attest", {
+    await call(controllerURL, "finalize", { runId: run.runId });
+    const finalAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
     });
     if (
@@ -2463,6 +2774,16 @@ async function cleanupRun({
     ) {
       throw new Error("authority did not attest zero AWS residue");
     }
+    if (recovery) {
+      verifyAttestationIdentity(finalAttestation, expected, { finalized: true });
+      if (
+        canonical(finalAttestation.finalReceipt?.finalCounts) !==
+          canonical({ images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 }) ||
+        finalAttestation.finalReceipt?.failureCodes?.length
+      )
+        throw new Error("recovery final receipt is incomplete");
+      await recovery.checkpoint("finalized", finalAttestation);
+    }
     if (requireProof) {
       try {
         verifyAttestationIdentity(finalAttestation, expected, { finalized: true });
@@ -2470,11 +2791,13 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
-    await controllerCall(cf, controllerURL, token, "retire", { runId: run.runId });
-    const after = await controllerCall(cf, controllerURL, token, "discover");
+    await call(controllerURL, "retire", { runId: run.runId });
+    const after = await call(controllerURL, "discover");
     if (after.run !== null) throw new Error("authority registry still has an active run");
+    if (recovery) await recovery.checkpoint("retired", finalAttestation);
     await cf.verifyController();
     await cf.deleteScript(controllerName);
+    if (recovery) await recovery.verifyAbsentCallers();
     if (qualificationFailure) {
       return {
         result: "failed",
@@ -2502,6 +2825,47 @@ async function cleanupRun({
   }
 }
 
+// Only the dedicated transition owner supplies this dependency; normal reaper,
+// deployment and candidate paths never admit a second identity record.
+export async function recoverActiveQualification(recovery, expected) {
+  return await cleanupRun({ recovery, expected });
+}
+
+// Read through the existing, authenticated original controller. Never create a
+// caller or enable a hostname while deciding whether cleanup issuance is safe.
+export async function observeRecoveryOwner({ callerCF, authorityCF, token }, expected) {
+  const domain = await callerCF.request("/workers/subdomain");
+  const exposure = await callerCF.request(`/workers/scripts/${controllerName}/subdomain`);
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain?.subdomain ?? "") ||
+    exposure?.enabled !== true ||
+    exposure.previews_enabled !== false
+  )
+    throw new Error("original recovery controller is unavailable");
+  const url = `https://${controllerName}.${domain.subdomain}.workers.dev`;
+  const discovered = await controllerCall(callerCF, url, token, "discover", {}, authorityCF);
+  for (const key of ["runId", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"])
+    if (discovered?.run?.[key] !== expected[key])
+      throw new Error("original recovery registry owner differs");
+  const attestation = await controllerCall(
+    callerCF,
+    url,
+    token,
+    "attest",
+    { runId: expected.runId },
+    authorityCF,
+  );
+  verifyAttestationIdentity(attestation, expected);
+  const finalizing = Date.parse(attestation.finalizingAt ?? "");
+  if (
+    attestation.finalized !== false ||
+    !Number.isFinite(finalizing) ||
+    finalizing < Date.parse(attestation.enrolledAt)
+  )
+    throw new Error("original recovery owner is not awaiting finalization");
+  return attestation;
+}
+
 function readExecutionProof() {
   const directory = process.env.QUALIFICATION_EXECUTION_PROOF_DIR?.trim();
   if (!directory || !fs.existsSync(directory))
@@ -2516,11 +2880,20 @@ function readExecutionProof() {
       throw new Error("execution proof checksum mismatch");
     }
   }
-  if (process.env.QUALIFICATION_MODE === "first-walk")
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
+    // A failed executor may stop before either observation file exists. Keep
+    // this a qualification failure; cleanupRun still exports its independent
+    // authoritative cleanup evidence and settles every admitted resource.
+    if (
+      !fs.existsSync(path.join(directory, "first-walk.json")) ||
+      !fs.existsSync(path.join(directory, "first-walk-result.json"))
+    )
+      throw new Error("first-walk observation unavailable: execution proof is incomplete");
     return {
       ...readJSON(path.join(directory, "first-walk.json")),
       result: readJSON(path.join(directory, "first-walk-result.json")),
     };
+  }
   return {
     spoof: readJSON(path.join(directory, "spoofed-admin.json")),
     fsr: readJSON(path.join(directory, "fsr-denial.json")),
@@ -2560,7 +2933,45 @@ export function verifyFirstWalkPreparation(prepared) {
     throw new Error("fixed source preparation did not qualify");
 }
 
-export function verifyQualificationEvidence(attestation, proof, retainedImage, firstWalk = false) {
+export function verifyQualificationEvidence(
+  attestation,
+  proof,
+  retainedImage,
+  firstWalk = false,
+  keyAuthorizationOnly = false,
+) {
+  if (keyAuthorizationOnly) {
+    const checks = attestation?.authorizationChecks;
+    const counts = attestation?.finalReceipt?.finalCounts;
+    const expectedProbes = [
+      "tags-restated",
+      ...Array.from({ length: 4 }, (_, i) => [
+        `tag-missing-${i}`,
+        `tag-changed-${i}`,
+        `tag-removed-${i}`,
+      ]).flat(),
+    ];
+    if (
+      !counts ||
+      Object.keys(counts).sort().join(",") !== "images,instances,keyPairs,snapshots,volumes" ||
+      attestation?.keyAuthorizationOnly !== true ||
+      !attestation.finalized ||
+      !Array.isArray(checks) ||
+      checks.length !== 13 ||
+      checks.some(
+        (c, i) =>
+          c.probe !== expectedProbes[i] ||
+          c.outcome !== "passed" ||
+          c.action !== (i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags") ||
+          c.code !== (i === 0 ? "DryRunOperation" : "UnauthorizedOperation"),
+      ) ||
+      attestation?.operations?.length !== 1 ||
+      attestation.operations[0].action !== "ImportKeyPair" ||
+      Object.values(attestation?.finalReceipt?.finalCounts ?? {}).some(Number)
+    )
+      throw new Error("key-only diagnostic or complete settlement is unverified");
+    return;
+  }
   if (firstWalk) {
     const operations = attestation?.operations ?? [];
     const receipt = attestation?.finalReceipt;
@@ -2820,14 +3231,14 @@ async function main() {
     return;
   }
   if (command === "first-walk-recipe") {
-    if (args.length !== 2 || process.env.QUALIFICATION_MODE !== "first-walk") {
+    if (args.length !== 2 || !privateQualificationMode(process.env.QUALIFICATION_MODE)) {
       throw new Error("first-walk-recipe requires first-walk mode and two arguments");
     }
     stageFirstWalkRecipe(path.resolve(args[0]), path.resolve(args[1]));
     return;
   }
   if (command === "prepare-build") {
-    if (args.length !== (process.env.QUALIFICATION_MODE === "first-walk" ? 4 : 3))
+    if (args.length !== (privateQualificationMode(process.env.QUALIFICATION_MODE) ? 4 : 3))
       throw new Error("prepare-build requires source checkouts and receipt");
     prepareCandidateBuild(
       path.resolve(args[0]),

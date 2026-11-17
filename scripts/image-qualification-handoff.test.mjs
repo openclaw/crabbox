@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
+
 import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
 
@@ -15,8 +16,10 @@ const encodeExecutorCredential = (value) =>
 // its entrypoint deliberately runs when argv names the control script.
 let canonical;
 let digest;
+let verifyQualificationEvidence;
 if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
-  ({ canonical, digest } = await import("./image-qualification-control.mjs"));
+  ({ canonical, digest, verifyQualificationEvidence } =
+    await import("./image-qualification-control.mjs"));
 }
 
 import {
@@ -58,6 +61,8 @@ function installAPI(file) {
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(input);
     const method = init.method ?? "GET";
+    if (url.hostname === "api.cloudflare.com" && method === "DELETE")
+      assert.equal(url.search, "", "all deletion must preserve dependency checks");
     const route = url.pathname;
     state.events.push(`${method} ${url.hostname}${route}`);
     if (url.hostname === "api.github.com") {
@@ -69,6 +74,13 @@ function installAPI(file) {
         });
       }
       if (route.endsWith("/commits/main")) return json({ sha: workflowSha });
+      if (route === `/repos/example/repo/compare/${candidateSha}...${workflowSha}`) {
+        return json({
+          status: "ahead",
+          base_commit: { sha: candidateSha },
+          merge_base_commit: { sha: state.rejectSource ? "0".repeat(40) : candidateSha },
+        });
+      }
       if (route.endsWith("/actions/runs/42")) {
         return json({
           id: 42,
@@ -98,6 +110,11 @@ function installAPI(file) {
     if (url.hostname.endsWith(".example.workers.dev")) {
       if (route === "/transport-open") {
         state.probe = { protocol: 1, ...JSON.parse(init.body), state: "pending" };
+        if (state.controllerHTML)
+          return new Response("<!DOCTYPE html>synthetic-private-response-secret", {
+            status: state.controllerHTML,
+            headers: { "content-type": "text/html", "cf-ray": "0123456789abcdef-DFW" },
+          });
         return json(state.probe);
       }
       if (route === "/transport-discover") return json({ probe: state.probe ?? null });
@@ -114,6 +131,11 @@ function installAPI(file) {
           state.probe.observedAt = new Date(state.now).toISOString();
         }
         return json({ identity: state.probe.identity, challenge: state.probe.challenge });
+      }
+      if (route === "/key-authorization") {
+        assert.equal(state.identity.keyAuthorizationOnly, true);
+        state.keyAuthorization = true;
+        return json({ passed: true, checks: 13 });
       }
       if (route === "/claim") {
         if (state.probe) assert.equal(state.probe.state, "verified");
@@ -150,6 +172,8 @@ function installAPI(file) {
           policyHash,
           enrolledAt: state.enrolledAt,
           finalized: state.finalized ?? false,
+          ...(state.finalizing ? { finalizingAt: new Date(state.now).toISOString() } : {}),
+          ...(state.finalized ? { finalizedAt: new Date(state.now).toISOString() } : {}),
           ...(state.finalized ? { finalReceipt: { finalCounts: { instances: 0 } } } : {}),
         });
       }
@@ -174,6 +198,9 @@ function installAPI(file) {
           throw new Error(
             `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
           );
+        const isRelay = name.startsWith("crabbox-image-qualification-relay-");
+        if (isRelay && state.relayFault === "put-before")
+          throw new Error("relay upload failed before create");
         const metadata = JSON.parse(await init.body.get("metadata").text());
         // Validate the wire format, rather than accepting Wrangler config here.
         // The upload API takes one migration object; config uses an array.
@@ -183,6 +210,9 @@ function installAPI(file) {
             new_sqlite_classes: ["FleetDurableObject"],
           });
         } else if (metadata.main_module === "tombstone.mjs") {
+          state.tombstoneUploads = (state.tombstoneUploads ?? 0) + 1;
+          assert.deepEqual(metadata.keep_bindings, ["secret_text"]);
+          assert.ok(!metadata.bindings.some((b) => b.type === "secret_text"));
           assert.deepEqual(metadata.migrations, {
             old_tag: "qualification-v1",
             new_tag: "qualification-delete",
@@ -208,25 +238,188 @@ function installAPI(file) {
           });
         }
         state.workers[name] = {
-          metadata,
+          metadata: {
+            ...metadata,
+            bindings: [
+              ...metadata.bindings.map((b) => {
+                if (b.type !== "secret_text") return b;
+                const { text, ...shape } = b;
+                return shape;
+              }),
+              ...(state.workers[name]?.metadata.bindings ?? []).filter(
+                (b) =>
+                  b.type === "secret_text" && !metadata.bindings.some((n) => n.name === b.name),
+              ),
+            ],
+          },
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
         if (metadata.main_module === "private-bootstrap.mjs" && state.failPrivateUpload === "after")
           throw new Error("private upload response lost after create");
+        if (state.tombstoneDrift && metadata.main_module === "tombstone.mjs")
+          state.workers[name].metadata.bindings.push({
+            name: "UNEXPECTED_SECRET",
+            type: "secret_text",
+          });
         if (state.tombstoneLoss && metadata.main_module === "tombstone.mjs") {
           state.tombstoneLoss = false;
           throw new Error("tombstone upload response lost");
         }
         if (state.uploadDelay) state.now += state.uploadDelay;
-        return api({ deployment_id: workerVersion });
+        if (isRelay && state.relayFault === "put-lost")
+          throw new Error("relay upload response lost after create");
+        return api({
+          deployment_id: isRelay && state.relayFault === "ack-invalid" ? "invalid" : workerVersion,
+        });
       }
       if (!suffix && method === "DELETE") {
         delete state.workers[name];
         return api({});
       }
+      const relayRead =
+        name.startsWith("crabbox-image-qualification-relay-") &&
+        state.workers[name] &&
+        method === "GET" &&
+        ["/settings", "/deployments"].includes(suffix);
+      if (relayRead && state.relayFault) {
+        state.relayReads ??= {};
+        state.relayReads[suffix] = (state.relayReads[suffix] ?? 0) + 1;
+        const count = state.relayReads[suffix];
+        const fault = state.relayFault;
+        if (fault === "404-both" && count === 1) return api(null, 404);
+        if (fault === "404-settings" && suffix === "/settings" && count === 1)
+          return api(null, 404);
+        if (fault === "404-deployments" && suffix === "/deployments" && count === 1)
+          return api(null, 404);
+        if (fault === "404-persistent") return api(null, 404);
+        if (fault === "404-settings-wrong-version" && suffix === "/settings") return api(null, 404);
+        if (fault === "empty-deployments-settings404" && suffix === "/settings" && count === 1)
+          return api(null, 404);
+        if (suffix === "/deployments") {
+          const empty =
+            [
+              "empty-deployments",
+              "empty-deployments-items",
+              "empty-deployments-array",
+              "empty-deployments-settings404",
+              "empty-then-wrong-version",
+              "empty-cancel-backoff",
+              "empty-deadline",
+            ].includes(fault) && count === 1;
+          if (empty || fault === "empty-deployments-persistent") {
+            if (fault === "empty-cancel-backoff") setTimeout(() => process.emit("SIGTERM"), 25);
+            if (fault === "empty-deadline") state.now += 10_000;
+            if (fault === "empty-deployments-array") return api([]);
+            return api({
+              [fault === "empty-deployments-items" ? "items" : "deployments"]: [],
+              ignored: "provider-field-must-not-be-retained",
+            });
+          }
+          if (fault === "empty-then-wrong-version")
+            return api({
+              deployments: [
+                {
+                  versions: [
+                    { version_id: "22222222-2222-4222-8222-222222222222", percentage: 100 },
+                  ],
+                },
+              ],
+            });
+          if (
+            [
+              "wrong-traffic",
+              "multiple-versions",
+              "malformed-version-id",
+              "malformed-versions",
+            ].includes(fault)
+          ) {
+            const versions = [
+              {
+                version_id:
+                  fault === "malformed-version-id"
+                    ? "provider-field-must-not-be-retained"
+                    : workerVersion,
+                percentage: fault === "wrong-traffic" ? 50 : 100,
+                ignored: "provider-field-must-not-be-retained",
+              },
+            ];
+            if (fault === "multiple-versions")
+              versions.push(...structuredClone(versions), ...structuredClone(versions));
+            return api({
+              deployments: [
+                {
+                  id: "provider-field-must-not-be-retained",
+                  versions:
+                    fault === "malformed-versions" ? { 0: versions[0], length: 1 } : versions,
+                  ignored: "provider-field-must-not-be-retained",
+                },
+              ],
+            });
+          }
+        }
+        if (fault === "wrong-version" || fault === "404-settings-wrong-version") {
+          if (suffix === "/deployments")
+            return api({
+              deployments: [
+                {
+                  versions: [
+                    { version_id: "22222222-2222-4222-8222-222222222222", percentage: 100 },
+                  ],
+                },
+              ],
+            });
+        }
+        if (suffix === "/settings") {
+          if (fault === "denied") return api(null, 403);
+          if (fault === "unauthorized") return api(null, 401);
+          if (fault === "server-error") return api(null, 503);
+          if (fault === "malformed-json") return new Response("not JSON");
+          if (fault === "oversize") return new Response("x".repeat(70 * 1024));
+          if (fault === "malformed-settings") return api({ tags: [], bindings: null });
+          if (fault === "deadline") state.now += 10_000;
+          if (fault === "clipped-deadline") state.now += 1001;
+          if (fault === "cancel") process.emit("SIGTERM");
+          if (fault === "cancel-backoff") {
+            setTimeout(() => process.emit("SIGTERM"), 25);
+            return api(null, 404);
+          }
+          if (fault === "cancel-body")
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  const cancel = () => controller.error(init.signal.reason);
+                  init.signal.addEventListener("abort", cancel, { once: true });
+                  setTimeout(() => process.emit("SIGTERM"), 25);
+                },
+              }),
+            );
+          if (fault === "hung-fetch")
+            return await new Promise((resolve, reject) => {
+              assert(init.signal, "readback must bound requests");
+              const keepAlive = setInterval(() => {}, 1000);
+              init.signal.addEventListener(
+                "abort",
+                () => {
+                  clearInterval(keepAlive);
+                  reject(init.signal.reason);
+                },
+                { once: true },
+              );
+            });
+        }
+        if (fault === "malformed-deployments" && suffix === "/deployments")
+          return api({ deployments: null, items: [] });
+      }
       if (suffix === "/settings") {
         if (!state.workers[name]) return api(null, 404);
         const metadata = structuredClone(state.workers[name].metadata);
+        if (state.tombstoneReadbackMismatch && metadata.main_module === "tombstone.mjs") {
+          state.tombstoneReadbackMismatch = false;
+          metadata.tags = [];
+        }
+        if (relayRead && state.relayFault === "ownership-drift") metadata.tags = [];
+        if (relayRead && state.relayFault === "binding-drift")
+          metadata.bindings.push({ name: "UNEXPECTED", type: "plain_text", text: "extra" });
         if (transportProfile(metadata.bindings))
           for (const binding of metadata.bindings) {
             if (binding.type === "service") {
@@ -302,7 +495,9 @@ function fixture(t, mode = "retained") {
     };
   });
   const capsuleSha256 = digest(canonical(sourceFiles));
-  const qualification = mode === "first-walk" ? qualificationIdentity(root) : undefined;
+  const qualification = ["first-walk", "key-authorization"].includes(mode)
+    ? qualificationIdentity(root)
+    : undefined;
   write("build-inputs.json", {
     version: qualification ? 2 : 1,
     ...(qualification ? { qualification } : {}),
@@ -322,7 +517,7 @@ function fixture(t, mode = "retained") {
       bakedInputsIdentical: true,
     });
   }
-  if (mode === "first-walk") {
+  if (["first-walk", "key-authorization"].includes(mode)) {
     write(
       "authority/aws-qualification-authority.js",
       "throw new Error('inert authority fixture');",
@@ -368,7 +563,7 @@ function fixture(t, mode = "retained") {
     GITHUB_RUN_ID: "42",
     GITHUB_RUN_ATTEMPT: "1",
     GITHUB_WORKFLOW_REF: "example/repo/.github/workflows/image-qualification.yml@refs/heads/main",
-    QUALIFICATION_PULL_REQUEST: "7",
+    QUALIFICATION_PULL_REQUEST: ["first-walk", "key-authorization"].includes(mode) ? "" : "7",
     QUALIFICATION_CANDIDATE_SHA: candidateSha,
     QUALIFICATION_WORKFLOW_SHA: workflowSha,
     QUALIFICATION_DEFAULT_BRANCH: "main",
@@ -401,12 +596,31 @@ function fixture(t, mode = "retained") {
         }
       : {}),
   };
+  // Protected environment variables persist across modes. Mint and retained
+  // admission/deploy/arm must ignore this first-walk-only descriptor.
+  env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify({
+    profile:
+      mode === "key-authorization"
+        ? "key-tag-authorization-aws-session/v1"
+        : "first-walk-aws-session/v1",
+    repository: env.GITHUB_REPOSITORY,
+    workflowSha,
+    candidateSha,
+    runId: "image-qualification-42-1",
+    candidateArtifactId: "9",
+    candidateArtifactDigest: env.QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST,
+    manifestSha256: digest(canonical(manifest)),
+    startsAt: new Date(state().now).toISOString(),
+    workExpiresAt: new Date(state().now + 130 * 60_000).toISOString(),
+    expiresAt: new Date(state().now + 150 * 60_000).toISOString(),
+    recoveryExpiresAt: new Date(state().now + 270 * 60_000).toISOString(),
+  });
   function invoke(command, overrides = {}) {
     const output = path.join(directory, `${command}.outputs`);
     fs.writeFileSync(output, "");
     const child = spawnSync(process.execPath, ["--import", import.meta.url, control, command], {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: 15_000,
       env: {
         ...env,
         ...(command !== "admit"
@@ -467,6 +681,234 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
+  for (const fault of [
+    "404-settings",
+    "404-deployments",
+    "404-both",
+    "404-persistent",
+    "empty-deployments",
+    "empty-deployments-items",
+    "empty-deployments-array",
+    "empty-deployments-settings404",
+    "empty-deployments-persistent",
+    "empty-then-wrong-version",
+    "empty-cancel-backoff",
+    "empty-deadline",
+    "404-settings-wrong-version",
+    "wrong-version",
+    "wrong-traffic",
+    "multiple-versions",
+    "malformed-version-id",
+    "malformed-versions",
+    "binding-drift",
+    "ownership-drift",
+    "denied",
+    "unauthorized",
+    "server-error",
+    "malformed-json",
+    "malformed-settings",
+    "malformed-deployments",
+    "oversize",
+    "deadline",
+    "clipped-deadline",
+    "cancel",
+    "cancel-backoff",
+    "cancel-body",
+    "hung-fetch",
+    "put-lost",
+    "put-before",
+    "ack-invalid",
+  ]) {
+    test(`relay acknowledged-upload readback: ${fault}`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ relayFault: fault });
+      if (fault === "clipped-deadline")
+        f.update({ now: Date.parse(f.prepared().workExpiresAt) - 61_000 });
+      const started = performance.now();
+      const deployed = f.invoke("deploy");
+      const elapsed = performance.now() - started;
+      const success = [
+        "404-settings",
+        "404-deployments",
+        "404-both",
+        "empty-deployments",
+        "empty-deployments-items",
+        "empty-deployments-array",
+        "empty-deployments-settings404",
+      ].includes(fault);
+      assert.equal(deployed.status, success ? 0 : 1, deployed.stderr);
+      const relay = "crabbox-image-qualification-relay-42-1";
+      const puts = () =>
+        f
+          .state()
+          .events.filter(
+            (event) =>
+              event ===
+              `PUT api.cloudflare.com/client/v4/accounts/${"0".repeat(32)}/workers/scripts/${relay}`,
+          ).length;
+      assert.equal(puts(), 1, "no create/upload replay");
+      const receiptPath = path.join(f.directory, "deploy-proof/relay-readback.json");
+      if (["put-lost", "put-before"].includes(fault)) {
+        assert.equal(
+          fs.existsSync(receiptPath),
+          false,
+          "uncertain PUT cannot enter acknowledged path",
+        );
+        assert.match(deployed.stderr, /relay upload/);
+      } else {
+        const receipt = JSON.parse(fs.readFileSync(receiptPath));
+        assert.equal(receipt.state, success ? "verified" : "unresolved");
+        assert.equal(receipt.upload.status, 200);
+        assert(receipt.reads.length <= 12);
+        if (fault !== "ack-invalid") assert.equal(receipt.acknowledgedVersion, workerVersion);
+        if (fault === "404-persistent") {
+          assert.equal(receipt.reads.length, 12);
+          assert(receipt.reads.every((r) => r.state === "http404" && r.response.status === 404));
+        } else if (fault === "empty-deployments-persistent") {
+          assert.equal(receipt.reads.length, 12);
+          const deployments = receipt.reads.filter((r) => r.endpoint === "deployments");
+          assert.equal(deployments.length, 6);
+          assert(
+            deployments.every(
+              (r) => r.response.status === 200 && r.deployment.classification === "empty",
+            ),
+          );
+          assert.match(deployed.stderr, /unresolved after six rounds/);
+        } else if (fault === "empty-then-wrong-version") {
+          assert.equal(receipt.reads.length, 4, "stop on the first nonempty mismatch");
+          assert.match(deployed.stderr, /active version differs/);
+        } else if (!success) {
+          assert(
+            receipt.reads.length <= 2,
+            "visible drift, denial, malformed data and cancellation fail immediately",
+          );
+        }
+        if (fault.startsWith("empty-") && fault !== "empty-deadline") {
+          assert.deepEqual(receipt.reads.find((r) => r.endpoint === "deployments").deployment, {
+            classification: "empty",
+            count: 0,
+          });
+          if (success) assert.equal(receipt.reads.at(-1).deployment.versions[0].id, workerVersion);
+        }
+        if (
+          [
+            "wrong-version",
+            "wrong-traffic",
+            "multiple-versions",
+            "malformed-version-id",
+            "malformed-versions",
+            "malformed-deployments",
+          ].includes(fault)
+        ) {
+          const summary = receipt.reads.at(-1).deployment;
+          assert(summary, "retain structural evidence before rejecting visible metadata");
+          if (fault === "wrong-version")
+            assert.equal(summary.versions[0].id, "22222222-2222-4222-8222-222222222222");
+          if (fault === "wrong-traffic") assert.equal(summary.versions[0].percentage, 50);
+          if (fault === "multiple-versions") assert.equal(summary.versionCount, 3);
+          if (fault === "malformed-version-id") assert.equal(summary.versions[0].id, null);
+          if (fault.startsWith("malformed-") && fault !== "malformed-version-id")
+            assert.equal(summary.classification, "malformed");
+        }
+        assert(
+          receipt.reads.every((r) => !r.deployment || (r.deployment.versions?.length ?? 0) <= 2),
+        );
+        assert.equal(
+          fs.existsSync(path.join(f.directory, "deploy-proof/relay-readback.lock")),
+          false,
+        );
+        if (fault === "denied") assert.equal(receipt.reads[0].response.status, 403);
+        const bytes = fs.readFileSync(receiptPath, "utf8");
+        for (const secret of [
+          "synthetic-cloudflare-token",
+          "synthetic-controller-token",
+          "6".repeat(64),
+          "provider-field-must-not-be-retained",
+        ])
+          assert(!bytes.includes(secret), "receipt must not contain credentials");
+        if (fault === "hung-fetch") {
+          assert(elapsed >= 9500 && elapsed < 13_000, `request timeout elapsed ${elapsed}`);
+          assert.equal(receipt.reads.length, 1);
+        }
+      }
+      if (!success)
+        assert.equal(f.state().identity, undefined, "no authority claim on unresolved readback");
+      if (fault === "404-persistent") {
+        const refused = f.invoke("reap");
+        assert.equal(refused.status, 1);
+        assert(f.state().workers[relay], "unknown ownership must still block deletion");
+      }
+      // Explicit restoration of metadata in this model, never a live cause claim.
+      f.update({ relayFault: undefined });
+      const settled = f.invoke("reap");
+      assert.equal(settled.status, 0, settled.stderr);
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+      assert.equal(puts(), 1);
+    });
+  }
+
+  test("exhausted readback reserve refuses relay upload and remains recoverable", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    f.update({ now: Date.parse(f.prepared().workExpiresAt) - 60_000 });
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 1);
+    assert.match(deployed.stderr, /subsequent-gate reserve/);
+    assert(
+      !f.state().events.some((event) => event.startsWith("PUT ") && event.includes("relay-42-1")),
+    );
+    assert.equal(f.state().identity, undefined);
+    const settled = f.invoke("reap");
+    assert.equal(settled.status, 0, settled.stderr);
+    assert.deepEqual(f.state().workers, {});
+  });
+
+  test("first-walk source-admission failure still fences and settles the admitted run", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    assert.equal(f.invoke("deploy").status, 0);
+    assert.equal(f.invoke("arm", f.armEnv()).status, 0);
+    assert.ok(f.state().events.every((event) => !event.includes("/pulls/")));
+    f.update({ rejectSource: true });
+    const result = f.invoke("finalize", f.armEnv());
+    assert.equal(result.status, 1, "admission drift must remain qualification failure");
+    assert.match(result.stderr, /source admission/);
+    assert.equal(f.state().finalized, true);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
+    assert.ok(f.state().events.some((event) => event.endsWith("/begin-finalization")));
+  });
+
+  for (const missing of ["first-walk.json", "first-walk-result.json"])
+    test(`missing ${missing} fails observation while preserving complete cleanup evidence`, (t) => {
+      const f = fixture(t, "first-walk");
+      assert.equal(f.invoke("admit").status, 0);
+      assert.equal(f.invoke("deploy").status, 0);
+      assert.equal(f.invoke("arm", f.armEnv()).status, 0);
+      const execution = path.join(f.directory, "execution-proof");
+      fs.mkdirSync(execution);
+      const present = missing === "first-walk.json" ? "first-walk-result.json" : "first-walk.json";
+      fs.writeFileSync(path.join(execution, present), "{}");
+      fs.writeFileSync(path.join(execution, "checksums.sha256"), `${digest("{}")}  ./${present}\n`);
+      const result = f.invoke("finalize", {
+        ...f.armEnv(),
+        QUALIFICATION_EXECUTION_PROOF_DIR: execution,
+      });
+      assert.equal(result.status, 1, "missing observation must never pass qualification");
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "finalize-proof/finalization.json")),
+      );
+      assert.equal(receipt.result, "failed");
+      assert.match(receipt.failure, /first-walk observation unavailable/);
+      assert.equal(receipt.cleanup, "finalized");
+      assert.equal(receipt.attestation.finalized, true);
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+    });
+
   for (const phase of ["before", "after"])
     test(`failed private upload ${phase} create settles with empty deploy outputs`, (t) => {
       const f = fixture(t, "first-walk");
@@ -537,7 +979,7 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.deepEqual(f.state().workers, {});
     });
 
-  for (const mode of ["retained", "mint", "first-walk"]) {
+  for (const mode of ["retained", "mint", "first-walk", "key-authorization"]) {
     test(`${mode} CLI publishes one immutable handoff before deployment and preserves it through arm`, (t) => {
       const f = fixture(t, mode);
       const admitted = f.invoke("admit");
@@ -554,9 +996,13 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
       assert.equal(
         Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt),
-        (mode === "first-walk" ? 150 : mode === "retained" ? 38 : 120) * 60_000,
+        (["first-walk", "key-authorization"].includes(mode)
+          ? 150
+          : mode === "retained"
+            ? 38
+            : 120) * 60_000,
       );
-      if (mode === "first-walk")
+      if (["first-walk", "key-authorization"].includes(mode))
         assert.equal(
           Date.parse(handoff.expiresAt) - Date.parse(handoff.workExpiresAt),
           20 * 60_000,
@@ -606,6 +1052,15 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       const armed = f.invoke("arm", f.armEnv());
       assert.equal(armed.status, 0, armed.stderr);
       assert.deepEqual(f.prepared(), handoff);
+      if (mode === "key-authorization") {
+        assert.equal(f.state().keyAuthorization, true);
+        assert.equal(f.state().identity.keyAuthorizationOnly, true);
+        assert.equal(f.prepared().mode, "key-authorization");
+        assert.equal(
+          fs.existsSync(path.join(f.directory, "arm-proof/key-authorization.json")),
+          true,
+        );
+      }
     });
   }
 
@@ -820,7 +1275,8 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       });
       const result = f.invoke("arm", f.armEnv());
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /work window is not active/);
+      assert.match(result.stderr, /qualification controller request failed/);
+      assert.match(result.stderr, /"action":"attest","reason":"deadline"/);
       assert.equal(
         fs.existsSync(path.join(f.directory, "arm-proof", "execution-manifest.json")),
         false,
@@ -867,9 +1323,141 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.match(first.stderr, /tombstone upload response lost/);
     const partial = f.state().workers["crabbox-image-qualification-42-1"].metadata;
     assert.equal(partial.main_module, "tombstone.mjs");
+    assert.deepEqual(
+      partial.bindings.filter((b) => b.type === "secret_text"),
+      [
+        { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text" },
+        { name: "CRABBOX_SHARED_TOKEN", type: "secret_text" },
+      ],
+    );
     assert.equal(partial.bindings[0].props.deploymentHash, f.outputs.deployment_hash);
     const recovered = f.invoke("reap");
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.deepEqual(f.state().workers, {});
   });
 }
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("a transient tombstone identity mismatch fails closed and recovers without replay", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneReadbackMismatch: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /unowned or changed Worker/);
+    const partial = f.state();
+    assert.equal(partial.finalized, true);
+    assert.ok(partial.workers["crabbox-image-qualification-42-1"]);
+    assert.equal(partial.tombstoneUploads, 1);
+    const recovered = f.invoke("reap");
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(f.state().tombstoneUploads, 1);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
+  });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("normal cleanup refuses binding drift returned by tombstone upload", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneDrift: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /unowned or changed Worker/);
+    assert.ok(f.state().workers["crabbox-image-qualification-42-1"]);
+    assert.ok(
+      !f
+        .state()
+        .events.includes(
+          "DELETE api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/workers/scripts/crabbox-image-qualification-42-1",
+        ),
+    );
+  });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  for (const status of [200, 503]) {
+    test(`non-JSON transport-open ${status} retains sanitized failure and recovers without replay`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ controllerHTML: status });
+      const deployed = f.invoke("deploy");
+      assert.equal(deployed.status, 1);
+      assert.match(deployed.stderr, /qualification controller request failed/);
+      assert(!deployed.stderr.includes("synthetic-private-response-secret"));
+      const directory = path.join(f.directory, "deploy-proof");
+      const failures = fs
+        .readdirSync(directory)
+        .filter((name) => /^controller-http-failure-.*\.json$/.test(name));
+      assert.equal(failures.length, 1);
+      const receipt = JSON.parse(fs.readFileSync(path.join(directory, failures[0]), "utf8"));
+      assert.equal(receipt.action, "transport-open");
+      assert.equal(receipt.status, status);
+      assert.equal(receipt.bodyFormat, "html");
+      assert.equal(receipt.ray, "0123456789abcdef-DFW");
+      const custody = JSON.parse(
+        fs.readFileSync(path.join(directory, "transport-custody/transport-state.json"), "utf8"),
+      );
+      assert.equal(custody.phase, "opening");
+      assert.equal(f.state().identity, undefined);
+      assert(
+        !f.state().events.some((event) => event.endsWith("/v1/qualification/transport-probe")),
+      );
+      const opens = f.state().events.filter((event) => event.endsWith("/transport-open")).length;
+      assert.equal(opens, 1);
+      const recovered = f.invoke("reap");
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(f.state().probe.state, "cancelled");
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(
+        f.state().events.filter((event) => event.endsWith("/transport-open")).length,
+        opens,
+      );
+    });
+  }
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
+  test("key-only result requires all fixed probes and explicit complete settlement", () => {
+    const probes = [
+      "tags-restated",
+      ...Array.from({ length: 4 }, (_, i) => [
+        `tag-missing-${i}`,
+        `tag-changed-${i}`,
+        `tag-removed-${i}`,
+      ]).flat(),
+    ];
+    const a = {
+      keyAuthorizationOnly: true,
+      finalized: true,
+      operations: [{ action: "ImportKeyPair" }],
+      finalReceipt: {
+        finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+      },
+      authorizationChecks: probes.map((probe, i) => ({
+        probe,
+        outcome: "passed",
+        action: i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags",
+        code: i === 0 ? "DryRunOperation" : "UnauthorizedOperation",
+      })),
+    };
+    assert.doesNotThrow(() => verifyQualificationEvidence(a, {}, undefined, true, true));
+    for (const change of [
+      (x) => delete x.finalReceipt.finalCounts,
+      (x) => x.finalReceipt.finalCounts.volumes++,
+      (x) => x.authorizationChecks.pop(),
+      (x) => (x.authorizationChecks[1].code = "DryRunOperation"),
+      (x) => (x.authorizationChecks[1].probe = "selected-probe"),
+      (x) => (x.keyAuthorizationOnly = false),
+    ]) {
+      const b = structuredClone(a);
+      change(b);
+      assert.throws(() => verifyQualificationEvidence(b, {}, undefined, true, true));
+    }
+  });

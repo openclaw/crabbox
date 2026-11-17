@@ -4,12 +4,12 @@ index 948b3602b0d1b6c53ad8c66618e9f28d1c5e30c2..53f38fad0bd86c15ee25ccd5c60aa851
 +++ b/internal/cli/bootstrap_generated.go
 @@ -80,7 +80,7 @@ func sharedLinuxSSHRestart() string {
  }
- 
+
  func sharedLinuxOwnershipRepair(user string, roots []string) string {
 -	return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - " + bootstrapShellQuote(user) + " " + bootstrapQuoteWords(roots, bootstrapShellQuote, " ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\n\nuid = pwd.getpwnam(sys.argv[1]).pw_uid\ngid = grp.getgrnam(sys.argv[1]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\ndef repair(name, directory_fd):\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    if info.st_uid != uid or info.st_gid != gid:\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nfor root in sys.argv[2:]:\n    parent, name = os.path.split(root)\n    parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n    stack = []\n    try:\n        if repair(name or \".\", parent_fd):\n            stack.append(descend(name or \".\", parent_fd))\n        # An explicit stack also supports trees deeper than Python's recursion limit.\n        while stack:\n            directory_fd, iterator = stack[-1]\n            entry = next(iterator, None)\n            if entry is None:\n                iterator.close()\n                os.close(directory_fd)\n                stack.pop()\n            elif repair(entry.name, directory_fd):\n                stack.append(descend(entry.name, directory_fd))\n    finally:\n        for directory_fd, iterator in reversed(stack):\n            iterator.close()\n            os.close(directory_fd)\n        os.close(parent_fd)\nCRABBOX_OWNERSHIP\n"
 +	return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\n# The fixed argv label lets read-only observers distinguish this child from other Python.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 " + bootstrapShellQuote(user) + " " + bootstrapQuoteWords(roots, bootstrapShellQuote, " ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\nimport time\n\nuid = pwd.getpwnam(sys.argv[2]).pw_uid\ngid = grp.getgrnam(sys.argv[2]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\nvisited = mismatched = changed = 0\n\ndef repair(name, directory_fd):\n    global visited, mismatched, changed\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    visited += 1\n    if info.st_uid != uid or info.st_gid != gid:\n        mismatched += 1\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n        changed += 1\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nstarted = time.monotonic()\nstate = \"failed\"\nprint(\"crabbox ownership-repair state=started\", flush=True)\ntry:\n    for root in sys.argv[3:]:\n        parent, name = os.path.split(root)\n        parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n        stack = []\n        try:\n            if repair(name or \".\", parent_fd):\n                stack.append(descend(name or \".\", parent_fd))\n            # An explicit stack also supports trees deeper than Python's recursion limit.\n            while stack:\n                directory_fd, iterator = stack[-1]\n                entry = next(iterator, None)\n                if entry is None:\n                    iterator.close()\n                    os.close(directory_fd)\n                    stack.pop()\n                elif repair(entry.name, directory_fd):\n                    stack.append(descend(entry.name, directory_fd))\n        finally:\n            for directory_fd, iterator in reversed(stack):\n                iterator.close()\n                os.close(directory_fd)\n            os.close(parent_fd)\n    state = \"complete\"\nfinally:\n    # Counts come from this walk, without another inventory or persistent readiness state.\n    print(f\"crabbox ownership-repair state={state} visited={visited} mismatched={mismatched} changed={changed} elapsed_seconds={time.monotonic() - started:.3f}\", flush=True)\nCRABBOX_OWNERSHIP\n"
  }
- 
+
  func sharedLinuxOptionalPackages() string {
 diff --git a/internal/cli/bootstrap_ownership_linux_test.go b/internal/cli/bootstrap_ownership_linux_test.go
 index 3c9dc0038fa4978ca303649ac3fa602c2b33103a..ac0d1a3f62281efaa6d116a06af829e133c8a038 100644
@@ -17,7 +17,7 @@ index 3c9dc0038fa4978ca303649ac3fa602c2b33103a..ac0d1a3f62281efaa6d116a06af829e1
 +++ b/internal/cli/bootstrap_ownership_linux_test.go
 @@ -1,9 +1,11 @@
  package cli
- 
+
  import (
 +	"fmt"
  	"os"
@@ -30,7 +30,7 @@ index 3c9dc0038fa4978ca303649ac3fa602c2b33103a..ac0d1a3f62281efaa6d116a06af829e1
 @@ -38,15 +40,17 @@ func ownershipEntries(t *testing.T, root string) map[string]ownershipMetadata {
  	return result
  }
- 
+
 -func runOwnershipBlock(t *testing.T, work, cache string) {
 +func runOwnershipBlock(t *testing.T, work, cache string) string {
  	t.Helper()
@@ -45,7 +45,7 @@ index 3c9dc0038fa4978ca303649ac3fa602c2b33103a..ac0d1a3f62281efaa6d116a06af829e1
  	}
 +	return string(out)
  }
- 
+
  func TestCloudInitOwnershipFilesystem(t *testing.T) {
 @@ -99,7 +103,15 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
  				paths[path] = ownershipStat(t, path)
@@ -122,7 +122,7 @@ index 014ce814a2708aef7d591a0e53ea84d1b9a9ca4f..70bc0ebdddaf3f9f6d24f3ce6f0ad3dd
  import stat
  import sys
 +import time
- 
+
 -uid = pwd.getpwnam(sys.argv[1]).pw_uid
 -gid = grp.getgrnam(sys.argv[1]).gr_gid
 +uid = pwd.getpwnam(sys.argv[2]).pw_uid
@@ -133,7 +133,7 @@ index 014ce814a2708aef7d591a0e53ea84d1b9a9ca4f..70bc0ebdddaf3f9f6d24f3ce6f0ad3dd
 @@ -17,10 +19,16 @@ soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
  if soft_limit != hard_limit:
      resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))
- 
+
 +visited = mismatched = changed = 0
 +
  def repair(name, directory_fd):
@@ -145,12 +145,12 @@ index 014ce814a2708aef7d591a0e53ea84d1b9a9ca4f..70bc0ebdddaf3f9f6d24f3ce6f0ad3dd
          os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)
 +        changed += 1
      return stat.S_ISDIR(info.st_mode)
- 
+
  def descend(name, parent_fd):
 @@ -31,26 +39,34 @@ def descend(name, parent_fd):
          os.close(directory_fd)
          raise
- 
+
 -for root in sys.argv[2:]:
 -    parent, name = os.path.split(root)
 -    parent_fd = os.open(parent or ".", os.O_RDONLY | os.O_DIRECTORY)
@@ -477,13 +477,15 @@ index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c76
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d6b519ad7 100644
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..ecc5e1f6bb98e771a2e9224ab15b1a0138cd5529 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
-@@ -2,14 +2,30 @@ import { AwsClient } from "aws4fetch";
+@@ -1,15 +1,32 @@
+ import { AwsClient } from "aws4fetch";
  import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
- import { XMLParser } from "fast-xml-parser";
- 
+-import { XMLParser } from "fast-xml-parser";
++import { XMLParser, XMLValidator } from "fast-xml-parser";
+
 +import {
 +  parseQualificationNetwork,
 +  verifyQualificationGuest,
@@ -507,11 +509,12 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    awsQualificationRetainedRootGB,
    awsQualificationRetainedRunMs,
    type AWSQualificationAttestation,
++  type AWSQualificationAuthorizationCheck,
 +  type AWSQualificationBindingIdentity,
    type AWSQualificationControllerProps,
    type AWSQualificationFinalReceipt,
    type AWSQualificationOperationEvidence,
-@@ -19,6 +35,12 @@ import {
+@@ -19,6 +36,12 @@ import {
    type AWSQualificationResponse,
    type AWSQualificationRunIdentity,
    type AWSQualificationService,
@@ -524,7 +527,28 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
  } from "./aws-qualification-contract";
  import { requireAWSRegion } from "./aws-region";
  import { sha256Hex } from "./encoding";
-@@ -61,7 +83,7 @@ const parser = new XMLParser({
+@@ -50,6 +73,20 @@ const maxCleanupEvidence = 1024;
+ const maxInventoryEvidence = 2048;
+ const maxVerificationEvidence = 1024;
+ const maxRegistryRetirements = 64;
++const authorizationChecksKey = "authorization-checks";
++// Private correlation metadata is never included in attestations or candidate responses.
++const authorizationContextPrefix = "authorization-context:";
++const maxAuthorizationChecks = 32;
++const authorizationTagKeys = ["run", "owner", "sha", "expiry"].map(
++  (key) => `crabbox_qualification_${key}`,
++);
++const authorizationForwardActions = new Set([
++  "ImportKeyPair",
++  "RunInstances",
++  "CreateImage",
++  "CreateTags",
++  "FirstWalk",
++]);
+ const maxLaunches = 3;
+ const maxActiveInstances = 1;
+ const maxActiveImages = 1;
+@@ -61,7 +98,7 @@ const parser = new XMLParser({
    // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
    tagValueProcessor: (_tagName, _value, jPath) =>
      jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
@@ -533,11 +557,13 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      jPath === "DescribeImagesResponse.imagesSet.item.imageOwnerId" ||
      jPath === "DescribeSnapshotsResponse.snapshotSet.item.ownerId"
        ? undefined
-@@ -123,10 +145,12 @@ const preservedTagKeys = new Set([
+@@ -123,10 +160,14 @@ const preservedTagKeys = new Set([
  ]);
- 
+
  interface AWSQualificationAuthorityEnv {
 +  CF_VERSION_METADATA?: { id: string };
++  // Private, operator-pinned in-flight recovery only; never grants forward work.
++  CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON?: string;
    AWS_ACCESS_KEY_ID?: string;
    AWS_SECRET_ACCESS_KEY?: string;
    AWS_SESSION_TOKEN?: string;
@@ -546,7 +572,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
    CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
-@@ -134,17 +158,20 @@ interface AWSQualificationAuthorityEnv {
+@@ -134,28 +175,34 @@ interface AWSQualificationAuthorityEnv {
    CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
    CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
    CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
@@ -554,7 +580,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
    AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
  }
- 
+
  interface AWSQualificationPolicy {
    accountId: string;
 +  roleArn: string;
@@ -565,9 +591,14 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    subnetId: string;
 +  network?: QualificationNetwork;
  }
- 
+
  interface AWSQualificationRunState {
-@@ -156,6 +183,8 @@ interface AWSQualificationRunState {
+   identity: AWSQualificationRunIdentity;
+   enrolledAt: string;
++  keyAuthorizationStartedAt?: number;
+   operationCount: number;
+   signerSequence: number;
+   authoritySha: string;
    authorityVersion: string;
    policy: AWSQualificationPolicy;
    policyHash: string;
@@ -576,13 +607,22 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    retainedRootDeviceName?: string;
    finalizationSource?: "automatic" | "controller";
    finalizingAt?: string;
-@@ -211,10 +240,42 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
+@@ -204,6 +251,7 @@ interface AuthoritySigner {
+     action: string,
+     region: string,
+     parameters: Record<string, unknown>,
++    signal?: AbortSignal,
+   ): Promise<Response>;
+ }
+
+@@ -211,10 +259,46 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationRunIdentity
  > {
 +  // The candidate supplies only a nonce. Props and executing version come from
 +  // this actual capability invocation, never from the HTTP relay or its reply.
 +  async observeBinding(challenge: string): Promise<void> {
++    denyRecoveryWork(this.env);
 +    if (
 +      arguments.length !== 1 ||
 +      typeof challenge !== "string" ||
@@ -598,6 +638,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +  }
 +
    async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
++    denyRecoveryWork(this.env);
      await qualificationRegistry(this.env).assertActive(this.ctx.props);
      return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
    }
@@ -605,6 +646,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +  async prepareFirstWalk(
 +    request: AWSQualificationFirstWalkRequest,
 +  ): Promise<AWSQualificationFirstWalkStatus> {
++    denyRecoveryWork(this.env);
 +    await qualificationRegistry(this.env).assertActive(this.ctx.props);
 +    return await qualificationRun(this.env, this.ctx.props.runId).prepareFirstWalk(
 +      this.ctx.props,
@@ -614,12 +656,13 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +
 +  // Settlement reads survive the work fence; they never authorize new mutations.
 +  async firstWalkStatus(): Promise<AWSQualificationFirstWalkStatus> {
++    denyRecoveryWork(this.env);
 +    return await qualificationRun(this.env, this.ctx.props.runId).firstWalkStatus(this.ctx.props);
 +  }
  }
- 
+
  export default AWSQualificationTransport;
-@@ -223,6 +284,34 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -223,10 +307,42 @@ export class AWSQualificationController extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationControllerProps
  > {
@@ -654,30 +697,41 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
      await this.claim(identity);
    }
-@@ -246,16 +335,36 @@ export class AWSQualificationController extends WorkerEntrypoint<
+
++  async keyAuthorization(runId: string): Promise<{ passed: true; checks: number }> {
++    return await qualificationRun(this.env, runId).keyAuthorization(this.ctx.props);
++  }
++
+   async beginFinalization(runId: string): Promise<void> {
+     const run = qualificationRun(this.env, runId);
+     await run.beginFinalization(this.ctx.props);
+@@ -246,16 +362,40 @@ export class AWSQualificationController extends WorkerEntrypoint<
    }
- 
+
    async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
 -    // Persist the per-run cleanup owner before making this run globally active. Candidate
 -    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
 -    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
 -    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
++    denyRecoveryWork(this.env);
 +    // The registry serializes probe admission against the entire enrollment hop,
 +    // including AWS verification. Checking only after enrollment is too late.
 +    return await qualificationRegistry(this.env).enrollAndClaim(this.ctx.props, identity);
    }
- 
+
    async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
      return await qualificationRegistry(this.env).discover(this.ctx.props);
    }
- 
+
 +  async openTransportProbe(
 +    request: AWSQualificationTransportProbeRequest,
 +  ): Promise<AWSQualificationTransportProbe> {
++    denyRecoveryWork(this.env);
 +    return await qualificationRegistry(this.env).openTransportProbe(this.ctx.props, request);
 +  }
 +
 +  async discoverTransportProbe(): Promise<AWSQualificationTransportProbe | undefined> {
++    denyRecoveryWork(this.env);
 +    return await qualificationRegistry(this.env).discoverTransportProbe(this.ctx.props);
 +  }
 +
@@ -685,6 +739,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +    challenge: string,
 +    verified: boolean,
 +  ): Promise<AWSQualificationTransportProbe> {
++    denyRecoveryWork(this.env);
 +    return await qualificationRegistry(this.env).settleTransportProbe(
 +      this.ctx.props,
 +      challenge,
@@ -695,9 +750,9 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    async retire(runId: string): Promise<void> {
      const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
      if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
-@@ -264,6 +373,157 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -264,7 +404,161 @@ export class AWSQualificationController extends WorkerEntrypoint<
  }
- 
+
  export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
 +  private serial = Promise.resolve();
 +  private pending = 0;
@@ -736,6 +791,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +    request: AWSQualificationTransportProbeRequest,
 +  ): Promise<AWSQualificationTransportProbe> {
 +    return await this.serialized(async () => {
++      denyRecoveryWork(this.env);
 +      validateTransportProbe(request);
 +      validateController(controller, request.identity.deploymentHash);
 +      if (request.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
@@ -836,6 +892,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +  ): Promise<AWSQualificationRegistryRecord> {
 +    return await this.serialized(async () => {
 +      await this.noTransportProbe(identity);
++      denyRecoveryWork(this.env);
 +      validateController(controller, identity.deploymentHash);
 +      validateRunIdentity(identity);
 +      validateRunWindow(identity);
@@ -851,9 +908,11 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +  }
 +
    async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
++    denyRecoveryWork(this.env);
      validateRunIdentity(identity);
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
-@@ -279,6 +539,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+     if (
+@@ -279,6 +573,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
    async discover(
      controller: AWSQualificationControllerProps,
    ): Promise<AWSQualificationRegistryRecord | undefined> {
@@ -861,7 +920,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      if (active) validateController(controller, active.deploymentHash);
      else validateControllerShape(controller);
-@@ -289,6 +550,14 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -289,6 +584,15 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
      controller: AWSQualificationControllerProps,
      identity: AWSQualificationRunIdentity,
    ): Promise<AWSQualificationRegistryRecord> {
@@ -872,11 +931,20 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +    controller: AWSQualificationControllerProps,
 +    identity: AWSQualificationRunIdentity,
 +  ): Promise<AWSQualificationRegistryRecord> {
++    denyRecoveryWork(this.env);
 +    await this.noTransportProbe(identity);
      validateController(controller, identity.deploymentHash);
      validateRunIdentity(identity);
      validateRunWindow(identity);
-@@ -446,6 +715,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -417,6 +721,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     identity: AWSQualificationRunIdentity,
+   ): Promise<void> {
+     return await this.serialized(async () => {
++      denyRecoveryWork(this.env);
+       const policy = authorityPolicy(this.env);
+       const authority = authorityIdentity(this.env);
+       validateController(controller, identity.deploymentHash);
+@@ -446,6 +751,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          return;
        }
        const policyHash = await qualificationPolicyHash(policy);
@@ -884,7 +952,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
        validateRunWindow(identity);
        await this.ctx.storage.put({
-@@ -463,7 +733,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -463,7 +769,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          [ledgerKey]: emptyLedger(),
        });
        await this.ctx.storage.setAlarm(
@@ -898,7 +966,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        );
        // Keep persisted ownership and its alarm if storage crossed the cutoff.
        // A refused registry claim must not orphan a run that already owns cleanup.
-@@ -475,7 +750,159 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -475,7 +786,207 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
      request: AWSQualificationRequest,
    ): Promise<AWSQualificationResponse> {
@@ -922,6 +990,52 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +        }
 +      }
 +      return result;
++    });
++  }
++
++  // Protected controller only. No candidate-selected key, target, action or probe.
++  async keyAuthorization(
++    controller: AWSQualificationControllerProps,
++  ): Promise<{ passed: true; checks: number }> {
++    return await this.serialized(async () => {
++      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
++      if (!run) throw new Error("key authorization run is not enrolled");
++      validateController(controller, run.identity.deploymentHash);
++      if (!run.identity.keyAuthorizationOnly) throw new Error("key-only purpose is required");
++      await qualificationRegistry(this.env).assertActive(run.identity);
++      await this.requireActiveRun(run.identity, "ImportKeyPair");
++      const prior = await this.ctx.storage.get<{ phase: string; startedAt: number }>(
++        "key-authorization",
++      );
++      if (prior?.phase === "passed") return { passed: true, checks: 13 };
++      if (prior) throw new Error("key authorization requires finalization");
++      const intent = { phase: "started", startedAt: run.keyAuthorizationStartedAt ?? Date.now() };
++      run.keyAuthorizationStartedAt = intent.startedAt;
++      await this.ctx.storage.put(stateKey, run);
++      await this.ctx.storage.put("key-authorization", intent);
++      const result = await this.executeSerialized(
++        run.identity,
++        {
++          opId: "00000000-0000-4000-8000-000000000001",
++          region: run.policy.region,
++          service: "ec2",
++          action: "ImportKeyPair",
++          parameters: {
++            KeyName: "crabbox-key-authorization",
++            PublicKeyMaterial:
++              "c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSU1hYTluUndGUXhQS1ZCOVliNVM4YmsyU0k2OW8rWXZpcWNUbElKMzlROVYgcXVhbGlmaWNhdGlvbi1kaWFnbm9zdGlj",
++          },
++        },
++        true,
++      );
++      if (result.status !== 200) throw new Error("diagnostic key import requires finalization");
++      const ledger = await this.ledger();
++      if (ledger.keyPairIds.length !== 1 || ledger.keyPairNames.length !== 1)
++        throw new Error("key authorization requires one exact owned key");
++      await this.checkKeyTagAuthorization(run, ledger.keyPairIds[0]!, ledger.keyPairNames[0]!);
++      await this.requireActiveRun(run.identity, "KeyAuthorization");
++      await this.ctx.storage.put("key-authorization", { ...intent, phase: "passed" });
++      return { passed: true, checks: 13 };
 +    });
 +  }
 +
@@ -950,7 +1064,8 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +  ): Promise<AWSQualificationFirstWalkStatus> {
 +    return await this.serialized(async () => {
 +      const run = await this.requireActiveRun(identity, "FirstWalk");
-+      if (!identity.firstWalk) throw new Error("first-walk is not enabled");
++      if (!identity.firstWalk || identity.keyAuthorizationOnly)
++        throw new Error("first-walk is not enabled");
 +      if (
 +        !isPlainRecord(input) ||
 +        Object.keys(input).toSorted().join(",") !==
@@ -1031,6 +1146,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +            requestedAt: new Date().toISOString(),
 +            signerDispatches: [],
 +          };
++          await this.checkForwardAuthorization(run, action, parameters);
 +          evidence = await this.beginSignerDispatch(run, key, evidence);
 +          this.assertCandidateDispatchWindow(run, "FirstWalk");
 +        }
@@ -1057,9 +1173,17 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +      },
 +    };
    }
- 
+
    async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
-@@ -505,6 +932,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -492,6 +1003,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     return await this.serialized(async () => {
+       const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+       if (!run) throw new Error("AWS qualification run is not enrolled");
++      assertRecoveryRun(this.env, run);
+       validateController(controller, run.identity.deploymentHash);
+       const operations = [
+         ...(await this.ctx.storage.list<AWSQualificationOperationEvidence>({
+@@ -505,6 +1017,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
        return {
          version: awsQualificationAttestationVersion,
@@ -1072,12 +1196,40 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +              ),
 +            }
 +          : {}),
++        ...(run.identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true as const } : {}),
          runId: run.identity.runId,
          candidateSha: run.identity.candidateSha,
          candidateWorker: run.identity.candidateWorker,
-@@ -606,6 +1042,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -518,6 +1040,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         finalized: Boolean(run.finalizedAt),
+         ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
+         operations,
++        ...(run.identity.firstWalk
++          ? {
++              authorizationChecks:
++                (await this.ctx.storage.get<AWSQualificationAuthorizationCheck[]>(
++                  authorizationChecksKey,
++                )) ?? [],
++            }
++          : {}),
+         ...(finalReceipt ? { finalReceipt } : {}),
+       };
+     });
+@@ -530,8 +1060,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   private async executeSerialized(
+     identity: AWSQualificationRunIdentity,
+     request: AWSQualificationRequest,
++    keyController = false,
+   ): Promise<AWSQualificationResponse> {
+     const run = await this.requireActiveRun(identity, request.action);
++    if (run.identity.keyAuthorizationOnly && (!keyController || request.action !== "ImportKeyPair"))
++      throw new Error("key-only run permits only its fixed protected controller diagnostic");
+     const policy = run.policy;
+     const normalizedRequest = validateRequestShape(request, policy.region);
+     const requestHash = await sha256Hex(
+@@ -606,6 +1139,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
- 
+
      const ledger = await this.ledger();
 +    const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
 +    if (
@@ -1089,7 +1241,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      try {
        if (!priorIntent) {
-@@ -646,6 +1089,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -646,6 +1186,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        if (normalizedRequest.service !== "sts") {
          await this.ensureAccount(policy);
        }
@@ -1107,9 +1259,256 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      } catch (error) {
        await this.ctx.storage.put(evidenceKey, {
          ...evidence,
-@@ -911,6 +1365,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -670,6 +1221,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       });
+     }
+
++    if (
++      run.identity.firstWalk &&
++      ["RunInstances", "CreateImage", "CreateTags"].includes(normalizedRequest.action)
++    ) {
++      if (normalizedRequest.action === "RunInstances") {
++        if (ledger.keyPairIds.length !== 1 || ledger.keyPairNames.length !== 1)
++          throw new Error("AWS qualification preflight requires its owned physical key");
++        await this.checkKeyTagAuthorization(run, ledger.keyPairIds[0]!, ledger.keyPairNames[0]!);
++      }
++      await this.checkForwardAuthorization(run, normalizedRequest.action, authorized.parameters);
++    }
+     if (authorized.mutating) {
+       await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
+     }
+@@ -682,6 +1244,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       normalizedRequest.action,
+       policy.region,
+       authorized.parameters,
++      run.identity.keyAuthorizationOnly ? AbortSignal.timeout(30_000) : undefined,
+     );
+     const result = await boundedResponse(response);
+     await this.finishSignerDispatch(run, evidenceKey, evidence, result);
+@@ -725,6 +1288,220 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     return result;
    }
- 
+
++  // Internal-only: parameters have already passed the existing typed/ledger owner.
++  // Neither candidates nor cleanup callers can select a probe or supply DryRun.
++  private async checkForwardAuthorization(
++    run: AWSQualificationRunState,
++    action: string,
++    parameters: Record<string, unknown>,
++  ): Promise<void> {
++    if (!run.identity.firstWalk) return;
++    if (
++      ![
++        "RunInstances",
++        "CreateImage",
++        "CreateTags",
++        "CreateVolume",
++        "AttachVolume",
++        "ModifyInstanceAttribute",
++      ].includes(action)
++    )
++      throw new Error("AWS qualification unsupported authorization preflight");
++    await this.checkAuthorization(run, action, parameters, "request", "DryRunOperation");
++  }
++
++  private async checkKeyTagAuthorization(
++    run: AWSQualificationRunState,
++    keyPairID: string,
++    keyName: string,
++  ): Promise<void> {
++    const values = [
++      run.identity.runId,
++      run.identity.owner,
++      run.identity.candidateSha,
++      run.identity.expiresAt,
++    ];
++    const tags = authorizationTagKeys.map((key, i) => [key, values[i]!] as const);
++    const parameters = (entries: ReadonlyArray<readonly [string, string]>) => ({
++      "ResourceId.1": keyPairID,
++      ...Object.fromEntries(
++        entries.flatMap(([key, value], i) => [
++          [`Tag.${i + 1}.Key`, key],
++          [`Tag.${i + 1}.Value`, value],
++        ]),
++      ),
++    });
++    await this.checkAuthorization(
++      run,
++      "CreateTags",
++      parameters(tags),
++      "tags-restated",
++      "DryRunOperation",
++      { id: keyPairID, name: keyName, tags },
++    );
++    for (let i = 0; i < tags.length; i++) {
++      // oxlint-disable-next-line eslint/no-await-in-loop -- fixed serial probes stop at the first failure.
++      await this.checkAuthorization(
++        run,
++        "CreateTags",
++        parameters(tags.filter((_, j) => j !== i)),
++        `tag-missing-${i}`,
++        "UnauthorizedOperation",
++      );
++      // oxlint-disable-next-line eslint/no-await-in-loop -- no probe overlaps another probe or effect.
++      await this.checkAuthorization(
++        run,
++        "CreateTags",
++        parameters(tags.map(([key, value], j) => [key, j === i ? `${value}-invalid` : value])),
++        `tag-changed-${i}`,
++        "UnauthorizedOperation",
++      );
++      // oxlint-disable-next-line eslint/no-await-in-loop -- removal is always DryRun and never a candidate action.
++      await this.checkAuthorization(
++        run,
++        "DeleteTags",
++        { "ResourceId.1": keyPairID, "Tag.1.Key": tags[i]![0] },
++        `tag-removed-${i}`,
++        "UnauthorizedOperation",
++      );
++    }
++  }
++
++  private async checkAuthorization(
++    run: AWSQualificationRunState,
++    action: string,
++    parameters: Record<string, unknown>,
++    probe: string,
++    expected: "DryRunOperation" | "UnauthorizedOperation",
++    key?: { id: string; name: string; tags: ReadonlyArray<readonly [string, string]> },
++  ): Promise<void> {
++    const checks =
++      (await this.ctx.storage.get<AWSQualificationAuthorizationCheck[]>(authorizationChecksKey)) ??
++      [];
++    if (checks.some((check) => check.outcome !== "passed"))
++      throw new Error("AWS qualification authorization preflight requires finalization");
++    const dryRun = { ...parameters, DryRun: "true" };
++    const requestDigest = await sha256Hex(
++      canonicalJSON({ action, parameters: dryRun, probe, expected }),
++    );
++    if (checks.some((check) => check.requestDigest === requestDigest)) return;
++    if (checks.length >= maxAuthorizationChecks)
++      throw new Error("AWS qualification authorization preflight budget exhausted");
++    const check: AWSQualificationAuthorizationCheck = {
++      requestDigest,
++      action,
++      probe,
++      startedAt: new Date().toISOString(),
++      outcome: "pending",
++      ...(key
++        ? {
++            keyObservation: {
++              resourceDigest: await sha256Hex(canonicalJSON({ run: run.identity, key: key.id })),
++              outcome: "pending" as const,
++            },
++          }
++        : {}),
++    };
++    checks.push(check);
++    // Persist intent before even a nonmutating request. An uncertain result is
++    // never silently repeated or treated as passing by a replacement process.
++    await this.ctx.storage.put(authorizationChecksKey, checks);
++    try {
++      const remaining = Date.parse(run.identity.expiresAt) - 20 * 60_000 - Date.now();
++      const signal = AbortSignal.timeout(Math.max(1, Math.min(10_000, remaining)));
++      const context: { keyPairID?: string; tagReadRequestId?: string; requestId?: string } = {};
++      if (key) {
++        context.keyPairID = key.id;
++        this.assertCandidateDispatchWindow(run, "FirstWalk");
++        const read = await this.signer.execute(
++          "ec2",
++          "DescribeKeyPairs",
++          run.policy.region,
++          { "KeyPairId.1": key.id, IncludePublicKey: "false" },
++          signal,
++        );
++        check.keyObservation!.httpStatus = read.status;
++        const body = await authorizationResponseBody(read, signal, maxResponseBytes);
++        const parsed = parseAuthorizationXML(body);
++        const root = record(parsed["DescribeKeyPairsResponse"]);
++        const errorRoot = record(parsed["Response"]);
++        const requestId = authorizationRequestId(root["requestId"] ?? errorRoot["RequestID"]);
++        if (requestId) {
++          check.keyObservation!.requestIdSha256 = await sha256Hex(requestId);
++          context.tagReadRequestId = requestId;
++        }
++        await this.ctx.storage.put(`${authorizationContextPrefix}${requestDigest}`, context);
++        if (read.status >= 400 && read.status < 500) {
++          const code = authorizationErrorCode(read, parsed);
++          if (code === "UnauthorizedOperation" || code === "InvalidKeyPair.NotFound")
++            check.keyObservation!.code = code;
++          if (code === "InvalidKeyPair.NotFound") check.keyObservation!.outcome = "missing";
++        }
++        if (
++          read.redirected ||
++          read.status !== 200 ||
++          !Object.hasOwn(root, "keySet") ||
++          Object.keys(parsed)
++            .filter((k) => k !== "?xml")
++            .join(",") !== "DescribeKeyPairsResponse" ||
++          (root["@_xmlns"] !== undefined &&
++            root["@_xmlns"] !== "http://ec2.amazonaws.com/doc/2016-11-15/")
++        )
++          throw new Error("invalid key observation response");
++        const keys = items(record(root["keySet"])["item"]).map(record);
++        if (keys.length === 0) check.keyObservation!.outcome = "missing";
++        else if (
++          keys.length !== 1 ||
++          keys[0]!["keyPairId"] !== key.id ||
++          keys[0]!["keyName"] !== key.name
++        )
++          check.keyObservation!.outcome = "mismatched";
++        else {
++          const observed = items(record(keys[0]!["tagSet"])["item"]).map(record);
++          check.keyObservation!.tags = key.tags.map(([name, value]) => {
++            const values = observed.filter((tag) => tag["key"] === name);
++            return values.length === 0
++              ? "missing"
++              : values.length === 1 && values[0]!["value"] === value
++                ? "matching"
++                : "mismatched";
++          });
++          check.keyObservation!.outcome = check.keyObservation!.tags.every((t) => t === "matching")
++            ? "matching"
++            : "mismatched";
++        }
++        // Preserve a completed read even when the subsequent positive DryRun is denied.
++        await this.ctx.storage.put(authorizationChecksKey, checks);
++        if (check.keyObservation!.outcome !== "matching")
++          throw new Error("key ownership is not verified");
++      }
++      signal.throwIfAborted();
++      this.assertCandidateDispatchWindow(run, "FirstWalk");
++      const response = await this.signer.execute("ec2", action, run.policy.region, dryRun, signal);
++      check.httpStatus = response.status;
++      const body = await authorizationResponseBody(response, signal, 16 * 1024);
++      const parsed = parseAuthorizationXML(body);
++      const requestId = authorizationRequestId(record(parsed["Response"])["RequestID"]);
++      if (requestId) {
++        check.requestIdSha256 = await sha256Hex(requestId);
++        context.requestId = requestId;
++      }
++      await this.ctx.storage.put(`${authorizationContextPrefix}${requestDigest}`, context);
++      const code = authorizationErrorCode(response, parsed);
++      if (code === "DryRunOperation" || code === "UnauthorizedOperation") check.code = code;
++      if (code !== expected) throw new Error("unexpected authorization result");
++      check.outcome = "passed";
++      check.completedAt = new Date().toISOString();
++      await this.ctx.storage.put(authorizationChecksKey, checks);
++    } catch {
++      if (check.keyObservation?.outcome === "pending") check.keyObservation.outcome = "failed";
++      check.outcome = "failed";
++      check.completedAt = new Date().toISOString();
++      await this.ctx.storage.put(authorizationChecksKey, checks);
++      throw new Error("AWS qualification authorization preflight requires finalization");
++    }
++  }
++
+   private async recordImportedKey(
+     run: AWSQualificationRunState,
+     request: AWSQualificationRequest,
+@@ -911,6 +1688,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   }
+
    private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
 +    const roleArn =
 +      policy.roleArn === undefined
@@ -1165,7 +1564,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
      const result = await boundedResponse(response);
      if (result.status < 200 || result.status >= 300) {
-@@ -922,6 +1427,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -922,6 +1750,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      if (asString(identity["Account"]) !== policy.accountId) {
        throw new Error("AWS qualification authority is authenticated to the wrong account");
      }
@@ -1180,9 +1579,9 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +      throw new Error("AWS qualification authority is authenticated to the wrong role");
 +    }
    }
- 
+
    private async verifyRetainedImage(
-@@ -1084,7 +1599,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1084,7 +1922,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      run: AWSQualificationRunState,
      intentKey: string,
    ): Promise<void> {
@@ -1191,8 +1590,17 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
        this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
      }
-@@ -1099,8 +1614,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1097,10 +1935,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   private assertCandidateDispatchWindow(run: AWSQualificationRunState, action: string): void {
+     const now = Date.now();
      const expiresAt = Date.parse(run.identity.expiresAt);
++    if (
++      run.identity.keyAuthorizationOnly &&
++      run.keyAuthorizationStartedAt !== undefined &&
++      action !== "DeleteKeyPair" &&
++      now >= run.keyAuthorizationStartedAt + 10 * 60_000
++    )
++      throw new Error("key authorization ten-minute work bound expired");
      if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
      if (
 -      run.identity.retainedImage &&
@@ -1203,7 +1611,30 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        !retainedCleanupReads.has(action) &&
        !["TerminateInstances", "DeleteKeyPair"].includes(action)
      ) {
-@@ -1150,6 +1666,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1112,6 +1958,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     identity: AWSQualificationRunIdentity,
+     action: string,
+   ): Promise<AWSQualificationRunState> {
++    denyRecoveryWork(this.env);
+     const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+     if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
+       throw new Error("AWS qualification service binding is not enrolled for this run");
+@@ -1136,6 +1983,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
+       throw new Error("AWS qualification authority deployment changed after enrollment");
+     }
++    if (run.identity.firstWalk && authorizationForwardActions.has(action)) {
++      const checks =
++        (await this.ctx.storage.get<AWSQualificationAuthorizationCheck[]>(
++          authorizationChecksKey,
++        )) ?? [];
++      if (checks.some((check) => check.outcome !== "passed"))
++        throw new Error("AWS qualification authorization preflight requires finalization");
++    }
+     return run;
+   }
+
+@@ -1150,6 +2005,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      const failures: string[] = [];
      await this.beginFinalReceipt(ledger);
      try {
@@ -1211,7 +1642,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        await this.ensureAccount(policy);
        await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
      } catch (error) {
-@@ -1168,6 +1685,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1168,6 +2024,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "pre-cleanup",
      );
      await this.ctx.storage.put(ledgerKey, recoveredLedger);
@@ -1250,7 +1681,117 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      for (const imageId of ownedWithRetired(
        recoveredLedger.imageIds,
        recoveredLedger.retiredImageIds,
-@@ -1547,6 +2096,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1242,7 +2130,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     controller?: AWSQualificationControllerProps,
+   ): Promise<AWSQualificationRunState | undefined> {
+     const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+-    if (!run) return undefined;
++    if (!run) {
++      if (this.env.CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON !== undefined)
++        throw new Error("recovery run is missing");
++      return undefined;
++    }
++    assertRecoveryRun(this.env, run);
+     if (controller) validateController(controller, run.identity.deploymentHash);
+     if (!run.finalizingAt && !run.finalizedAt) {
+       run.finalizingAt = new Date().toISOString();
+@@ -1443,6 +2336,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+   private async recordVerificationEvidence(
+     action: string,
+     outcome: "accepted" | "absent" | "present" | "rejected" | "error",
++    target?: Record<string, unknown>,
+   ): Promise<void> {
+     const receipt = await this.requireFinalReceipt();
+     const sequence = receipt.verificationTotal + 1;
+@@ -1453,6 +2347,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+         action,
+         at: new Date().toISOString(),
+         outcome,
++        ...(target ? { targetDigest: await sha256Hex(canonicalJSON(target)) } : {}),
+       },
+       maxVerificationEvidence,
+     );
+@@ -1491,12 +2386,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       const result = await boundedResponse(response);
+       if (
+         result.status >= 300 &&
+-        !result.body.includes("NotFound") &&
+-        !result.body.includes("InvalidAMIID.NotFound") &&
+-        !result.body.includes("InvalidSnapshot.NotFound")
++        (action === "DeleteKeyPair" ||
++          action === "DeregisterImage" ||
++          (!result.body.includes("NotFound") &&
++            !result.body.includes("InvalidAMIID.NotFound") &&
++            !result.body.includes("InvalidSnapshot.NotFound")))
+       ) {
+         await this.finishCleanupEvidence(evidenceSequence, "rejected", result.status);
+-        failures.push(`${action} http ${result.status}`);
++        // Preserve the rejected mutation. Only authoritative exact-ID absence can
++        // settle its obligation; tag-filtered inventory is deliberately insufficient.
++        if (
++          (action !== "DeleteKeyPair" && action !== "DeregisterImage") ||
++          !(await this.confirmRejectedDeleteAbsent(run, policy, action, parameters))
++        )
++          failures.push(`${action} http ${result.status}`);
+       } else {
+         await this.finishCleanupEvidence(
+           evidenceSequence,
+@@ -1512,6 +2415,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     }
+   }
+
++  private async confirmRejectedDeleteAbsent(
++    run: AWSQualificationRunState,
++    policy: AWSQualificationPolicy,
++    action: "DeleteKeyPair" | "DeregisterImage",
++    parameters: Record<string, unknown>,
++  ): Promise<boolean> {
++    const image = action === "DeregisterImage";
++    const idField = image ? "ImageId" : "KeyPairId";
++    const readAction = image ? "DescribeImages" : "DescribeKeyPairs";
++    const id = parameters[idField];
++    const ledger = await this.ledger();
++    const owned = image
++      ? ownedWithRetired(ledger.imageIds, ledger.retiredImageIds)
++      : ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
++    if (
++      typeof id !== "string" ||
++      Object.keys(parameters).join(",") !== idField ||
++      !owned.includes(id)
++    )
++      throw new Error("rejected deletion is not ledger-owned");
++    assertRecoveryRun(this.env, run);
++    try {
++      await this.ensureAccount(policy);
++      const response = await this.signer.execute(
++        "ec2",
++        readAction,
++        policy.region,
++        {
++          [`${idField}.1`]: id,
++        },
++        AbortSignal.timeout(30_000),
++      );
++      const result = await boundedResponse(response);
++      const absent = exactResourceAbsence(result, readAction);
++      await this.recordVerificationEvidence(
++        `${readAction}AfterRejectedDelete`,
++        absent ? "absent" : "rejected",
++        { [idField]: id },
++      );
++      return absent;
++    } catch {
++      await this.recordVerificationEvidence(`${readAction}AfterRejectedDelete`, "error", {
++        [idField]: id,
++      });
++      return false;
++    }
++  }
++
+   private async inventoryRunResources(
+     run: AWSQualificationRunState,
+     ledger: AWSQualificationLedger,
+@@ -1547,6 +2498,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        for (const result of [instances, images, snapshots, volumes, keys]) {
          if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
        }
@@ -1269,7 +1810,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
          .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
          .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
-@@ -1581,6 +2142,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1581,6 +2544,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          ledger.instanceIds.length > maxActiveInstances ||
          ledger.imageIds.length > maxActiveImages ||
          ledger.snapshotIds.length > maxActiveSnapshots ||
@@ -1277,7 +1818,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
          ledger.keyPairIds.length > 1
        ) {
          failures.push("run-tag inventory exceeds qualification resource bounds");
-@@ -1662,7 +2224,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1662,7 +2626,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
        for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
          const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1286,10 +1827,10 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        }
      }
      await this.ctx.storage.put(ledgerKey, ledger);
-@@ -1780,6 +2342,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1780,6 +2744,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      );
    }
- 
+
 +  private async verifySharedNetwork(
 +    policy: AWSQualificationPolicy,
 +    instanceIds: string[] = [],
@@ -1329,7 +1870,132 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    private async retireUnresolvedIntents(): Promise<void> {
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
-@@ -2236,9 +2834,11 @@ function authorizedRunInstances(
+@@ -1808,14 +2808,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       "reservationSet",
+       failures,
+     );
+-    await this.verifyAbsent(
+-      policy,
+-      "DescribeImages",
+-      "ImageId",
+-      ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+-      "imagesSet",
+-      failures,
+-    );
++    await this.verifyExactResourcesAbsent(ledger, policy, "DescribeImages", failures);
+     await this.verifyAbsent(
+       policy,
+       "DescribeSnapshots",
+@@ -1832,7 +2825,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+       "volumeSet",
+       failures,
+     );
+-    await this.verifyKeyPairsAbsent(ledger, policy, failures);
++    await this.verifyExactResourcesAbsent(ledger, policy, "DescribeKeyPairs", failures);
+     try {
+       const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
+         "GroupId.1": policy.securityGroupId,
+@@ -1862,51 +2855,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+     }
+   }
+
+-  private async verifyKeyPairsAbsent(
++  private async verifyExactResourcesAbsent(
+     ledger: AWSQualificationLedger,
+     policy: AWSQualificationPolicy,
++    action: "DescribeKeyPairs" | "DescribeImages",
+     failures: string[],
+   ): Promise<void> {
+-    const keyPairIds = ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
+-    const parameters =
+-      keyPairIds.length > 0
+-        ? Object.fromEntries(keyPairIds.map((id, index) => [`KeyPairId.${index + 1}`, id]))
+-        : Object.fromEntries(
+-            ledger.keyPairNames.map((name, index) => [`KeyName.${index + 1}`, name]),
+-          );
+-    if (Object.keys(parameters).length === 0) {
+-      await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
++    const image = action === "DescribeImages";
++    const ids = image
++      ? ownedWithRetired(ledger.imageIds, ledger.retiredImageIds)
++      : ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
++    const idField = image ? "ImageId" : "KeyPairId";
++    const lookups = ids.length
++      ? ids.map((id) => ({ [`${idField}.1`]: id }))
++      : image
++        ? []
++        : ledger.keyPairNames.map((name) => ({ "KeyName.1": name }));
++    if (!lookups.length) {
++      await this.recordVerificationEvidence(action, "absent");
+       return;
+     }
+-    try {
+-      const response = await this.signer.execute(
+-        "ec2",
+-        "DescribeKeyPairs",
+-        policy.region,
+-        parameters,
+-      );
+-      const result = await boundedResponse(response);
+-      if (result.status >= 300) {
+-        if (result.body.includes("NotFound")) {
+-          await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+-          return;
++    for (const parameters of lookups) {
++      try {
++        // One immutable ID per response: NotFound for one resource cannot hide another.
++        // oxlint-disable-next-line eslint/no-await-in-loop -- verify each exact resource independently.
++        const response = await this.signer.execute("ec2", action, policy.region, parameters);
++        // oxlint-disable-next-line eslint/no-await-in-loop -- bound each independent response.
++        const result = await boundedResponse(response);
++        if (!exactResourceAbsence(result, action)) {
++          failures.push(`${action} exact absence not established`);
++          // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
++          await this.recordVerificationEvidence(action, "rejected");
++        } else {
++          // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
++          await this.recordVerificationEvidence(action, "absent");
+         }
+-        await this.recordVerificationEvidence("DescribeKeyPairs", "rejected");
+-        failures.push(`DescribeKeyPairs verification http ${result.status}`);
+-        return;
+-      }
+-      const root = awsXMLRoot(result.body, "DescribeKeyPairs");
+-      if (items(record(root["keySet"])["item"]).length > 0) {
+-        await this.recordVerificationEvidence("DescribeKeyPairs", "present");
+-        failures.push("DescribeKeyPairs still returns run-owned resources");
+-      } else {
+-        await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
++      } catch {
++        failures.push(`${action} exact verification failed`);
++        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve each independent verification.
++        await this.recordVerificationEvidence(action, "error");
+       }
+-    } catch (error) {
+-      await this.recordVerificationEvidence("DescribeKeyPairs", "error");
+-      failures.push(
+-        `DescribeKeyPairs verification: ${error instanceof Error ? error.message : String(error)}`,
+-      );
+     }
+   }
+
+@@ -1986,6 +2974,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+     action: string,
+     region: string,
+     parameters: Record<string, unknown>,
++    signal?: AbortSignal,
+   ): Promise<Response> {
+     const credentials = authorityCredentials(this.env);
+     const client = new AwsClient({ ...credentials, service, region, retries: 0 });
+@@ -1999,6 +2988,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+       }
+       return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
+         method: "POST",
++        ...(signal ? { signal } : {}),
+         headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+         body: body.toString(),
+       });
+@@ -2236,9 +3226,11 @@ function authorizedRunInstances(
    }
    const imageId = input["ImageId"] ?? "";
    if (
@@ -1344,7 +2010,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    ) {
      throw new Error("AWS qualification image is outside the run ledger");
    }
-@@ -2262,7 +2862,7 @@ function authorizedRunInstances(
+@@ -2262,7 +3254,7 @@ function authorizedRunInstances(
    );
    const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
    if (
@@ -1353,7 +2019,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        ? rootGB !== awsQualificationRetainedRootGB
        : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
    ) {
-@@ -2283,11 +2883,14 @@ function authorizedRunInstances(
+@@ -2283,11 +3275,14 @@ function authorizedRunInstances(
      MaxCount: "1",
      MinCount: "1",
      UserData: userData,
@@ -1369,7 +2035,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      "MetadataOptions.HttpEndpoint": "enabled",
      "MetadataOptions.HttpPutResponseHopLimit": "1",
      "MetadataOptions.HttpTokens": "required",
-@@ -2445,7 +3048,7 @@ function updateLedgerFromResponse(
+@@ -2445,7 +3440,7 @@ function updateLedgerFromResponse(
          }
          for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
            const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1378,10 +2044,10 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
          }
        }
      }
-@@ -2526,6 +3129,59 @@ function updateLedgerFromResponse(
+@@ -2526,6 +3521,60 @@ function updateLedgerFromResponse(
    }
  }
- 
+
 +function validateExactTransportIdentity(identity: AWSQualificationRunIdentity): void {
 +  if (
 +    !isPlainRecord(identity) ||
@@ -1398,6 +2064,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +          "deploymentHash",
 +          "expiresAt",
 +          "firstWalk",
++          "keyAuthorizationOnly",
 +          "retainedImage",
 +        ].includes(key),
 +    )
@@ -1438,16 +2105,23 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
  function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
      throw new Error("AWS qualification run id is malformed");
-@@ -2545,6 +3201,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2545,6 +3594,15 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!Number.isFinite(Date.parse(identity.expiresAt))) {
      throw new Error("AWS qualification expiry is malformed");
    }
 +  if (identity.firstWalk !== undefined && identity.firstWalk !== true)
 +    throw new Error("first-walk mode is malformed");
++  if (
++    identity.keyAuthorizationOnly !== undefined &&
++    (identity.keyAuthorizationOnly !== true ||
++      identity.firstWalk !== true ||
++      identity.retainedImage !== undefined)
++  )
++    throw new Error("key-only purpose is malformed");
    if (identity.retainedImage !== undefined) {
      const retained = identity.retainedImage;
      if (
-@@ -2563,11 +3221,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2563,11 +3621,18 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
  function validateRunWindow(identity: AWSQualificationRunIdentity): void {
    const expiresAt = Date.parse(identity.expiresAt);
    const now = Date.now();
@@ -1468,7 +2142,24 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
      throw new Error("AWS qualification retained work window expired");
    }
  }
-@@ -2671,11 +3336,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
+@@ -2633,9 +3698,15 @@ function registryIdentity(
+   value: AWSQualificationRunIdentity | AWSQualificationRegistryRecord,
+ ): Pick<
+   AWSQualificationRegistryRecord,
+-  "runId" | "candidateSha" | "candidateWorker" | "deploymentHash" | "expiresAt"
++  | "runId"
++  | "candidateSha"
++  | "candidateWorker"
++  | "deploymentHash"
++  | "expiresAt"
++  | "keyAuthorizationOnly"
+ > {
+   return {
++    ...(value.keyAuthorizationOnly ? { keyAuthorizationOnly: true as const } : {}),
+     runId: value.runId,
+     candidateSha: value.candidateSha,
+     candidateWorker: value.candidateWorker,
+@@ -2671,11 +3742,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
  function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
    const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
    const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
@@ -1487,7 +2178,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
    if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
      throw new Error("AWS qualification base AMI is malformed");
    if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
-@@ -2687,7 +3359,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
+@@ -2687,7 +3765,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
    if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
      throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
    }
@@ -1506,9 +2197,9 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
 +    ...(network ? { network } : {}),
 +  };
  }
- 
+
  function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
-@@ -3053,7 +3737,7 @@ function assertLifecycleCapacity(
+@@ -3053,7 +4143,7 @@ function assertLifecycleCapacity(
      if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
        throw new Error("AWS qualification allows one active instance");
      }
@@ -1517,8 +2208,161 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1f342950e9139147c0031b53b5f3779d
        throw new Error("AWS qualification launch budget is exhausted");
      }
    }
+@@ -3252,3 +4342,152 @@ function isRetryableReconciliationError(error: unknown): boolean {
+ function sleep(ms: number): Promise<void> {
+   return new Promise((resolve) => setTimeout(resolve, ms));
+ }
++
++// Separate from permissive legacy response readers: this is new settlement authority.
++function exactResourceAbsence(
++  result: AWSQualificationResponse,
++  action: "DescribeKeyPairs" | "DescribeImages",
++): boolean {
++  const image = action === "DescribeImages";
++  const resultField = image ? "imagesSet" : "keySet";
++  const notFoundCode = image ? "InvalidAMIID.NotFound" : "InvalidKeyPair.NotFound";
++  if (XMLValidator.validate(result.body) !== true || /<!DOCTYPE|<!ENTITY/i.test(result.body))
++    return false;
++  const parsed = record(parser.parse(result.body));
++  const top = Object.keys(parsed).filter((key) => key !== "?xml");
++  if (top.length !== 1) return false;
++  if ([400, 404].includes(result.status) && top[0] === "Response") {
++    const root = record(parsed["Response"]);
++    if (
++      root["@_xmlns"] !== undefined &&
++      root["@_xmlns"] !== "http://ec2.amazonaws.com/doc/2016-11-15/"
++    )
++      return false;
++    if (Object.keys(root).some((key) => !["Errors", "RequestID", "@_xmlns"].includes(key)))
++      return false;
++    const errors = record(root["Errors"]);
++    if (Object.keys(errors).join(",") !== "Error" || Array.isArray(errors["Error"])) return false;
++    const error = record(errors["Error"]);
++    return (
++      error["Code"] === notFoundCode &&
++      Object.keys(error).every((key) => ["Code", "Message"].includes(key))
++    );
++  }
++  if (result.status !== 200 || top[0] !== `${action}Response`) return false;
++  const root = record(parsed[`${action}Response`]);
++  if (
++    root["@_xmlns"] !== undefined &&
++    root["@_xmlns"] !== "http://ec2.amazonaws.com/doc/2016-11-15/"
++  )
++    return false;
++  return (
++    Object.hasOwn(root, resultField) &&
++    root[resultField] === "" &&
++    Object.keys(root).every((key) => [resultField, "requestId", "@_xmlns"].includes(key))
++  );
++}
++
++function denyRecoveryWork(env: AWSQualificationAuthorityEnv): void {
++  if (env.CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON !== undefined)
++    throw new Error("qualification authority is cleanup-only");
++}
++
++function assertRecoveryRun(env: AWSQualificationAuthorityEnv, run: AWSQualificationRunState): void {
++  const raw = env.CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON;
++  if (raw === undefined) return;
++  if (raw.length > 4096) throw new Error("invalid recovery binding");
++  const expected = JSON.parse(raw) as Record<string, unknown>;
++  const actual = {
++    ...(run.identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
++    runId: run.identity.runId,
++    candidateSha: run.identity.candidateSha,
++    candidateWorker: run.identity.candidateWorker,
++    deploymentHash: run.identity.deploymentHash,
++    expiresAt: run.identity.expiresAt,
++    enrolledAt: run.enrolledAt,
++    authoritySha: run.authoritySha,
++    authorityVersion: run.authorityVersion,
++    policyHash: run.policyHash,
++  };
++  if (
++    !Number.isFinite(Date.parse(run.finalizingAt ?? "")) ||
++    Date.parse(run.finalizingAt!) < Date.parse(run.enrolledAt) ||
++    canonicalJSON(expected) !== canonicalJSON(actual)
++  )
++    throw new Error("cleanup-only authority does not own this finalizing run");
++}
++
++async function authorizationResponseBody(
++  response: Response,
++  signal: AbortSignal,
++  limit: number,
++): Promise<string> {
++  const reader = response.body?.getReader();
++  if (!reader) throw new Error("missing authorization response");
++  const chunks: Uint8Array[] = [];
++  let bytes = 0;
++  let cancellation: Promise<void> | undefined;
++  const abort = () => {
++    cancellation = reader.cancel().catch(() => {});
++  };
++  signal.addEventListener("abort", abort, { once: true });
++  try {
++    while (true) {
++      signal.throwIfAborted();
++      // oxlint-disable-next-line eslint/no-await-in-loop -- consume one bounded stream in order.
++      const { done, value } = await reader.read();
++      if (done) break;
++      bytes += value.byteLength;
++      if (bytes > limit) throw new Error("oversized authorization response");
++      chunks.push(value);
++    }
++    signal.throwIfAborted();
++    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
++      concatAuthorizationChunks(chunks, bytes),
++    );
++  } finally {
++    signal.removeEventListener("abort", abort);
++    // A second cancel on an already-closed stream need not await the original
++    // underlying cancellation. Join the first promise before returning failure.
++    if (cancellation) await cancellation;
++    else await reader.cancel().catch(() => {});
++    reader.releaseLock();
++  }
++}
++
++function parseAuthorizationXML(body: string): Record<string, unknown> {
++  if (/<!DOCTYPE|<!ENTITY/i.test(body) || XMLValidator.validate(body) !== true)
++    throw new Error("invalid authorization XML");
++  // Ownership values are identifiers: numeric-looking strings must stay lexical.
++  return record(new XMLParser({ ignoreAttributes: false, parseTagValue: false }).parse(body));
++}
++
++function authorizationRequestId(value: unknown): string | undefined {
++  return typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)
++    ? value
++    : undefined;
++}
++
++function authorizationErrorCode(response: Response, parsed: Record<string, unknown>): string {
++  if (response.redirected || response.status < 400 || response.status >= 500)
++    throw new Error("invalid authorization status");
++  if (
++    Object.keys(parsed)
++      .filter((key) => key !== "?xml")
++      .join(",") !== "Response"
++  )
++    throw new Error("invalid authorization root");
++  const code = record(record(record(parsed["Response"])["Errors"])["Error"])["Code"];
++  if (typeof code !== "string") throw new Error("invalid authorization code");
++  return code;
++}
++
++function concatAuthorizationChunks(chunks: Uint8Array[], bytes: number): Uint8Array {
++  const result = new Uint8Array(bytes);
++  let offset = 0;
++  for (const chunk of chunks) {
++    result.set(chunk, offset);
++    offset += chunk.byteLength;
++  }
++  return result;
++}
 diff --git a/worker/src/aws-qualification-contract.ts b/worker/src/aws-qualification-contract.ts
-index 08236b760efe065be427f4705a15e144327e50cc..6d3ec979115b697eb8fc5683d891b7374432821c 100644
+index 08236b760efe065be427f4705a15e144327e50cc..8bd957e4c4b92c32eaa523e1c717cb467f65a825 100644
 --- a/worker/src/aws-qualification-contract.ts
 +++ b/worker/src/aws-qualification-contract.ts
 @@ -1,4 +1,6 @@
@@ -1528,18 +2372,19 @@ index 08236b760efe065be427f4705a15e144327e50cc..6d3ec979115b697eb8fc5683d891b737
  export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
  export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
  export const awsQualificationRetainedRootGB = 400;
-@@ -24,12 +26,40 @@ export interface AWSQualificationRunIdentity {
+@@ -24,12 +26,41 @@ export interface AWSQualificationRunIdentity {
    deploymentHash: string;
    expiresAt: string;
    retainedImage?: AWSQualificationRetainedImage;
 +  // Opt-in one-copy first-walk qualification. Normal image qualification is unchanged.
 +  firstWalk?: true;
++  keyAuthorizationOnly?: true;
  }
- 
+
  export interface AWSQualificationControllerProps {
    deploymentHash: string;
  }
- 
+
 +// Pure controller identity, not authorization to access a run or AWS.
 +export interface AWSQualificationBindingIdentity {
 +  protocol: 1;
@@ -1569,10 +2414,10 @@ index 08236b760efe065be427f4705a15e144327e50cc..6d3ec979115b697eb8fc5683d891b737
  export interface AWSQualificationRequest {
    opId: string;
    region: string;
-@@ -43,8 +73,31 @@ export interface AWSQualificationResponse {
+@@ -43,8 +74,31 @@ export interface AWSQualificationResponse {
    body: string;
  }
- 
+
 +export interface AWSQualificationFirstWalkRequest {
 +  checkpointID: string;
 +  claimHash: string;
@@ -1599,28 +2444,81 @@ index 08236b760efe065be427f4705a15e144327e50cc..6d3ec979115b697eb8fc5683d891b737
 +  ): Promise<AWSQualificationFirstWalkStatus>;
 +  firstWalkStatus?(): Promise<AWSQualificationFirstWalkStatus>;
  }
- 
+
  export type AWSQualificationCleanupState = "claimed" | "finalizing" | "finalized";
-@@ -133,6 +186,7 @@ export interface AWSQualificationFinalReceipt {
- 
+@@ -56,6 +110,7 @@ export interface AWSQualificationRegistryRecord {
+   candidateWorker: string;
+   deploymentHash: string;
+   expiresAt: string;
++  keyAuthorizationOnly?: true;
+   cleanupState: AWSQualificationCleanupState;
+   claimedAt: string;
+   finalizedAt?: string;
+@@ -69,6 +124,28 @@ export interface AWSQualificationResourceCounts {
+   volumes: number;
+ }
+
++// Private first-walk authorization evidence; never contains raw AWS errors or parameters.
++export interface AWSQualificationAuthorizationCheck {
++  requestDigest: string;
++  action: string;
++  probe: string;
++  startedAt: string;
++  completedAt?: string;
++  outcome: "pending" | "passed" | "failed";
++  code?: "DryRunOperation" | "UnauthorizedOperation";
++  httpStatus?: number;
++  requestIdSha256?: string;
++  keyObservation?: {
++    resourceDigest: string;
++    outcome: "pending" | "matching" | "missing" | "mismatched" | "failed";
++    // Fixed order: run, owner, source SHA, expiry. No tag values are exported.
++    tags?: Array<"matching" | "missing" | "mismatched">;
++    httpStatus?: number;
++    requestIdSha256?: string;
++    code?: "UnauthorizedOperation" | "InvalidKeyPair.NotFound";
++  };
++}
++
+ export interface AWSQualificationOperationEvidence {
+   version: 1;
+   opDigest: string;
+@@ -123,6 +200,7 @@ export interface AWSQualificationFinalReceipt {
+   verification: Array<{
+     sequence: number;
+     action: string;
++    targetDigest?: string;
+     at: string;
+     outcome: "accepted" | "absent" | "present" | "rejected" | "error";
+   }>;
+@@ -133,6 +211,8 @@ export interface AWSQualificationFinalReceipt {
+
  export interface AWSQualificationAttestation {
    version: 1;
 +  firstWalk?: AWSQualificationFirstWalkStatus;
++  keyAuthorizationOnly?: true;
    runId: string;
    candidateSha: string;
    candidateWorker: string;
+@@ -146,5 +226,6 @@ export interface AWSQualificationAttestation {
+   finalized: boolean;
+   finalizedAt?: string;
+   operations: AWSQualificationOperationEvidence[];
++  authorizationChecks?: AWSQualificationAuthorizationCheck[];
+   finalReceipt?: AWSQualificationFinalReceipt;
+ }
 diff --git a/worker/src/bootstrap.generated.ts b/worker/src/bootstrap.generated.ts
 index e87e08de02e8d9cd182a89a7ae12f34250beaec4..d84ebb74aa71e7e9f8c5dc2a3895c5ced9e97d99 100644
 --- a/worker/src/bootstrap.generated.ts
 +++ b/worker/src/bootstrap.generated.ts
 @@ -112,7 +112,7 @@ export function sharedLinuxSSHRestart(): string {
- 
+
  // prettier-ignore
  export function sharedLinuxOwnershipRepair(user: string, roots: readonly string[]): string {
 -  return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - " + bootstrapShellQuote(user) + " " + roots.map(bootstrapShellQuote).join(" ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\n\nuid = pwd.getpwnam(sys.argv[1]).pw_uid\ngid = grp.getgrnam(sys.argv[1]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\ndef repair(name, directory_fd):\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    if info.st_uid != uid or info.st_gid != gid:\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nfor root in sys.argv[2:]:\n    parent, name = os.path.split(root)\n    parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n    stack = []\n    try:\n        if repair(name or \".\", parent_fd):\n            stack.append(descend(name or \".\", parent_fd))\n        # An explicit stack also supports trees deeper than Python's recursion limit.\n        while stack:\n            directory_fd, iterator = stack[-1]\n            entry = next(iterator, None)\n            if entry is None:\n                iterator.close()\n                os.close(directory_fd)\n                stack.pop()\n            elif repair(entry.name, directory_fd):\n                stack.append(descend(entry.name, directory_fd))\n    finally:\n        for directory_fd, iterator in reversed(stack):\n            iterator.close()\n            os.close(directory_fd)\n        os.close(parent_fd)\nCRABBOX_OWNERSHIP\n";
 +  return "# Resolve the original user:same-named-group contract to numeric IDs once.\n# Keep traversal and updates anchored to directory descriptors; never follow symlinks.\n# The fixed argv label lets read-only observers distinguish this child from other Python.\nPATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - crabbox-ownership-repair-v1 " + bootstrapShellQuote(user) + " " + roots.map(bootstrapShellQuote).join(" ") + " <<'CRABBOX_OWNERSHIP'\nimport grp\nimport os\nimport pwd\nimport resource\nimport stat\nimport sys\nimport time\n\nuid = pwd.getpwnam(sys.argv[2]).pw_uid\ngid = grp.getgrnam(sys.argv[2]).gr_gid\n# systemd normally starts services with a 1024 soft limit. This child uses\n# descriptors instead of following mutable ancestor paths; allow its inherited\n# hard limit without changing the bootstrap shell or any system-wide limit.\nsoft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)\nif soft_limit != hard_limit:\n    resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))\n\nvisited = mismatched = changed = 0\n\ndef repair(name, directory_fd):\n    global visited, mismatched, changed\n    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n    visited += 1\n    if info.st_uid != uid or info.st_gid != gid:\n        mismatched += 1\n        os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)\n        changed += 1\n    return stat.S_ISDIR(info.st_mode)\n\ndef descend(name, parent_fd):\n    directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)\n    try:\n        return directory_fd, os.scandir(directory_fd)\n    except BaseException:\n        os.close(directory_fd)\n        raise\n\nstarted = time.monotonic()\nstate = \"failed\"\nprint(\"crabbox ownership-repair state=started\", flush=True)\ntry:\n    for root in sys.argv[3:]:\n        parent, name = os.path.split(root)\n        parent_fd = os.open(parent or \".\", os.O_RDONLY | os.O_DIRECTORY)\n        stack = []\n        try:\n            if repair(name or \".\", parent_fd):\n                stack.append(descend(name or \".\", parent_fd))\n            # An explicit stack also supports trees deeper than Python's recursion limit.\n            while stack:\n                directory_fd, iterator = stack[-1]\n                entry = next(iterator, None)\n                if entry is None:\n                    iterator.close()\n                    os.close(directory_fd)\n                    stack.pop()\n                elif repair(entry.name, directory_fd):\n                    stack.append(descend(entry.name, directory_fd))\n        finally:\n            for directory_fd, iterator in reversed(stack):\n                iterator.close()\n                os.close(directory_fd)\n            os.close(parent_fd)\n    state = \"complete\"\nfinally:\n    # Counts come from this walk, without another inventory or persistent readiness state.\n    print(f\"crabbox ownership-repair state={state} visited={visited} mismatched={mismatched} changed={changed} elapsed_seconds={time.monotonic() - started:.3f}\", flush=True)\nCRABBOX_OWNERSHIP\n";
  }
- 
+
  // prettier-ignore
 diff --git a/worker/src/checkpoints.ts b/worker/src/checkpoints.ts
 index a30b6e4647f0eae5c4076fef530bb3499c14723b..7cc4425f6459e72eb677eb290e956a145e9ba55a 100644
@@ -1668,7 +2566,7 @@ index a30b6e4647f0eae5c4076fef530bb3499c14723b..7cc4425f6459e72eb677eb290e956a14
 @@ -1445,6 +1450,91 @@ export async function resolveRejectedCheckpointProvisioning(
    });
  }
- 
+
 +// These helpers do not accept caller assertions as settlement authority. The
 +// qualification-only route obtains binding/proof from its immutable service binding.
 +export async function holdCheckpointQualificationUse(
@@ -1788,7 +2686,7 @@ index a30b6e4647f0eae5c4076fef530bb3499c14723b..7cc4425f6459e72eb677eb290e956a14
          const attempt = claim.leaseID
            ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)
 diff --git a/worker/src/coordinator-entry.ts b/worker/src/coordinator-entry.ts
-index 97372f5d95daa69984ec4a2452cb316f2817b9b6..58418a41c6a08a74344013f08db97e61469e6552 100644
+index e0845fe9d96a3346eabc928a3f8696b25507d78e..ea4e15aa9165e93823b1f228383dfe7e6c0a2b6e 100644
 --- a/worker/src/coordinator-entry.ts
 +++ b/worker/src/coordinator-entry.ts
 @@ -22,6 +22,7 @@ import {
@@ -1798,8 +2696,8 @@ index 97372f5d95daa69984ec4a2452cb316f2817b9b6..58418a41c6a08a74344013f08db97e61
 +import { qualificationTransportProbeResponse } from "./qualification-transport-probe";
  import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
  import { serveDisabledResponse, serveBodyLimit } from "./serve";
- import { timingSafeEqual } from "./timing-safe";
-@@ -42,6 +43,8 @@ export async function routeCoordinatorRequest(
+ import { hostCredentialRequest, hostCredentialRouteAllowed } from "./ssh-host-auth";
+@@ -43,6 +44,8 @@ export async function routeCoordinatorRequest(
    if ("response" in prepared) {
      return prepared.response;
    }
@@ -1807,12 +2705,12 @@ index 97372f5d95daa69984ec4a2452cb316f2817b9b6..58418a41c6a08a74344013f08db97e61
 +  if (probe) return probe;
    return fleetFetch(prepared.request);
  }
- 
+
 diff --git a/worker/src/fleet.ts b/worker/src/fleet.ts
-index 65b7360e3d875847d8d499a5274be165560fbee3..1a5b564d7a09e40991e0590b7cbab591cab6d659 100644
+index f141618e96e5d3ebb08ad1e37ddf9a3f3bf450dd..a2f5bf0d3637ee6fdf7a734d17df287756e8b476 100644
 --- a/worker/src/fleet.ts
 +++ b/worker/src/fleet.ts
-@@ -201,6 +201,8 @@ import {
+@@ -202,6 +202,8 @@ import {
    finalizeCheckpointDeletion,
    findManagedCheckpointImage,
    finishCheckpointUse,
@@ -1821,7 +2719,7 @@ index 65b7360e3d875847d8d499a5274be165560fbee3..1a5b564d7a09e40991e0590b7cbab591
    markCheckpointProviderMutationStarted,
    markCheckpointProviderDeleted,
    pinCheckpointPromotion,
-@@ -16990,6 +16992,74 @@ export class FleetCoordinator {
+@@ -16999,6 +17001,74 @@ export class FleetCoordinator {
          await this.scheduleCheckpointAlarm();
          return json({ checkpoint: publicCheckpointRecord(checkpoint) });
        }
@@ -2241,16 +3139,16 @@ index 0000000000000000000000000000000000000000..1dc196fdb2392960e2eeb9ca296cbf07
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67ed9809579 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..73f629dd57fd3e9b1cada8b9b61d0d8675a32d60 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
 +import { createHash } from "node:crypto";
  import { readFileSync } from "node:fs";
- 
+
 +import { XMLBuilder, XMLParser } from "fast-xml-parser";
  import { afterEach, describe, expect, it, vi } from "vitest";
- 
+
 +import { fixtureNetwork } from "../../scripts/fixtures/qualification-network.mjs";
  import { EC2SpotClient } from "../src/aws";
  import {
@@ -2323,7 +3221,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
 @@ -2011,6 +2036,230 @@ describe("AWS qualification authority", () => {
      expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
    });
- 
+
 +  it.each([
 +    "arn:aws:sts::123456789012:assumed-role/Production/qualification-test",
 +    "arn:aws:iam::123456789012:user/Qualification",
@@ -2559,10 +3457,10 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
      fixture.signer.accountId = "001234567890";
      fixture.signer.ownerId = "001234567890";
      await fixture.run.enroll(controller, identity);
-@@ -2363,6 +2613,423 @@ describe("AWS qualification candidate transport", () => {
+@@ -2363,6 +2613,424 @@ describe("AWS qualification candidate transport", () => {
    });
  });
- 
+
 +describe("first-walk integration with the existing authority", () => {
 +  function clockClaim(firstWalk: boolean, minutes: number) {
 +    const f = firstWalkAuthorityFixture();
@@ -2875,6 +3773,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
 +    fault: string | undefined;
 +  let paginated = false;
 +  vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) => {
++    if (parameters["DryRun"] === "true") return original(service, action, region, parameters);
 +    if (
 +      ["CreateVolume", "AttachVolume", "ModifyInstanceAttribute", "DeleteVolume"].includes(action)
 +    ) {
@@ -2983,7 +3882,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
  function authorityFixture(
    options: {
      borrowedInventory?: boolean;
-@@ -2384,6 +3051,8 @@ function authorityFixture(
+@@ -2384,6 +3052,8 @@ function authorityFixture(
    const signer = new FakeSigner(options);
    const env = {
      CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
@@ -2992,7 +3891,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
      CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
      CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
      CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
-@@ -2439,8 +3108,11 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
+@@ -2439,8 +3109,11 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
    vi.stubGlobal("fetch", fetch);
    let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
    const registryStorage = new MemoryStorage();
@@ -3005,15 +3904,63 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
    const bindings = {
      AWS_QUALIFICATION_RUNS: namespace,
      AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
-@@ -2559,6 +3231,7 @@ class FakeSigner {
+@@ -2558,7 +3231,9 @@ class FakeSigner {
+     region: string;
      parameters: Record<string, unknown>;
    }> = [];
++  readonly authorizationCalls: FakeSigner["calls"] = [];
    accountId = "123456789012";
 +  principalArn: string | undefined;
    ownerId: string | undefined;
    advanceNextIdentityByMs = 0;
    instanceDescribeNotFound = false;
-@@ -2618,7 +3291,7 @@ class FakeSigner {
+@@ -2569,7 +3244,15 @@ class FakeSigner {
+   ];
+   private failed = false;
+   private imageDescribeCalls = 0;
+-  private key?: { id: string; name: string; publicKey: string; runId?: string; sha?: string };
++  private key?: {
++    id: string;
++    name: string;
++    publicKey: string;
++    runId?: string;
++    sha?: string;
++    owner?: string;
++    expiry?: string;
++  };
+   private keyDescribeCalls = 0;
+   private instanceOp = "";
+   private instanceState: "absent" | "running" | "shutting-down" | "terminated" = "absent";
+@@ -2606,6 +3289,28 @@ class FakeSigner {
+     region: string,
+     parameters: Record<string, unknown>,
+   ): Promise<Response> {
++    if (parameters["DryRun"] === "true") {
++      this.authorizationCalls.push({
++        service,
++        action,
++        region,
++        parameters: structuredClone(parameters),
++      });
++      const values = [this.key?.runId, this.key?.owner, this.key?.sha, this.key?.expiry];
++      const tags = Object.fromEntries(
++        ["run", "owner", "sha", "expiry"].map((k, i) => [`crabbox_qualification_${k}`, values[i]]),
++      );
++      const supplied = Object.fromEntries(
++        Object.entries(parameters)
++          .filter(([k]) => /^Tag\.\d+\.Key$/.test(k))
++          .map(([k, value]) => [String(value), parameters[k.replace(/Key$/, "Value")]]),
++      );
++      const allowed =
++        action !== "DeleteTags" &&
++        (action !== "CreateTags" ||
++          Object.entries(tags).every(([k, value]) => value !== undefined && supplied[k] === value));
++      return awsError(allowed ? "DryRunOperation" : "UnauthorizedOperation");
++    }
+     this.calls.push({ service, action, region, parameters: structuredClone(parameters) });
+     if (action === this.options.failOnce && !this.failed) {
+       this.failed = true;
+@@ -2618,7 +3323,7 @@ class FakeSigner {
          vi.setSystemTime(new Date(Date.now() + advanceBy));
        }
        return xml(
@@ -3022,7 +3969,31 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
        );
      }
      if (action === "DescribeKeyPairs") {
-@@ -2914,3 +3587,60 @@ function awsServerError(): Response {
+@@ -2653,6 +3358,8 @@ class FakeSigner {
+         publicKey: atob(String(parameters["PublicKeyMaterial"])),
+         runId: tagValue(parameters, "crabbox_qualification_run"),
+         sha: tagValue(parameters, "crabbox_qualification_sha"),
++        owner: tagValue(parameters, "crabbox_qualification_owner"),
++        expiry: tagValue(parameters, "crabbox_qualification_expiry"),
+       };
+       if (this.options.loseAfterEffect === action && !this.failed) {
+         this.failed = true;
+@@ -2850,11 +3557,13 @@ function keyXML(key: {
+   publicKey: string;
+   runId?: string;
+   sha?: string;
++  owner?: string;
++  expiry?: string;
+ }): string {
+   return `<item>
+     <keyPairId>${key.id}</keyPairId><keyName>${key.name}</keyName>
+     <publicKey>${key.publicKey}</publicKey>
+-    <tagSet>${key.runId ? `<item><key>crabbox_qualification_run</key><value>${key.runId}</value></item><item><key>crabbox_qualification_sha</key><value>${key.sha}</value></item>` : ""}</tagSet>
++    <tagSet>${key.runId ? `<item><key>crabbox_qualification_run</key><value>${key.runId}</value></item><item><key>crabbox_qualification_sha</key><value>${key.sha}</value></item>` : ""}${key.owner ? `<item><key>crabbox_qualification_owner</key><value>${key.owner}</value></item>` : ""}${key.expiry ? `<item><key>crabbox_qualification_expiry</key><value>${key.expiry}</value></item>` : ""}</tagSet>
+   </item>`;
+ }
+
+@@ -2914,3 +3623,1358 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
@@ -3083,6 +4054,1304 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..3ad1df09dc60299892eefdbe1a5dd67e
 +    },
 +  );
 +});
++
++describe("exact retired-key recovery", () => {
++  it("denies forward and probe entrypoints before resolving any namespace in cleanup-only mode", async () => {
++    const env = { CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON: "{}" } as never;
++    const candidate = new AWSQualificationTransport(env, identity);
++    const protectedController = new AWSQualificationController(env, controller);
++    const calls = [
++      () => candidate.observeBinding("a".repeat(64)),
++      () => candidate.execute(request("GetCallerIdentity")),
++      () => candidate.prepareFirstWalk({} as never),
++      () => candidate.firstWalkStatus(),
++      () => protectedController.enroll(identity),
++      () => protectedController.claim(identity),
++      () => protectedController.openTransportProbe({} as never),
++      () => protectedController.discoverTransportProbe(),
++      () => protectedController.settleTransportProbe("a".repeat(64), true),
++    ];
++    await Promise.all(calls.map((call) => expect(call()).rejects.toThrow("cleanup-only")));
++  });
++
++  async function fixture() {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    const runIdentity = { ...identity, firstWalk: true as const };
++    await f.run.enroll(controller, runIdentity);
++    await importKey(f, runIdentity);
++    await f.run.execute(runIdentity, request("DeleteKeyPair", { KeyPairId: "key-owned" }, "ec2"));
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (action === "DeleteKeyPair")
++          return new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>NotFound is not authority</Message></Error></Errors></Response>",
++            { status: 403 },
++          );
++        return execute(service, action, region, parameters);
++      },
++    );
++    return { ...f, runIdentity };
++  }
++  it("settles denied replay and preserves rejected delete plus exact-read evidence", async () => {
++    const f = await fixture();
++    await f.run.finalize(controller);
++    const a = await f.run.attest(controller);
++    expect(a.finalized).toBe(true);
++    expect(a.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({ action: "DeleteKeyPair", outcome: "rejected", statusClass: 4 }),
++    );
++    expect(a.finalReceipt?.verification).toContainEqual(
++      expect.objectContaining({
++        action: "DescribeKeyPairsAfterRejectedDelete",
++        outcome: "absent",
++        targetDigest: createHash("sha256")
++          .update(JSON.stringify({ KeyPairId: "key-owned" }))
++          .digest("hex"),
++      }),
++    );
++  });
++  it("accepts an explicit complete empty exact-ID response", async () => {
++    const f = await fixture();
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeKeyPairs" && parameters["KeyPairId.1"])
++        return new Response(
++          '<DescribeKeyPairsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>test</requestId><keySet/></DescribeKeyPairsResponse>',
++        );
++      return execute(service, action, region, parameters);
++    });
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++  it("does not settle a denied deletion of a live key", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await importKey(f, identity);
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) =>
++      action === "DeleteKeyPair"
++        ? new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code></Error></Errors></Response>",
++            { status: 403 },
++          )
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++  });
++  it("fails closed when the bounded exact read is aborted", async () => {
++    const f = await fixture();
++    const aborted = AbortSignal.abort(new DOMException("timed out", "TimeoutError"));
++    vi.spyOn(AbortSignal, "timeout").mockReturnValue(aborted);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let observedSignal: AbortSignal | undefined;
++    vi.mocked(f.signer.execute).mockImplementation(async (...args) => {
++      const [, action, , parameters] = args;
++      if (action === "DescribeKeyPairs" && parameters["KeyPairId.1"] && (args as unknown[])[4]) {
++        const signal = (args as unknown[])[4] as AbortSignal;
++        observedSignal = signal;
++        signal.throwIfAborted();
++      }
++      return execute(...args);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect(observedSignal).toBe(aborted);
++  });
++  it.each([
++    [
++      403,
++      "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>InvalidKeyPair.NotFound</Message></Error></Errors></Response>",
++    ],
++    [
++      500,
++      "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code></Error></Errors></Response>",
++    ],
++    [200, ""],
++    [200, "<DescribeKeyPairsResponse/>"],
++    [200, "<DescribeKeyPairsResponse><keySet></DescribeKeyPairsResponse>"],
++    [
++      200,
++      "<DescribeKeyPairsResponse><keySet/><nextToken>more</nextToken></DescribeKeyPairsResponse>",
++    ],
++    [
++      200,
++      "<DescribeKeyPairsResponse><keySet><item><keyPairId>key-foreign</keyPairId></item></keySet></DescribeKeyPairsResponse>",
++    ],
++    [200, "<DescribeKeyPairsResponse><keySet/><keySet/></DescribeKeyPairsResponse>"],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code></Error><Error><Code>Other</Code></Error></Errors></Response>",
++    ],
++    [400, "<Response><Errors><Error><Code>Other.NotFound</Code></Error></Errors></Response>"],
++  ])("fails closed on exact lookup %s/%s", async (status, body) => {
++    const f = await fixture();
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeKeyPairs" && parameters["KeyPairId.1"])
++        return new Response(body, { status });
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow(/cleanup incomplete/);
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++  });
++  it("recovers from an unavailable exact lookup on reopened durable storage", async () => {
++    const f = await fixture();
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeKeyPairs" && parameters["KeyPairId.1"])
++        throw new Error("lookup unavailable");
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow(/cleanup incomplete/);
++    vi.mocked(f.signer.execute).mockImplementation(execute);
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("final exact verification catches a resurfacing key", async () => {
++    const f = await fixture();
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let exactReads = 0;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeKeyPairs" && parameters["KeyPairId.1"] && ++exactReads > 1)
++        return new Response(
++          "<DescribeKeyPairsResponse><keySet><item><keyPairId>key-owned</keyPairId></item></keySet></DescribeKeyPairsResponse>",
++        );
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("exact absence");
++  });
++  it("binds cleanup-only upgrade without rewriting original enrolled identity", async () => {
++    const f = await fixture();
++    await f.run.beginFinalization(controller);
++    const {
++      runId,
++      candidateSha,
++      candidateWorker,
++      deploymentHash,
++      expiresAt,
++      enrolledAt,
++      authoritySha,
++      authorityVersion,
++      policyHash,
++    } = await f.run.attest(controller);
++    const binding = {
++      runId,
++      candidateSha,
++      candidateWorker,
++      deploymentHash,
++      expiresAt,
++      enrolledAt,
++      authoritySha,
++      authorityVersion,
++      policyHash,
++    };
++    const env = {
++      ...f.env,
++      CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "c".repeat(40),
++      CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "recovery-v1",
++      CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON: JSON.stringify(binding),
++    };
++    const recovery = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      env as never,
++      f.signer,
++    );
++    await expect(recovery.enroll(controller, f.runIdentity)).rejects.toThrow("cleanup-only");
++    await expect(recovery.execute(f.runIdentity, request("GetCallerIdentity"))).rejects.toThrow(
++      "cleanup-only",
++    );
++    await recovery.finalize(controller);
++    expect(await recovery.attest(controller)).toMatchObject({ ...binding, finalized: true });
++    const wrong = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      {
++        ...env,
++        CRABBOX_AWS_QUALIFICATION_RECOVERY_JSON: JSON.stringify({
++          ...binding,
++          candidateSha: "e".repeat(40),
++        }),
++      } as never,
++      f.signer,
++    );
++    await expect(wrong.finalize(controller)).rejects.toThrow("does not own");
++    await expect(wrong.attest(controller)).rejects.toThrow("does not own");
++  });
++});
++
++describe("ledger-owned AMI cleanup replay", () => {
++  async function fixture(retire = false) {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.run.execute(
++      identity,
++      request(
++        "CreateImage",
++        {
++          InstanceId: "i-owned",
++          Name: "qualification-image",
++          NoReboot: "true",
++        },
++        "ec2",
++      ),
++    );
++    if (retire)
++      await f.run.execute(identity, request("DeregisterImage", { ImageId: "ami-created" }, "ec2"));
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (action === "DeregisterImage")
++          return new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>NotFound is not authority</Message></Error></Errors></Response>",
++            { status: 403 },
++          );
++        return execute(service, action, region, parameters);
++      },
++    );
++    return f;
++  }
++
++  it("settles a denied AMI replay only with exact absence and retains rejected evidence", async () => {
++    const f = await fixture(true);
++    const before = f.signer.calls.length;
++    await f.run.finalize(controller);
++    const a = await f.run.attest(controller);
++    expect(a.finalized).toBe(true);
++    expect(a.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({
++        action: "DeregisterImage",
++        outcome: "rejected",
++        statusClass: 4,
++      }),
++    );
++    expect(a.finalReceipt?.verification).toContainEqual(
++      expect.objectContaining({
++        action: "DescribeImagesAfterRejectedDelete",
++        outcome: "absent",
++        targetDigest: createHash("sha256")
++          .update(JSON.stringify({ ImageId: "ami-created" }))
++          .digest("hex"),
++      }),
++    );
++    const exactReads = f.signer.calls
++      .slice(before)
++      .filter((c) => c.action === "DescribeImages" && c.parameters["ImageId.1"] === "ami-created");
++    expect(exactReads.length).toBeGreaterThanOrEqual(2);
++    expect(
++      exactReads.every(
++        (c) => JSON.stringify(c.parameters) === JSON.stringify({ "ImageId.1": "ami-created" }),
++      ),
++    ).toBe(true);
++  });
++
++  it("retries a partially completed cleanup after the owned root volume disappears", async () => {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    await f.run.enroll(controller, identity);
++    await importKey(f);
++    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
++    await f.run.execute(
++      identity,
++      request(
++        "CreateImage",
++        {
++          InstanceId: "i-owned",
++          Name: "qualification-image",
++          NoReboot: "true",
++        },
++        "ec2",
++      ),
++    );
++    const execute = f.signer.execute.bind(f.signer);
++    let rootPending = true;
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (!rootPending && action === "DeregisterImage")
++          return new Response(
++            "<Response><Errors><Error><Code>UnauthorizedOperation</Code></Error></Errors></Response>",
++            { status: 403 },
++          );
++        const response = await execute(service, action, region, parameters);
++        if (rootPending && action === "DescribeVolumes")
++          return new Response(
++            "<DescribeVolumesResponse><volumeSet><item><volumeId>vol-owned</volumeId><status>deleting</status></item></volumeSet></DescribeVolumesResponse>",
++          );
++        return response;
++      },
++    );
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    const first = await f.run.attest(controller);
++    expect(first.finalized).toBe(false);
++    expect(first.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({ action: "DeregisterImage", outcome: "accepted" }),
++    );
++    expect(first.finalReceipt?.finalCounts.volumes).toBe(1);
++    rootPending = false;
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.alarm();
++    const final = await reopened.attest(controller);
++    expect(final.finalized).toBe(true);
++    expect(final.finalReceipt?.finalizeAttempts).toBe(2);
++    expect(final.finalReceipt?.cleanupAttempts).toContainEqual(
++      expect.objectContaining({ action: "DeregisterImage", outcome: "rejected" }),
++    );
++    expect(final.finalReceipt?.failureCodes).toEqual([]);
++    expect(final.finalReceipt?.finalCounts.volumes).toBe(0);
++  });
++
++  it("does not settle a denied deregistration of a live AMI", async () => {
++    const f = await fixture();
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++    expect(f.storage.alarm).toBeDefined();
++  });
++
++  it.each([
++    [
++      200,
++      '<DescribeImagesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>test</requestId><imagesSet/></DescribeImagesResponse>',
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code><Message>gone</Message></Error></Errors></Response>",
++    ],
++    [
++      404,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error></Errors></Response>",
++    ],
++  ])("accepts strict exact absence %s/%s", async (status, body) => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) =>
++      action === "DescribeImages" && parameters["ImageId.1"]
++        ? new Response(body, { status })
++        : execute(service, action, region, parameters),
++    );
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++
++  it.each([
++    [
++      403,
++      "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>InvalidAMIID.NotFound</Message></Error></Errors></Response>",
++    ],
++    [
++      500,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidSnapshot.NotFound</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error><Error><Code>Other</Code></Error></Errors></Response>",
++    ],
++    [200, ""],
++    [200, "<DescribeImagesResponse/>"],
++    [200, "<DescribeImagesResponse><imagesSet></DescribeImagesResponse>"],
++    [
++      200,
++      "<DescribeImagesResponse><imagesSet/><nextToken>more</nextToken></DescribeImagesResponse>",
++    ],
++    [
++      200,
++      "<DescribeImagesResponse><imagesSet><item><imageId>ami-foreign</imageId></item></imagesSet></DescribeImagesResponse>",
++    ],
++    [200, "<DescribeImagesResponse><imagesSet/><imagesSet/></DescribeImagesResponse>"],
++    [
++      200,
++      '<DescribeImagesResponse xmlns="https://foreign.invalid/"><imagesSet/></DescribeImagesResponse>',
++    ],
++    [200, "<DescribeKeyPairsResponse><keySet/></DescribeKeyPairsResponse>"],
++    [
++      200,
++      '<!DOCTYPE DescribeImagesResponse [<!ENTITY gone "">]><DescribeImagesResponse><imagesSet/></DescribeImagesResponse>',
++    ],
++  ])("fails closed on exact AMI lookup %s/%s", async (status, body) => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) =>
++      action === "DescribeImages" && parameters["ImageId.1"]
++        ? new Response(body, { status })
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++  });
++
++  it("recovers after an unavailable exact read using reopened durable storage", async () => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeImages" && parameters["ImageId.1"])
++        throw new Error("lookup unavailable");
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    vi.mocked(f.signer.execute).mockImplementation(execute);
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.alarm();
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++
++  it("fails closed when the exact AMI read is aborted", async () => {
++    const f = await fixture(true);
++    const signal = AbortSignal.abort(new DOMException("timed out", "TimeoutError"));
++    vi.spyOn(AbortSignal, "timeout").mockReturnValue(signal);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let observed: AbortSignal | undefined;
++    vi.mocked(f.signer.execute).mockImplementation(async (...args) => {
++      if (args[1] === "DescribeImages" && args[3]["ImageId.1"] && (args as unknown[])[4]) {
++        observed = (args as unknown[])[4] as AbortSignal;
++        observed.throwIfAborted();
++      }
++      return execute(...args);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect(observed).toBe(signal);
++  });
++
++  it("final verification rejects an AMI that resurfaces after rejected-delete absence", async () => {
++    const f = await fixture(true);
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    let reads = 0;
++    vi.mocked(f.signer.execute).mockImplementation(async (service, action, region, parameters) => {
++      if (action === "DescribeImages" && parameters["ImageId.1"] && ++reads > 1)
++        return new Response(
++          "<DescribeImagesResponse><imagesSet><item><imageId>ami-created</imageId></item></imagesSet></DescribeImagesResponse>",
++        );
++      return execute(service, action, region, parameters);
++    });
++    await expect(f.run.finalize(controller)).rejects.toThrow("cleanup incomplete");
++    expect((await f.run.attest(controller)).finalized).toBe(false);
++  });
++});
++
++describe("private first-walk resource authorization preflight", () => {
++  async function fixture(owner = identity.owner) {
++    useImmediateTimeouts();
++    const f = authorityFixture();
++    const runIdentity = {
++      ...identity,
++      owner,
++      firstWalk: true as const,
++      expiresAt: new Date(Date.now() + 120 * 60_000).toISOString(),
++    };
++    await f.run.enroll(controller, runIdentity);
++    await importKey(f, runIdentity);
++    const launch = () =>
++      f.run.execute(runIdentity, request("RunInstances", runInstancesParams(), "ec2"));
++    return { ...f, runIdentity, launch };
++  }
++  it("checks all four ownership tags without mutations, then checks the exact authorized launch", async () => {
++    const f = await fixture();
++    await f.launch();
++    expect(f.signer.authorizationCalls).toHaveLength(14);
++    expect(f.signer.calls.filter((c) => c.action === "RunInstances")).toHaveLength(1);
++    expect(f.signer.calls.filter((c) => ["CreateTags", "DeleteTags"].includes(c.action))).toEqual(
++      [],
++    );
++    const launch = f.signer.calls.find((c) => c.action === "RunInstances")!;
++    expect(f.signer.authorizationCalls.at(-1)?.parameters).toEqual({
++      ...launch.parameters,
++      DryRun: "true",
++    });
++    expect(
++      new Set(f.signer.authorizationCalls.slice(0, 13).map((c) => c.parameters["ResourceId.1"])),
++    ).toEqual(new Set(["key-owned"]));
++    const a = await f.run.attest(controller);
++    expect(a.authorizationChecks).toHaveLength(14);
++    expect(a.authorizationChecks?.[0]?.keyObservation).toEqual({
++      resourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
++      outcome: "matching",
++      httpStatus: 200,
++      tags: ["matching", "matching", "matching", "matching"],
++    });
++    const read = f.signer.calls.find((c) => c.parameters["KeyPairId.1"]);
++    expect(read?.parameters).toEqual({ "KeyPairId.1": "key-owned", IncludePublicKey: "false" });
++    expect(a.authorizationChecks?.every((c) => c.outcome === "passed")).toBe(true);
++    expect(JSON.stringify(a.authorizationChecks)).not.toContain("UserData");
++    expect(a.authorizationChecks?.filter((c) => c.probe.startsWith("tag-missing"))).toHaveLength(4);
++    expect(a.authorizationChecks?.filter((c) => c.probe.startsWith("tag-changed"))).toHaveLength(4);
++    expect(a.authorizationChecks?.filter((c) => c.probe.startsWith("tag-removed"))).toHaveLength(4);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++  it("preserves numeric-looking ownership identifiers lexically", async () => {
++    const f = await fixture("000001");
++    await f.launch();
++    expect((await f.run.attest(controller)).authorizationChecks?.[0]?.keyObservation?.tags).toEqual(
++      ["matching", "matching", "matching", "matching"],
++    );
++    await f.run.finalize(controller);
++  });
++  it("retains matched-key context across a denied positive gate without exporting raw identifiers", async () => {
++    const f = await fixture();
++    const execute = f.signer.execute.bind(f.signer);
++    const readId = "11111111-1111-4111-8111-111111111111";
++    const deniedId = "22222222-2222-4222-8222-222222222222";
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (parameters["DryRun"] === "true")
++          return new Response(
++            `<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>private-error</Message></Error></Errors><RequestID>${deniedId}</RequestID></Response>`,
++            { status: 403 },
++          );
++        const result = await execute(service, action, region, parameters);
++        if (parameters["KeyPairId.1"])
++          return xml(
++            (await result.text()).replace("<keySet>", `<requestId>${readId}</requestId><keySet>`),
++          );
++        return result;
++      },
++    );
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    const a = await reopened.attest(controller);
++    const check = a.authorizationChecks![0]!;
++    expect(check).toMatchObject({
++      outcome: "failed",
++      code: "UnauthorizedOperation",
++      httpStatus: 403,
++      requestIdSha256: createHash("sha256").update(deniedId).digest("hex"),
++      keyObservation: {
++        outcome: "matching",
++        tags: ["matching", "matching", "matching", "matching"],
++        requestIdSha256: createHash("sha256").update(readId).digest("hex"),
++      },
++    });
++    expect(await f.storage.get(`authorization-context:${check.requestDigest}`)).toEqual({
++      keyPairID: "key-owned",
++      tagReadRequestId: readId,
++      requestId: deniedId,
++    });
++    const exported = JSON.stringify(check);
++    for (const raw of [
++      "key-owned",
++      readId,
++      deniedId,
++      "private-error",
++      f.runIdentity.owner,
++      f.runIdentity.expiresAt,
++    ])
++      expect(exported).not.toContain(raw);
++    await expect(
++      reopened.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("requires finalization");
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    vi.mocked(f.signer.execute).mockRestore();
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  for (const tag of ["run", "owner", "sha", "expiry"])
++    for (const fault of ["missing", "changed", "duplicate"])
++      it(`refuses ${fault} ${tag} tag before any DryRun or forward effect`, async () => {
++        const f = await fixture();
++        const execute = f.signer.execute.bind(f.signer);
++        vi.spyOn(f.signer, "execute").mockImplementation(
++          async (service, action, region, parameters) => {
++            const response = await execute(service, action, region, parameters);
++            if (!parameters["KeyPairId.1"]) return response;
++            const body = await response.text();
++            const pattern = new RegExp(
++              `<item><key>crabbox_qualification_${tag}</key><value>[^<]*</value></item>`,
++            );
++            return xml(
++              body.replace(pattern, (match) =>
++                fault === "missing"
++                  ? ""
++                  : fault === "duplicate"
++                    ? match + match
++                    : match.replace(/<value>[^<]*</, "<value>other-run-private<"),
++              ),
++            );
++          },
++        );
++        await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++        const check = (await f.run.attest(controller)).authorizationChecks![0]!;
++        expect(check.keyObservation?.outcome).toBe("mismatched");
++        expect(check.keyObservation?.tags?.[["run", "owner", "sha", "expiry"].indexOf(tag)]).toBe(
++          fault === "missing" ? "missing" : "mismatched",
++        );
++        expect(JSON.stringify(check)).not.toContain("other-run-private");
++        expect(f.signer.authorizationCalls).toHaveLength(0);
++        expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++        vi.mocked(f.signer.execute).mockRestore();
++        await f.run.finalize(controller);
++      });
++  it.each([
++    "foreign-id",
++    "foreign-name",
++    "empty",
++    "duplicate",
++    "denied",
++    "not-found",
++    "malformed",
++    "oversized",
++  ])("fails closed on %s exact-key observation and settles", async (fault) => {
++    const f = await fixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        const response = await execute(service, action, region, parameters);
++        if (!parameters["KeyPairId.1"]) return response;
++        const body = await response.text();
++        if (fault === "denied") return awsError("UnauthorizedOperation");
++        if (fault === "not-found") return awsError("InvalidKeyPair.NotFound");
++        if (fault === "malformed") return xml("<DescribeKeyPairsResponse>");
++        if (fault === "oversized") return xml("x".repeat(65537));
++        if (fault === "empty")
++          return xml("<DescribeKeyPairsResponse><keySet/></DescribeKeyPairsResponse>");
++        if (fault === "duplicate")
++          return xml(body.replace(/(<keySet>)([\s\S]*)(<\/keySet>)/, "$1$2$2$3"));
++        return xml(
++          body.replace(
++            fault === "foreign-id" ? "key-owned" : /<keyName>[^<]*</,
++            fault === "foreign-id" ? "key-foreign" : "<keyName>foreign<",
++          ),
++        );
++      },
++    );
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.authorizationCalls).toHaveLength(0);
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    const check = (await reopened.attest(controller)).authorizationChecks![0]!;
++    expect(check.outcome).toBe("failed");
++    expect(check.keyObservation?.code).toBe(
++      fault === "denied"
++        ? "UnauthorizedOperation"
++        : fault === "not-found"
++          ? "InvalidKeyPair.NotFound"
++          : undefined,
++    );
++    await expect(
++      reopened.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("requires finalization");
++    vi.mocked(f.signer.execute).mockRestore();
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("settles an aborted key-read body, fences restart and keeps cleanup independent", async () => {
++    const f = await fixture();
++    const abort = new AbortController();
++    vi.spyOn(AbortSignal, "timeout").mockReturnValue(abort.signal);
++    const entered = Promise.withResolvers<void>();
++    const finishCancel = Promise.withResolvers<void>();
++    let cancelled = false;
++    let returned = false;
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (!parameters["KeyPairId.1"]) return execute(service, action, region, parameters);
++        return new Response(
++          new ReadableStream({
++            pull() {
++              entered.resolve();
++            },
++            async cancel() {
++              await finishCancel.promise;
++              cancelled = true;
++            },
++          }),
++        );
++      },
++    );
++    const launch = f.launch();
++    const failure = launch.then(
++      () => "unexpected success",
++      (error) => String(error),
++    );
++    void failure.then(() => {
++      returned = true;
++      return true;
++    });
++    await entered.promise;
++    abort.abort();
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    expect(returned).toBe(false);
++    finishCancel.resolve();
++    expect(await failure).toContain("preflight requires finalization");
++    expect(cancelled).toBe(true);
++    expect((await f.run.attest(controller)).authorizationChecks?.[0]?.keyObservation?.outcome).toBe(
++      "failed",
++    );
++    expect(f.signer.authorizationCalls).toHaveLength(0);
++    vi.mocked(f.signer.execute).mockRestore();
++    await f.run.finalize(controller);
++  });
++  it("persists the completed read before DryRun and refuses a crossed deadline", async () => {
++    vi.useFakeTimers();
++    const f = await fixture();
++    const put = f.storage.put.bind(f.storage);
++    vi.spyOn(f.storage, "put").mockImplementation(async (key, value) => {
++      await put(key, value);
++      if (key === "authorization-checks" && JSON.stringify(value).includes('"outcome":"matching"'))
++        vi.setSystemTime(Date.parse(f.runIdentity.expiresAt) - 20 * 60_000);
++    });
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.authorizationCalls).toHaveLength(0);
++    expect((await f.run.attest(controller)).authorizationChecks?.[0]?.keyObservation?.outcome).toBe(
++      "matching",
++    );
++    await f.run.finalize(controller);
++  });
++  it("does not repeat a completed read after an uncertain evidence-write response", async () => {
++    const f = await fixture();
++    const put = f.storage.put.bind(f.storage);
++    let lost = false;
++    vi.spyOn(f.storage, "put").mockImplementation(async (key, value) => {
++      await put(key, value);
++      if (
++        key === "authorization-checks" &&
++        !lost &&
++        JSON.stringify(value).includes('"outcome":"matching"')
++      ) {
++        lost = true;
++        throw new Error("lost evidence write response");
++      }
++    });
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    const readCount = f.signer.calls.filter((c) => c.parameters["KeyPairId.1"]).length;
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(
++      reopened.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("requires finalization");
++    expect(f.signer.calls.filter((c) => c.parameters["KeyPairId.1"])).toHaveLength(readCount);
++    expect(f.signer.authorizationCalls).toHaveLength(0);
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("checks typed copy/attachment/mapping while cleanup remains probe-free", async () => {
++    const f = firstWalkAuthorityFixture();
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    const before = f.signer.authorizationCalls.length;
++    await f.attach();
++    expect(f.signer.authorizationCalls.slice(before).map((c) => c.action)).toEqual([
++      "CreateVolume",
++      "AttachVolume",
++      "ModifyInstanceAttribute",
++    ]);
++    for (const c of f.signer.authorizationCalls.slice(before)) {
++      expect(c.parameters).toEqual({
++        ...f.signer.calls.find((effect) => effect.action === c.action)!.parameters,
++        DryRun: "true",
++      });
++    }
++    await f.run.finalize(controller);
++    expect(f.signer.authorizationCalls).toHaveLength(before + 3);
++    expect((await f.run.attest(controller)).firstWalk?.finalized).toBe(true);
++  });
++  it("denial blocks effects and survives restart; the existing owner still fully settles", async () => {
++    const f = await fixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation((service, action, region, parameters) =>
++      action === "RunInstances" && parameters["DryRun"] === "true"
++        ? Promise.resolve(awsError("UnauthorizedOperation"))
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    const restarted = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(
++      restarted.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    await expect(
++      restarted.execute(f.runIdentity, request("GetCallerIdentity")),
++    ).resolves.toMatchObject({ status: 200 });
++    await restarted.finalize(controller);
++    expect((await restarted.attest(controller)).finalized).toBe(true);
++    expect(f.signer.calls.some((c) => c.action === "DeleteKeyPair")).toBe(true);
++  });
++  it("treats unexpectedly permitted tag mutation as failure, without retagging", async () => {
++    const f = await fixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation((service, action, region, parameters) =>
++      action === "DeleteTags"
++        ? Promise.resolve(awsError("DryRunOperation"))
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    expect(
++      f.signer.calls.some((c) => ["RunInstances", "DeleteTags", "CreateTags"].includes(c.action)),
++    ).toBe(false);
++    expect((await f.run.attest(controller)).authorizationChecks?.at(-1)).toMatchObject({
++      probe: "tag-removed-0",
++      outcome: "failed",
++      code: "DryRunOperation",
++    });
++    await f.run.finalize(controller);
++  });
++  it.each([
++    [200, "<Response><Errors><Error><Code>DryRunOperation</Code></Error></Errors></Response>"],
++    [500, "<Response><Errors><Error><Code>DryRunOperation</Code></Error></Errors></Response>"],
++    [400, "<Other><Code>DryRunOperation</Code></Other>"],
++    [
++      400,
++      "<Response><Errors><Error><Code>Wrong</Code><Message>DryRunOperation</Message></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>DryRunOperation</Code><Code>DryRunOperation</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<Response><Errors><Error><Code>DryRunOperation</Code></Error><Error><Code>DryRunOperation</Code></Error></Errors></Response>",
++    ],
++    [
++      400,
++      "<!DOCTYPE Response><Response><Errors><Error><Code>DryRunOperation</Code></Error></Errors></Response>",
++    ],
++    [400, "<Response><Errors><Error><Code>DryRunOperation</Code></Error></Errors>"],
++    [400, "x".repeat(16385)],
++  ])(
++    "refuses malformed/ambiguous result %s (%#), redacts raw body and permits cleanup",
++    async (status, body) => {
++      const f = await fixture();
++      const execute = f.signer.execute.bind(f.signer);
++      vi.spyOn(f.signer, "execute").mockImplementation((service, action, region, parameters) =>
++        parameters["DryRun"] === "true"
++          ? Promise.resolve(new Response(body + "<!--private-detail-->", { status }))
++          : execute(service, action, region, parameters),
++      );
++      await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++      expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++      const a = await f.run.attest(controller);
++      expect(a.authorizationChecks?.at(-1)?.outcome).toBe("failed");
++      expect(JSON.stringify(a.authorizationChecks)).not.toContain("private-detail");
++      await f.run.finalize(controller);
++    },
++  );
++  it("does not repeat an interrupted check in a fresh owner", async () => {
++    const f = await fixture();
++    await f.storage.put("authorization-checks", [
++      {
++        requestDigest: "a".repeat(64),
++        action: "CreateTags",
++        probe: "tags-restated",
++        startedAt: new Date().toISOString(),
++        outcome: "pending",
++      },
++    ]);
++    const restarted = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(
++      restarted.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.authorizationCalls).toEqual([]);
++    await restarted.finalize(controller);
++    expect((await restarted.attest(controller)).finalized).toBe(true);
++  });
++  it("settles cancellation before returning failure, then permits independent finalization", async () => {
++    const f = await fixture();
++    const abortController = new AbortController();
++    vi.spyOn(AbortSignal, "timeout").mockReturnValue(abortController.signal);
++    let entered!: () => void;
++    const enteredPromise = new Promise<void>((resolve) => {
++      entered = resolve;
++    });
++    let settled = false;
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters, signal?: AbortSignal) => {
++        if (parameters["DryRun"] !== "true") return execute(service, action, region, parameters);
++        try {
++          return await new Promise<Response>((_, reject) => {
++            signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
++            entered();
++          });
++        } finally {
++          settled = true;
++        }
++      },
++    );
++    const launch = f.launch();
++    const rejected = launch.then(
++      () => "unexpected success",
++      (error) => String(error),
++    );
++    await enteredPromise;
++    abortController.abort();
++    expect(await rejected).toContain("preflight requires finalization");
++    expect(settled).toBe(true);
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    await f.run.finalize({ deploymentHash: "d".repeat(64) });
++  });
++  it("rechecks the forward clock after a passing preflight", async () => {
++    vi.useFakeTimers();
++    const f = await fixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        const response = await execute(service, action, region, parameters);
++        if (action === "RunInstances" && parameters["DryRun"] === "true")
++          vi.setSystemTime(Date.parse(f.runIdentity.expiresAt) - 20 * 60_000);
++        return response;
++      },
++    );
++    await expect(f.launch()).rejects.toThrow("work window expired");
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    await f.run.finalize(controller);
++  });
++  it("refuses foreign/missing identity before probes and ignores a candidate DryRun selector", async () => {
++    const f = await fixture();
++    await Promise.all(
++      [
++        { ...f.runIdentity, runId: "other-run" },
++        { ...f.runIdentity, owner: "" },
++      ].map((changed) =>
++        expect(
++          f.run.execute(changed, request("RunInstances", runInstancesParams(), "ec2")),
++        ).rejects.toThrow("not enrolled for this run"),
++      ),
++    );
++    expect(f.signer.authorizationCalls).toEqual([]);
++    // Existing normalization drops this caller field; it is not a new API.
++    await f.run.execute(
++      f.runIdentity,
++      request("RunInstances", { ...runInstancesParams(), DryRun: "false" }, "ec2"),
++    );
++    expect(f.signer.authorizationCalls.every((c) => c.parameters["DryRun"] === "true")).toBe(true);
++    expect(
++      f.signer.calls.find((c) => c.action === "RunInstances")?.parameters["DryRun"],
++    ).toBeUndefined();
++  });
++  it("preserves source protection and settles the exact copy after attachment authorization fails", async () => {
++    const f = firstWalkAuthorityFixture();
++    await f.run.enroll(controller, f.identity);
++    await importKey(f, f.identity);
++    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
++    const execute = vi.mocked(f.signer.execute).getMockImplementation()!;
++    vi.mocked(f.signer.execute).mockImplementation((service, action, region, parameters) =>
++      action === "AttachVolume" && parameters["DryRun"] === "true"
++        ? Promise.resolve(awsError("UnauthorizedOperation"))
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.attach()).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
++    expect(f.signer.calls.some((c) => c.action === "AttachVolume")).toBe(false);
++    await expect(
++      f.run.execute(f.identity, request("DeleteSnapshot", { SnapshotId: "snap-22222222" }, "ec2")),
++    ).rejects.toThrow("pinned");
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.finalize(controller);
++    expect(
++      f.signer.calls
++        .filter((c) => c.action === "DeleteVolume")
++        .map((c) => c.parameters["VolumeId"]),
++    ).toEqual(["vol-33333333"]);
++    expect(
++      f.signer.calls.some((c) => ["DeleteSnapshot", "DeregisterImage"].includes(c.action)),
++    ).toBe(false);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("does not dispatch after an uncertain durable probe-intent write", async () => {
++    const f = await fixture();
++    const put = f.storage.put.bind(f.storage);
++    let lost = false;
++    vi.spyOn(f.storage, "put").mockImplementation(async (key, value) => {
++      await put(key, value);
++      if (key === "authorization-checks" && !lost) {
++        lost = true;
++        throw new Error("lost write reply");
++      }
++    });
++    await expect(f.launch()).rejects.toThrow("lost write reply");
++    expect(f.signer.authorizationCalls).toEqual([]);
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(
++      reopened.execute(f.runIdentity, request("RunInstances", runInstancesParams(), "ec2")),
++    ).rejects.toThrow("preflight requires finalization");
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("checks capture authorization without changing its source or output tags", async () => {
++    const f = await fixture();
++    await f.launch();
++    await f.run.execute(
++      f.runIdentity,
++      request("CreateImage", { InstanceId: "i-owned", Name: "crabbox-image" }, "ec2"),
++    );
++    const effect = f.signer.calls.find((c) => c.action === "CreateImage")!;
++    expect(f.signer.authorizationCalls.find((c) => c.action === "CreateImage")?.parameters).toEqual(
++      { ...effect.parameters, DryRun: "true" },
++    );
++    await f.run.finalize(controller);
++  });
++  it("does not dispatch a probe after durable intent crosses the work cutoff", async () => {
++    vi.useFakeTimers();
++    const f = await fixture();
++    const put = f.storage.put.bind(f.storage);
++    vi.spyOn(f.storage, "put").mockImplementation(async (key, value) => {
++      await put(key, value);
++      if (key === "authorization-checks")
++        vi.setSystemTime(Date.parse(f.runIdentity.expiresAt) - 20 * 60_000);
++    });
++    await expect(f.launch()).rejects.toThrow("preflight requires finalization");
++    expect(f.signer.authorizationCalls).toEqual([]);
++    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
++    await f.run.finalize(controller);
++  });
++  it("bounds persisted requests without adding a cleanup dependency", async () => {
++    const f = await fixture();
++    await f.storage.put(
++      "authorization-checks",
++      Array.from({ length: 32 }, (_, i) => ({
++        requestDigest: String(i),
++        action: "RunInstances",
++        probe: "request",
++        startedAt: new Date().toISOString(),
++        outcome: "passed",
++      })),
++    );
++    await expect(f.launch()).rejects.toThrow("preflight budget exhausted");
++    expect(f.signer.authorizationCalls).toEqual([]);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++});
++
++describe("protected key-only qualification", () => {
++  async function keyFixture(options: Parameters<typeof authorityFixture>[0] = {}) {
++    useImmediateTimeouts();
++    const f = authorityFixture(options);
++    const runIdentity = {
++      ...identity,
++      firstWalk: true as const,
++      keyAuthorizationOnly: true as const,
++    };
++    const assertActive = vi.fn<(value: AWSQualificationRunIdentity) => Promise<void>>(
++      async (value) => {
++        expect(value).toEqual(runIdentity);
++      },
++    );
++    Object.assign(f.env, {
++      AWS_QUALIFICATION_REGISTRY: { idFromName: (v: string) => v, get: () => ({ assertActive }) },
++    });
++    await f.run.enroll(controller, runIdentity);
++    return { ...f, runIdentity, assertActive };
++  }
++  it("imports one fixed key, performs thirteen existing probes, remains replay safe and settles", async () => {
++    const f = await keyFixture();
++    await expect(f.run.keyAuthorization(controller)).resolves.toEqual({ passed: true, checks: 13 });
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++    expect(f.signer.authorizationCalls).toHaveLength(13);
++    expect(f.signer.authorizationCalls.every((c) => c.parameters["DryRun"] === "true")).toBe(true);
++    expect(
++      f.signer.calls.some((c) =>
++        [
++          "RunInstances",
++          "CreateTags",
++          "DeleteTags",
++          "CreateImage",
++          "CreateVolume",
++          "AttachVolume",
++          "ModifyInstanceAttribute",
++        ].includes(c.action),
++      ),
++    ).toBe(false);
++    await f.run.keyAuthorization(controller);
++    expect(f.signer.authorizationCalls).toHaveLength(13);
++    await f.run.finalize(controller);
++    const a = await f.run.attest(controller);
++    expect(a).toMatchObject({
++      keyAuthorizationOnly: true,
++      finalized: true,
++      finalReceipt: {
++        finalCounts: { instances: 0, keyPairs: 0, images: 0, snapshots: 0, volumes: 0 },
++      },
++    });
++    expect(f.signer.calls.filter((c) => c.action === "DeleteKeyPair")).toHaveLength(1);
++  });
++  for (const action of [
++    "ImportKeyPair",
++    "CreateTags",
++    "DeleteTags",
++    "RunInstances",
++    "CreateImage",
++    "CreateVolume",
++    "AttachVolume",
++    "ModifyInstanceAttribute",
++    "GetCallerIdentity",
++  ])
++    it(`rejects candidate ${action} before any signer call`, async () => {
++      const f = await keyFixture();
++      const before = f.signer.calls.length;
++      await expect(
++        f.run.execute(
++          f.runIdentity,
++          request(action, {}, action === "GetCallerIdentity" ? "sts" : "ec2"),
++        ),
++      ).rejects.toThrow("fixed protected controller");
++      expect(f.signer.calls).toHaveLength(before);
++    });
++  it("rejects forged purpose, controller identity, and first-walk attachment", async () => {
++    const f = await keyFixture();
++    await expect(f.run.keyAuthorization({ deploymentHash: "e".repeat(64) })).rejects.toThrow(
++      "not bound",
++    );
++    await expect(
++      f.run.execute(
++        { ...f.runIdentity, keyAuthorizationOnly: undefined },
++        request("GetCallerIdentity"),
++      ),
++    ).rejects.toThrow("not enrolled");
++    await expect(f.run.prepareFirstWalk(f.runIdentity, {} as never)).rejects.toThrow("not enabled");
++    await expect(
++      f.run.enroll(controller, { ...identity, keyAuthorizationOnly: true }),
++    ).rejects.toThrow("purpose");
++  });
++  for (const fault of ["failOnce", "loseAfterEffect", "http500AfterEffect"] as const)
++    it(`settles an uncertain ${fault} import after process loss without another import`, async () => {
++      const f = await keyFixture({ [fault]: "ImportKeyPair" });
++      await expect(f.run.keyAuthorization(controller)).rejects.toThrow(
++        fault === "http500AfterEffect" ? "response is ambiguous" : "lost response",
++      );
++      const reopened = new AWSQualificationRun(
++        { storage: f.storage } as never,
++        f.env as never,
++        f.signer,
++      );
++      await expect(reopened.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++      await reopened.finalize(controller);
++      expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++      expect((await reopened.attest(controller)).finalized).toBe(true);
++    });
++  it("stops at the first denied positive gate, retains evidence and recovers after cancellation", async () => {
++    const f = await keyFixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) =>
++      parameters["DryRun"] === "true"
++        ? awsError("UnauthorizedOperation")
++        : execute(service, action, region, parameters),
++    );
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++    await f.run.beginFinalization(controller);
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("finalizing");
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).authorizationChecks).toHaveLength(1);
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++  });
++  it("persists uncertain probes and never retries them after executor replacement", async () => {
++    const f = await keyFixture();
++    const execute = f.signer.execute.bind(f.signer);
++    vi.spyOn(f.signer, "execute").mockImplementation(
++      async (service, action, region, parameters) => {
++        if (parameters["DryRun"] === "true") throw new Error("lost diagnostic reply");
++        return execute(service, action, region, parameters);
++      },
++    );
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow(
++      "authorization preflight requires finalization",
++    );
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await expect(reopened.keyAuthorization(controller)).rejects.toThrow("requires finalization");
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).authorizationChecks).toHaveLength(1);
++    expect(f.signer.calls.filter((c) => c.action === "ImportKeyPair")).toHaveLength(1);
++  });
++  it("refuses cancellation before import and retains independent cleanup", async () => {
++    const f = await keyFixture();
++    await f.run.beginFinalization(controller);
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("finalizing");
++    expect(f.signer.calls.some((c) => c.action === "ImportKeyPair")).toBe(false);
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++  it("reconciles uncertain deletion after a cleanup process failure", async () => {
++    const f = await keyFixture({ loseAfterEffect: "DeleteKeyPair" });
++    await f.run.keyAuthorization(controller);
++    try {
++      await f.run.finalize(controller);
++    } catch {
++      /* Existing recovery owns the uncertain delete. */
++    }
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("retains the first durable start after a crash before the diagnostic marker write", async () => {
++    const f = await keyFixture();
++    const state = await f.storage.get<Record<string, unknown>>("run");
++    const startedAt = Date.now() - 9 * 60_000;
++    await f.storage.put("run", { ...state, keyAuthorizationStartedAt: startedAt });
++    const reopened = new AWSQualificationRun(
++      { storage: f.storage } as never,
++      f.env as never,
++      f.signer,
++    );
++    await reopened.keyAuthorization(controller);
++    expect(await f.storage.get("key-authorization")).toMatchObject({ startedAt });
++    expect(await f.storage.get("run")).toMatchObject({ keyAuthorizationStartedAt: startedAt });
++    await reopened.finalize(controller);
++    expect((await reopened.attest(controller)).finalized).toBe(true);
++  });
++  it("enforces the ten-minute diagnostic bound without losing cleanup", async () => {
++    const f = await keyFixture();
++    const state = await f.storage.get<Record<string, unknown>>("run");
++    expect(state).toBeDefined();
++    await f.storage.put("run", { ...state, keyAuthorizationStartedAt: Date.now() - 10 * 60_000 });
++    await expect(f.run.keyAuthorization(controller)).rejects.toThrow("ten-minute");
++    await f.run.finalize(controller);
++    expect((await f.run.attest(controller)).finalized).toBe(true);
++  });
++});
 diff --git a/worker/test/bootstrap-ownership.test.ts b/worker/test/bootstrap-ownership.test.ts
 index c7661399b847d0b513eff4b3d1a14dd6bc298c43..e9a720a6adee6a0a9766cbcb57ac88c24de43648 100644
 --- a/worker/test/bootstrap-ownership.test.ts
@@ -3114,7 +5383,7 @@ index c7661399b847d0b513eff4b3d1a14dd6bc298c43..e9a720a6adee6a0a9766cbcb57ac88c2
 +  // Keep the real emitted repair, omitting the directory-creation prelude.
 +  return script.slice(script.indexOf("# Resolve the original user:"));
  }
- 
+
  describe("cloud-init ownership repair", () => {
    it("emits a physical, descriptor-anchored numeric ownership repair", () => {
      const script = ownershipScript("/work/fixture's tree", "/tmp/cache");
@@ -3282,7 +5551,7 @@ index 39deae3c299a7c9301ebb7b5f009026cfc3132dd..dfadf92fcf41b31a6f8dc1295c83dc7e
 --- a/worker/test/checkpoints.test.ts
 +++ b/worker/test/checkpoints.test.ts
 @@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
- 
+
  import {
    CheckpointError,
 +  holdCheckpointQualificationUse,
@@ -3295,7 +5564,7 @@ index 39deae3c299a7c9301ebb7b5f009026cfc3132dd..dfadf92fcf41b31a6f8dc1295c83dc7e
 @@ -6198,6 +6202,130 @@ describe("coordinator-managed checkpoints", () => {
      expect(await storage.get(checkpointKey(pending.id))).toMatchObject({ pinCount: 1 });
    });
- 
+
 +  it("holds qualification use through readiness, expiry, cancellation and uncertain cleanup until exact run settlement", async () => {
 +    vi.useFakeTimers();
 +    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));

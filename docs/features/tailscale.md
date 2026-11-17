@@ -75,8 +75,9 @@ tailscale:
 managed Linux leases. `tailscale.network` is an alias that sets the top-level
 `network` mode used for target resolution on SSH-backed commands. Hostname templates
 support `{id}`, `{slug}`, and `{provider}`; the rendered value is sanitized to a DNS
-label. When `enabled` is set, `tags` must contain at least one valid `tag:` value and
-`hostnameTemplate` must be non-empty.
+label and cut to 63 characters without a trailing hyphen. When `enabled` is set,
+`tags` must contain at least one valid `tag:` value and `hostnameTemplate` must be
+non-empty.
 
 Environment overrides:
 
@@ -142,6 +143,11 @@ CRABBOX_TAILSCALE_VERSION       pinned static build version
 CRABBOX_TAILSCALE_SHA256_AMD64  pinned amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64  pinned arm64 archive checksum
 ```
+
+Lease API requests that omit `tailscaleTags` or send an empty list use every tag
+in `CRABBOX_TAILSCALE_TAGS`. Explicit non-empty lists must be a subset of those
+allowed tags. The CLI sends its configured tags explicitly; this API default does
+not override them.
 
 The OAuth client's tags and each requested lease tag must also satisfy Tailscale's
 ownership rules:

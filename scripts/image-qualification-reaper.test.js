@@ -438,7 +438,8 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.result.result, "finalized");
     assert.equal(result.state.run, null);
     assert.equal(result.state.candidate, false);
-    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}?force=true`));
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}`));
+    assert.ok(result.state.deleteURLs.every((url) => !url.includes("?")));
     assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${controller}`));
     assert.deepEqual(calls(result.state), [
       "POST /discover",
@@ -580,7 +581,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   test("failed owned candidate discovery is cleaned without claiming idle", (t) => {
     const result = fixture(t, { candidate: true, active: true, discoveryStatus: 403 })();
     assert.equal(result.status, 1);
-    assert.match(result.result.failure, /discover failed: 403/);
+    assert.match(result.result.failure, /"action":"discover","reason":"http-error","status":403/);
     assert.equal(result.state.controller, null);
     assert.ok(result.state.run);
     assert.equal(result.state.candidate, true);
@@ -602,7 +603,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.status, 1);
     assert.equal(result.result.result, "failed");
     assert.match(result.result.failure, /invalid or missing GITHUB_REPOSITORY/);
-    assert.match(result.result.failure, /discover failed: 403/);
+    assert.match(result.result.failure, /"action":"discover","reason":"http-error","status":403/);
     assert.equal(uploads(result.state).length, 0);
     assert.equal(deletes(result.state).length, 0);
   });
@@ -610,7 +611,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   test("discovery and cleanup failures are both reported", (t) => {
     const result = fixture(t, { discoveryStatus: 403, deleteFailure: true })();
     assert.equal(result.status, 1);
-    assert.match(result.result.failure, /discover failed: 403/);
+    assert.match(result.result.failure, /"action":"discover","reason":"http-error","status":403/);
     assert.match(result.result.failure, /cleanup:.*503/);
     assert.ok(result.state.controller);
   });

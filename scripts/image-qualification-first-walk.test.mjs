@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
-import relay from "./image-qualification-relay-worker.mjs";
+
 import {
   firstWalkRecipeSha256,
   readFirstWalkRecipe,
@@ -14,6 +14,11 @@ import {
   verifyQualificationEvidence,
   verifyFirstWalkPreparation,
 } from "./image-qualification-control.mjs";
+import {
+  prepareQualificationBuild,
+  readQualificationPackage,
+} from "./image-qualification-package.mjs";
+import relay from "./image-qualification-relay-worker.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
@@ -142,7 +147,232 @@ if (args[0] === 'systemd-run') {
   assert.equal(fs.existsSync(calls[1].at(-1)), false);
 }
 
-for (const { label, badResult = false, badPreparation = false, evidenceFault } of [
+// Exercise the emitted argv, not a second hand-maintained flag list. The CLI
+// must be built from the same pinned baseline/overlay used by the private job.
+// Appending help parses every preceding flag and exits before config/backend
+// loading. Explicit --id keeps stop's lease from hiding later flags as operands.
+async function checkPinnedCLI(commands, directory) {
+  const baseline = path.join(directory, "baseline");
+  const candidate = path.join(directory, "candidate-source");
+  const home = path.join(directory, "parser-home");
+  fs.mkdirSync(home);
+  const cleanEnv = { PATH: process.env.PATH, HOME: home, GOTOOLCHAIN: "local" };
+  const exec = (command, args, options = {}) =>
+    execFileSync(command, args, {
+      env: cleanEnv,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 300_000,
+      ...options,
+    });
+  const { contract } = readQualificationPackage(root);
+  for (const target of [baseline, candidate]) {
+    exec("git", ["clone", "--quiet", "--shared", "--no-checkout", root, target]);
+    exec("git", ["checkout", "--quiet", "--detach", contract.baselineCommit], { cwd: target });
+  }
+  fs.cpSync(
+    path.join(root, "qualification/first-walk/v1"),
+    path.join(candidate, "qualification/first-walk/v1"),
+    { recursive: true },
+  );
+  prepareQualificationBuild(root, candidate, baseline);
+  const [goCache, moduleCache] = exec("go", ["env", "GOCACHE", "GOMODCACHE"], {
+    env: { ...cleanEnv, HOME: os.homedir() },
+  })
+    .trim()
+    .split(/\r?\n/);
+  const binary = path.join(directory, "pinned-crabbox");
+  exec("go", ["build", "-trimpath", "-o", binary, "./cmd/crabbox"], {
+    cwd: baseline,
+    env: {
+      ...cleanEnv,
+      GOCACHE: goCache,
+      GOMODCACHE: moduleCache,
+      GOWORK: "off",
+      CGO_ENABLED: "0",
+      GOFLAGS: "-mod=readonly",
+    },
+  });
+  assert.deepEqual(
+    commands.map((c) => c.args[0]),
+    ["warmup", "run", "stop", "warmup", "run"],
+  );
+  for (const { args, env } of commands) {
+    assert.equal(args.includes("--help"), false);
+    assert.equal(args.includes("--"), false);
+    const probe = (argv) =>
+      spawnSync(binary, [...argv, "--help"], {
+        cwd: home,
+        env: { ...env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+    const parsed = probe(args);
+    assert.equal(parsed.status, 0, `${args[0]}: ${parsed.stderr}`);
+    assert.match(parsed.stderr, new RegExp(`Usage of ${args[0]}:`));
+    const rejected = probe([...args, "--region", "us-east-1"]);
+    assert.equal(rejected.status, 2);
+    assert.match(rejected.stderr, /flag provided but not defined: -region/);
+  }
+  // Config projection is local: verify the admitted region is actually consumed
+  // by this CLI, rather than merely present in the mock executor's environment.
+  const config = JSON.parse(
+    exec(binary, ["config", "show", "--provider", "aws", "--json"], {
+      cwd: home,
+      env: { ...commands[0].env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config") },
+    }),
+  );
+  assert.equal(config.aws.region, "us-east-1");
+  assert.equal(config.coordinator, commands[0].env.CRABBOX_COORDINATOR);
+
+  // Parse and send the actual workload argv through the pinned CLI and relay.
+  // Stop at admission: lease metadata is local fixture data; no SSH, guest or
+  // cloud operation is allowed.
+  const requests = [];
+  const forwarded = [];
+  const relayEnv = {
+    EXECUTOR_TOKEN: "e".repeat(64),
+    CANDIDATE_ADMIN_TOKEN: "a".repeat(64),
+    QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+    QUALIFICATION_MODE: "first-walk",
+    QUALIFICATION_OWNER: "fixture-owner",
+    QUALIFICATION_ORG: "fixture-org",
+    AWS_REGION: "us-east-1",
+    CANDIDATE: {
+      fetch: async (request) => {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/v1/runs/run_receipt_fixture")
+          return Response.json({
+            run: { id: "run_receipt_fixture", exitCode: 0, endedAt: "2026-01-01T00:00:01Z" },
+          });
+        if (pathname === "/v1/runs/run_receipt_fixture/receipt") {
+          assert.equal(request.method, "GET");
+          assert.equal(
+            request.headers.get("authorization"),
+            `Bearer ${relayEnv.CANDIDATE_ADMIN_TOKEN}`,
+          );
+          return Response.json({ error: "fixture_receipt_stop" }, { status: 403 });
+        }
+        if (request.method === "GET" && /^\/v1\/leases\/cbx_/.test(pathname))
+          return Response.json({
+            lease: {
+              id: pathname.split("/").at(-1),
+              provider: "aws",
+              target: "linux",
+              state: "ready",
+            },
+          });
+        assert.match(pathname, /^\/v1\/runs\/run_/);
+        if (request.method === "GET") return Response.json({ error: "not_found" }, { status: 404 });
+        assert.equal(request.method, "PUT");
+        forwarded.push(await request.json());
+        return Response.json({ error: "fixture_admission_stop" }, { status: 403 });
+      },
+    },
+  };
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const part of req) body += part;
+    requests.push({ method: req.method, url: req.url });
+    const response = await relay.fetch(
+      new Request(`https://relay.invalid${req.url}`, {
+        method: req.method,
+        headers: req.headers,
+        ...(body ? { body } : {}),
+      }),
+      relayEnv,
+    );
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const workloadCommands = commands.filter(({ args }) => args[0] === "run");
+    assert.equal(workloadCommands.length, 2);
+    for (const { args, env, input } of workloadCommands) {
+      const outcome = await new Promise((resolve, reject) => {
+        let stderr = "";
+        const child = spawn(binary, args, {
+          cwd: home,
+          env: {
+            ...env,
+            CRABBOX_COORDINATOR: `http://127.0.0.1:${server.address().port}`,
+            HOME: home,
+            XDG_CONFIG_HOME: path.join(home, "config"),
+          },
+          stdio: ["pipe", "ignore", "pipe"],
+          timeout: 10_000,
+          killSignal: "SIGKILL",
+        });
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal, stderr }));
+        child.stdin.end(input);
+      });
+      assert.equal(outcome.signal, null);
+      assert.notEqual(outcome.code, 0);
+      assert.match(outcome.stderr, /fixture_admission_stop/);
+    }
+    assert.equal(forwarded.length, 2);
+    for (const body of forwarded) {
+      assert.equal(body.provider, "aws");
+      assert.equal(body.target, "linux");
+      assert.equal(body.class, "standard");
+      assert.equal(body.serverType, "t3.small");
+    }
+    // Rejected admission reports stay outside the narrow relay surface. The
+    // CLI must preserve the original failure; finalizer/reaper own cleanup.
+    assert.equal(requests.filter(({ method }) => method === "PUT").length, 2);
+    assert.equal(requests.filter(({ url }) => url.endsWith("/admission-failure")).length, 2);
+    assert.ok(
+      requests.every(
+        ({ method, url }) =>
+          method === "GET" || method === "PUT" || url.endsWith("/admission-failure"),
+      ),
+    );
+
+    // Use the same pinned CLI to send its real receipt request through the
+    // relay. Stop at the candidate, before signature verification: existing Go
+    // tests cover receipt verification, and no log-read route is needed here.
+    const receipt = await new Promise((resolve, reject) => {
+      let stderr = "";
+      const child = spawn(binary, ["receipt", "run_receipt_fixture"], {
+        cwd: home,
+        env: {
+          ...commands[0].env,
+          CRABBOX_COORDINATOR: `http://127.0.0.1:${server.address().port}`,
+          HOME: home,
+          XDG_CONFIG_HOME: path.join(home, "config"),
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      });
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal, stderr }));
+    });
+    assert.equal(receipt.signal, null);
+    assert.notEqual(receipt.code, 0);
+    assert.match(receipt.stderr, /fixture_receipt_stop/);
+    assert.deepEqual(requests.slice(-2), [
+      { method: "GET", url: "/v1/runs/run_receipt_fixture" },
+      { method: "GET", url: "/v1/runs/run_receipt_fixture/receipt" },
+    ]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+for (const {
+  label,
+  badResult = false,
+  badPreparation = false,
+  evidenceFault,
+  stopObservation,
+  hygieneWarning = false,
+} of [
   { label: "captures exactly once and dies for independent cleanup" },
   { label: "rejects failed first walk without replay", badResult: true },
   { label: "rejects incomplete preparation before capture", badPreparation: true },
@@ -152,12 +382,32 @@ for (const { label, badResult = false, badPreparation = false, evidenceFault } o
   { label: "removes private state after a missing log", evidenceFault: "missing" },
   { label: "rejects a log replaced by another regular file", evidenceFault: "replacement" },
   { label: "removes private state after an evidence write failure", evidenceFault: "write" },
+  { label: "continues after best-effort hygiene warnings", hygieneWarning: true },
+  ...[
+    "retry",
+    "terminal",
+    "long-error",
+    "denied",
+    "lost",
+    "malformed",
+    "missing-id",
+    "wrong-id",
+    "oversized",
+    "timeout",
+    "redirect",
+    "cancelled",
+  ].map((stopObservation) => ({
+    label: `retains source stop failure with ${stopObservation} observation`,
+    stopObservation,
+  })),
 ])
   test(`credentialless executor ${label}`, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-contract-"));
     const commandFile = path.join(dir, "commands");
     const calls = [],
       commands = [];
+    let executor;
+    let leaseReads = 0;
     const result = {
       completed: !badResult,
       unmounted: true,
@@ -171,8 +421,51 @@ for (const { label, badResult = false, badPreparation = false, evidenceFault } o
       for await (const chunk of req) raw += chunk;
       calls.push({ method: req.method, url: req.url, body: raw && JSON.parse(raw) });
       let data;
-      if (/\/v1\/leases\//.test(req.url)) data = { lease: { workRoot: "/workspaces/crabbox" } };
-      else if (req.url.endsWith("/use")) data = { claim: "fixture-claim" };
+      if (/\/v1\/leases\//.test(req.url)) {
+        leaseReads++;
+        const id = req.url.split("/").at(-1);
+        data = { lease: { id, workRoot: "/workspaces/crabbox" } };
+        if (stopObservation && leaseReads === 2) {
+          assert.equal(req.headers.authorization, `Bearer ${"e".repeat(64)}`);
+          assert.equal(req.method, "GET");
+          if (stopObservation === "cancelled") {
+            executor.kill("SIGTERM");
+            return;
+          }
+          if (stopObservation === "timeout") return;
+          if (stopObservation === "lost") {
+            req.socket.destroy();
+            return;
+          }
+          if (stopObservation === "denied" || stopObservation === "redirect") {
+            res.writeHead(stopObservation === "denied" ? 403 : 302, {
+              location: "/must-not-follow",
+            });
+            res.end("REJECTED_BODY_DO_NOT_EXPORT");
+            return;
+          }
+          if (stopObservation === "malformed" || stopObservation === "oversized") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(stopObservation === "malformed" ? "{" : "x".repeat(64 * 1024 + 1));
+            return;
+          }
+          data.lease = {
+            id,
+            state: "released",
+            cleanupStatus: "failed",
+            cleanupError: `fixture cleanup reason ${"e".repeat(64)} https://private.invalid/path vol-12345678 192.0.2.1`,
+            cleanupAttempts: 2,
+            cleanupFailedAt: "2026-01-01T00:00:00Z",
+            ...(stopObservation === "retry" ? { cleanupRetryAt: "2026-01-01T00:01:00Z" } : {}),
+            host: "PRIVATE_HOST_DO_NOT_EXPORT",
+            sshHostKey: "PRIVATE_KEY_DO_NOT_EXPORT",
+            private: "UNRELATED_BODY_DO_NOT_EXPORT",
+          };
+          if (stopObservation === "long-error") data.lease.cleanupError = "x".repeat(20_000);
+          if (stopObservation === "wrong-id") data.lease.id = "cbx_wrong01";
+          if (stopObservation === "missing-id") delete data.lease.id;
+        }
+      } else if (req.url.endsWith("/use")) data = { claim: "fixture-claim" };
       else if (req.url.endsWith("/first-walk"))
         data = { phase: "attached", volumeID: result.volumeID };
       else data = { checkpoint: { state: "ready", image: { snapshotIDs: ["snap-22222222"] } } };
@@ -198,6 +491,13 @@ fs.mkdirSync(keyDir,{recursive:true});
 const key=path.join(keyDir,'id_ed25519');
 fs.writeFileSync(key,${JSON.stringify(privateMarker)},{mode:0o600});
 fs.writeFileSync('unexpected.log',${JSON.stringify(unexpectedMarker)});
+if (process.argv[2]==='stop') {
+  if (${JSON.stringify(hygieneWarning)}) console.error('warning: hygiene SSH command killed');
+  if (${JSON.stringify(!!stopObservation)}) {
+    console.error('fixture authoritative release failed');
+    process.exit(5);
+  }
+}
 if(input.includes('--volume')) {
   const fault=${JSON.stringify(evidenceFault ?? "")};
   const name='source-stock-ready.log';
@@ -225,6 +525,8 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         AWS_PROFILE: "production",
         AWS_WEB_IDENTITY_TOKEN_FILE: "/synthetic/production-token",
         CRABBOX_BROKER_URL: "https://production.invalid",
+        CRABBOX_AWS_REGION: "eu-west-1",
+        AWS_REGION: "eu-west-1",
         GH_TOKEN: "synthetic-inherited-token",
         GITHUB_RUN_ID: "123",
         GITHUB_RUN_ATTEMPT: "1",
@@ -242,15 +544,18 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
           [path.join(root, "scripts/image-qualification-first-walk.mjs")],
           { env, stdio: ["ignore", "ignore", "pipe"], timeout: 15_000, killSignal: "SIGKILL" },
         );
+        executor = child;
         child.stderr.on("data", (chunk) => (stderr += chunk));
         child.on("error", reject);
         child.on("close", (code, signal) => resolve({ code, signal }));
       });
       assert.deepEqual(
         outcome,
-        badResult || badPreparation || evidenceFault
-          ? { code: 1, signal: null }
-          : { code: null, signal: "SIGKILL" },
+        stopObservation === "cancelled"
+          ? { code: null, signal: "SIGTERM" }
+          : badResult || badPreparation || evidenceFault || stopObservation
+            ? { code: 1, signal: null }
+            : { code: null, signal: "SIGKILL" },
       );
       if (["directory", "fifo", "replacement"].includes(evidenceFault))
         assert.match(
@@ -261,20 +566,85 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
       assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
+      if (!badResult && !badPreparation && !evidenceFault && !stopObservation && !hygieneWarning)
+        await checkPinnedCLI(commands, dir);
       for (const command of commands) {
         for (const key of [
           "AWS_PROFILE",
           "AWS_WEB_IDENTITY_TOKEN_FILE",
           "CRABBOX_BROKER_URL",
           "GH_TOKEN",
+          "AWS_REGION",
         ])
           assert.equal(command.env[key], undefined);
         assert.equal(command.env.CRABBOX_COORDINATOR, env.QUALIFICATION_RELAY_URL);
+        assert.equal(command.env.CRABBOX_AWS_REGION, env.QUALIFICATION_AWS_REGION);
         assert.notEqual(command.env.HOME, dir);
         assert.equal(command.cwd, command.env.HOME);
         assert.equal(command.env.XDG_CONFIG_HOME, path.join(command.cwd, "config"));
-        assert.equal(fs.existsSync(command.cwd), false, "private scratch must be removed");
+        if (stopObservation !== "cancelled")
+          assert.equal(fs.existsSync(command.cwd), false, "private scratch must be removed");
       }
+      if (stopObservation) {
+        assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 1);
+        assert.equal(commands.filter((c) => c.args[0] === "stop").length, 1);
+        assert.equal(commands.filter((c) => c.input.includes("--volume")).length, 0);
+        assert.equal(
+          calls.some((c) => c.url.endsWith("/first-walk") || c.url.endsWith("/use")),
+          false,
+        );
+        assert.equal(
+          calls.some((c) => c.url === "/must-not-follow"),
+          false,
+        );
+        assert.equal(leaseReads, 2, "only one failure observation, no retry");
+        const file = path.join(proof, "source-release-status.json");
+        if (stopObservation === "cancelled") {
+          assert.equal(fs.existsSync(file), false);
+          return; // Process death leaves the unchanged independent owner to settle.
+        }
+        assert.match(stderr, /source-release exit=5 signal=null/);
+        const text = fs.readFileSync(file, "utf8");
+        for (const privateText of [
+          "e".repeat(64),
+          "private.invalid",
+          "vol-12345678",
+          "192.0.2.1",
+          "PRIVATE_HOST_DO_NOT_EXPORT",
+          "PRIVATE_KEY_DO_NOT_EXPORT",
+          "UNRELATED_BODY_DO_NOT_EXPORT",
+          "REJECTED_BODY_DO_NOT_EXPORT",
+        ])
+          assert.equal(text.includes(privateText), false);
+        const receipt = JSON.parse(text);
+        assert.equal(receipt.leaseID, calls[0].url.split("/").at(-1));
+        if (stopObservation === "long-error") {
+          assert.equal(receipt.observation, "observed");
+          assert.equal(receipt.cleanup.cleanupError.length, 4096);
+          assert.equal(receipt.cleanup.cleanupErrorTruncated, true);
+        } else if (["retry", "terminal"].includes(stopObservation)) {
+          assert.equal(receipt.observation, "observed");
+          assert.equal(receipt.cleanup.cleanupStatus, "failed");
+          assert.equal(receipt.cleanup.cleanupAttempts, 2);
+          assert.equal(
+            receipt.cleanup.cleanupError,
+            "fixture cleanup reason [executor-token] [url] [aws-resource] [ip]",
+          );
+          assert.equal(
+            receipt.cleanup.cleanupRetryAt,
+            stopObservation === "retry" ? "2026-01-01T00:01:00Z" : undefined,
+          );
+        } else {
+          assert.notEqual(receipt.observation, "observed");
+          assert.equal(receipt.cleanup, undefined);
+        }
+        assert.match(
+          fs.readFileSync(path.join(proof, "checksums.sha256"), "utf8"),
+          new RegExp(`${digest(text)}  ./source-release-status.json`),
+        );
+        return;
+      }
+      assert.equal(fs.existsSync(path.join(proof, "source-release-status.json")), false);
       if (badPreparation) {
         assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 1);
         assert.equal(
@@ -284,6 +654,7 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         );
         return;
       }
+      assert.equal(leaseReads, 2, "successful stop must not add a diagnostic read");
       const population = commands.filter((c) => c.input.includes("--work-root"));
       assert.equal(population.length, 1);
       assert.match(population[0].input, /--uid=crabbox --gid=crabbox/);

@@ -1,103 +1,107 @@
-# Private first-walk qualification package
+# Private first-walk build package
 
-This temporary package is diagnostic tooling. It makes no performance improvement
-and is outside the normal Go, Worker, Node.js and documentation build inputs.
-Already merged qualification tooling remains a separate final-closeout obligation.
+This package supplies temporary diagnostic tooling for the dispatch-only image
+qualification workflow. Normal Go, Worker, Node.js and documentation builds do
+not import it. It contains no performance optimization or ownership bypass.
 
-`manifest.json` pins accepted-main commit
-`c75e9323c8ecf36b8cb4b6da1a524a046e26538c` and its tree. `runtime.patch`
-preserves the prior diagnostic implementation, including snapshot-use protection
-through attachment, execution and complete cleanup, exact volume identity,
-uncertain-response recovery and cancellation. It does not replace the lifecycle.
-The serial ownership routine retains numeric ownership checks, descriptor
-anchoring, no-follow traversal and conditional writes. No scheduler or bypass is
-included. `readiness-reporting.patch` preserves the separate reporting fix for
-possible product adoption; the private overlay does not apply it.
+`manifest.json` pins the baseline commit/tree, overlay, ownership recipe,
+configuration and complete resulting Worker source. Protected build tooling
+applies `runtime.patch` only in a separate baseline checkout and checks every
+preimage, postimage and changed path. Numeric ownership checks, descriptor
+anchoring, no-follow traversal, conditional writes and lifecycle recovery remain
+part of that implementation.
 
-## Build boundary
+## Source and artifact admission
 
-The protected `image-qualification.yml` workflow is dispatch-only. In first-walk
-mode its credential-free build checks out three separate trees: protected tooling,
-candidate data and the exact baseline. The candidate's production inputs must
-match the baseline and its package must match the protected package. Candidate
-scripts, patches, configuration and package hooks are never executed. Protected
-code verifies the patch digest and every preimage, applies the protected patch to
-the disposable baseline, then verifies the complete changed-path set, postimages,
-recipe and full Worker source digest. It uses the pinned baseline's Go inputs and
-Worker lockfile (`npm ci --ignore-scripts`), and the protected private configuration.
-Only this separate checkout receives the overlay.
+For `mode=first-walk`, leave `pull_request` blank and provide an exact 40-character
+`candidate_sha` already on the protected default branch's history. The current
+protected workflow commit is also eligible. An open candidate PR is not required.
+Mint and retained qualification continue to require their open same-repository PR.
 
-The resulting version-2 build receipt and artifact manifest bind baseline commit
-and tree, package/overlay/recipe/configuration hashes, complete resulting Worker
-source identity and every output's size/hash. The sealed outputs include the
-private coordinator and private authority modules, minified by the pinned toolchain
-to retain the existing 128 MiB aggregate artifact cap. The authority configuration
-is pinned separately; it is the unchanged baseline
-`worker/wrangler.aws-qualification-authority.jsonc`. Credentialed consumers require the
-same package identity and reject legacy first-walk manifests. Mint and retained
-qualification keep their version-1 contract. Old first-walk artifacts/handoffs
-cannot be reused: build fresh artifacts and a fresh handoff from adopted protected
-tooling. This package must reach protected main before that supported dispatch;
-this draft does not authorize adoption or execution. After protected-tooling
-adoption a distinct open same-repository candidate PR is required by the existing
-dispatch owner; the merged tooling PR cannot also be that open candidate. Its
-package must equal the protected package, and production inputs must still equal
-the pinned baseline. Main advancing production inputs requires a reviewed baseline
-refresh, never a relaxed guard.
+An accepted source commit alone is insufficient: its production inputs must match
+the package's pinned baseline, and its package must equal the protected package.
+Choose a compatible accepted commit; never weaken those checks or revert newer
+production changes. Baseline changes require a reviewed package identity update.
+Candidate files are data, never executable build controls. Protected tooling and
+the baseline's pinned dependencies own the credential-free build.
 
-Production configuration, source, generated bootstrap and CLI readiness reporting
-remain byte-identical to the declared baseline. There is no production import of
-this package. No deployment/publication path filters are changed. All changed
-paths are outside the existing coordinator deployment and Pages publication
-filters. General CI may run; merging tooling does not itself dispatch qualification.
+Version-2 receipts and sealed artifacts bind the exact source, protected workflow,
+baseline, overlay, recipe, configurations, complete private Worker source and
+output sizes/hashes. Credentialed consumers still require fresh artifacts from
+the same protected run, unchanged protected main, and their existing environment
+approvals. Legacy first-walk manifests cannot substitute. Live execution,
+authority credential custody, admission and complete cleanup remain separate.
 
-## Local validation
+## Validation
 
-Use Node from `.node-version` and Go from `go.mod`, with no cloud credentials.
-From the repository root:
+Use Node from `.node-version`, without cloud credentials:
 
 ```sh
 node --test scripts/image-qualification*.test.mjs scripts/image-qualification*.test.js
 ```
 
-For an end-to-end build rehearsal, make separate local checkouts of the candidate,
-the protected tooling and the manifest's baseline. In a credential-free shell:
+For a private build rehearsal, use separate exact protected, source and baseline
+checkouts. Run `image-qualification-control.mjs prepare-build` in first-walk mode,
+then the protected workflow's Go and Wrangler dry-run build and manifest steps.
+Local receipts are not hosted artifacts or serving-version proof. The executor,
+checkpoint owner, authority, finalizer and independent reaper retain lifecycle
+ownership; source admission does not authorize deployment or resource allocation.
 
-```sh
-npm ci --prefix /absolute/baseline/worker --ignore-scripts
-QUALIFICATION_MODE=first-walk \
-QUALIFICATION_CANDIDATE_SHA=<candidate-commit> \
-QUALIFICATION_WORKFLOW_SHA=<protected-commit> \
-node /absolute/protected/scripts/image-qualification-control.mjs prepare-build \
-  /absolute/protected /absolute/candidate /absolute/artifact/build-inputs.json \
-  /absolute/baseline
-```
+Investigation plans, acceptance checklists, operational receipts and handoffs
+belong in internal artifacts, outside this package and public build outputs.
 
-Then follow the dispatch workflow's Go and Wrangler **dry-run** build, staging and
-manifest commands, including `--minify` on both private Wrangler builds and
-the authority dry-run with
-`--config wrangler.aws-qualification-authority.jsonc` and output under
-`$ARTIFACT/authority`. This packages an authority module; it does not upload or
-activate it. Before a live cycle, management receipts must verify that the serving
-private authority matches the sealed module and protocol, or separately authorize
-its supported adoption with recovery protection. Preserve any active registry
-state; do not downgrade an active run. Never use the patched checkout as a
-production source tree.
-Run overlay Worker tests/typechecks and generated-recipe consistency checks there.
-The protected executor, authority, finalizer and independent reaper still own live
-resource settlement; build/test success is not live lifecycle proof.
+## Internal authorization checks
 
-## Observation still required
+The private first-walk authority performs fixed EC2 DryRun checks after its
+existing request and ledger validation, before forward launch, capture, copy,
+attachment, mapping and tag effects. Before launch it also tests unchanged,
+missing, changed and removed ownership tags against its already-owned physical
+key. Callers cannot select probes, actions or DryRun parameters.
 
-A separately authorized synthetic cycle must validate the complete private
-lifecycle before admitting a representative capture. One untouched disposable
-snapshot data copy must contain both the saved workspace and populated cache.
-Attach after stock readiness; bind the exact snapshot, volume and NVMe identity;
-mount privately without selecting duplicated UUIDs/labels. Run the diagnostic
-serial routine once, capturing elapsed/counters, process CPU/I/O, device activity
-and exits. Verify ownership/layout afterward, reusing that pass for fanout/depth.
-Allow the historical 35-minute walk plus provisioning, mounting, verification and
-complete recovery reserves. Record journal replay and omitted root-boot contention.
-A warm rescan cannot substitute. No deployment, allocation, spending, credential
-setup, campaign access, production changes or capture admission follows from this
-package.
+Each run permits at most 32 persisted checks, with one DryRun per request
+digest and no retries. The unchanged-tag check first reads the ledger's exact
+key ID, verifies its name and all four ownership tags, then performs its existing
+DryRun. Both requests share one ten-second timeout and the original forward
+deadline. Key metadata is capped at 64 KiB and error XML at 16 KiB.
+
+Additive `keyObservation` evidence records a resource digest and fixed-order
+tag match flags; service metadata contains only HTTP status, hashed request IDs
+and allowlisted error codes. Raw correlation IDs stay in private authority
+storage, outside attestations and candidate responses. A missing, mismatched,
+denied or interrupted key read fails closed. An unresolved or failed check fences subsequent
+forward work across restart; the existing cleanup owner remains usable.
+Passing evidence may be reused only for that exact request within the same
+immutable run. Actual effects retain their final dispatch-time deadline checks.
+
+If execution stops before first-walk proof is complete, finalization still
+exports its independent cleanup attestation. Missing observation evidence keeps
+qualification failed even when cleanup is finalized.
+
+These checks establish only the requested EC2 authorization outcomes. They do
+not prove missing principal-tag trust rejection, foreign-resource isolation,
+KMS success, storage readiness, successful cleanup or bootstrap improvement.
+Those require their own applicable evidence. Historical attestations remain
+valid without the additive private `authorizationChecks` field. A changed
+package requires a fresh protected build, reviewed source admission and exact
+serving-version binding; old artifacts cannot substitute.
+
+## Protected key authorization
+
+The `key-authorization` workflow mode reuses this private package and the existing
+qualification owner, registry, finalizer and reaper. Its immutable purpose permits
+one fixed public-key import and the authority's thirteen existing tagging DryRuns.
+The protected arm job invokes that operation; the candidate executor is skipped.
+No guest, image, snapshot or volume may be created in this mode. The authority
+rejects candidate AWS requests and first-walk preparation, while the temporary
+session policy independently denies compute and storage effects. Only trusted
+controller code constructs tagging probes; IAM is not a DryRun-only boundary.
+
+This mode requires the distinct `key-tag-authorization-aws-session/v1` session
+profile with matching handoff and recovery identity. It keeps the existing
+130/150/270-minute lifecycle offsets; the diagnostic itself has a ten-minute
+forward-work bound and does not reopen after an uncertain result. Preserve the
+original run's credential margin and independent cleanup authority. Final success
+requires all thirteen checks and authoritative zero-residue finalization. It is
+an authorization diagnostic, not evidence of first-walk performance improvement.
+Installation, namespace-preserving deployment and execution require separate
+operator admission; merging tooling performs none of those actions.
