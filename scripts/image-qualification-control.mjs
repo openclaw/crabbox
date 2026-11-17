@@ -24,7 +24,7 @@ import {
   assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
-import { handoffSession } from "./image-qualification-run-session.mjs";
+import { handoffSession, privateQualificationMode } from "./image-qualification-run-session.mjs";
 import {
   ControllerHTTPError,
   requestControllerJSON,
@@ -196,7 +196,7 @@ export function retainedImageFromEnv() {
     "QUALIFICATION_RETAINED_SOURCE_SHA",
     "QUALIFICATION_RETAINED_CAPSULE_SHA256",
   ];
-  if (mode === "mint" || mode === "first-walk") {
+  if (mode === "mint" || privateQualificationMode(mode)) {
     if (names.some((name) => process.env[name])) {
       throw new Error("mint mode cannot accept retained-image inputs");
     }
@@ -422,7 +422,7 @@ async function candidateArtifact(repository, workflowSha, defaultBranch) {
 
 export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
   retainedImageFromEnv();
-  const firstWalk = process.env.QUALIFICATION_MODE === "first-walk";
+  const firstWalk = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
   const number = firstWalk ? undefined : required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
   if (firstWalk && process.env.QUALIFICATION_PULL_REQUEST?.trim())
@@ -645,7 +645,7 @@ export function prepareCandidateBuild(
   if (checkoutSha(harnessDir) !== workflowSha || checkoutSha(candidateDir) !== candidateSha) {
     throw new Error("protected build checkout SHA mismatch");
   }
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     if (!baselineDir) throw new Error("first-walk build requires pinned baseline checkout");
     const privateBuild = prepareQualificationBuild(harnessDir, candidateDir, baselineDir);
     const receipt = {
@@ -699,7 +699,7 @@ export function prepareCandidateBuild(
 
 function verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha) {
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
-  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const privateBuild = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const expected = privateBuild ? qualificationIdentity(root) : null;
   const sourceSha = privateBuild
     ? expected.workerSourceSha256
@@ -724,7 +724,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
   const buildReceipt = verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
   verifyRetainedCapsule(artifactDir, candidateSha);
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     if (
       !readPackagedRecipe(candidateDir).equals(
         readFirstWalkRecipe(path.join(artifactDir, "candidate")),
@@ -775,7 +775,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
 export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow) {
   const manifest = readJSON(path.join(artifactDir, "manifest.json"));
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
-  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const privateBuild = privateQualificationMode(process.env.QUALIFICATION_MODE);
   const expectedPackage = privateBuild ? qualificationIdentity(root) : null;
   const unsigned = { ...manifest };
   delete unsigned.manifestSha256;
@@ -818,7 +818,7 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
   verifyRetainedCapsule(artifactDir, expectedCandidate);
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     readFirstWalkRecipe(path.join(artifactDir, "candidate"));
     if (!manifest.files.some((file) => file.path === "authority/aws-qualification-authority.js"))
       throw new Error("private authority bundle is absent");
@@ -1145,12 +1145,23 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: process.env.QUALIFICATION_MODE === "first-walk" ? 150 : retainedImage ? 38 : 120,
+    maxMinutes: privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? 150
+      : retainedImage
+        ? 38
+        : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
-    maxLaunches: process.env.QUALIFICATION_MODE === "first-walk" ? 2 : retainedImage ? 1 : 3,
+    maxLaunches: privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? 2
+      : retainedImage
+        ? 1
+        : 3,
     fastSnapshotRestore: false,
-    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(process.env.QUALIFICATION_MODE === "key-authorization"
+      ? { keyAuthorizationOnly: true }
+      : {}),
     ...(retainedImage ? { retainedImage } : {}),
   };
 }
@@ -1189,7 +1200,13 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
         ...(session ? { awsSessionScopeSha256: session.sha256 } : {}),
       }),
     ),
-    mode: config.firstWalk ? "first-walk" : config.retainedImage ? "retained" : "mint",
+    mode: config.keyAuthorizationOnly
+      ? "key-authorization"
+      : config.firstWalk
+        ? "first-walk"
+        : config.retainedImage
+          ? "retained"
+          : "mint",
     ...(config.retainedImage ? { retainedCapsuleSha256: config.retainedImage.capsuleSha256 } : {}),
     startsAt,
     workExpiresAt: new Date(
@@ -1428,7 +1445,11 @@ function relayMetadata(
             {
               name: "QUALIFICATION_MODE",
               type: "plain_text",
-              text: config.firstWalk ? "first-walk" : "retained",
+              text: config.keyAuthorizationOnly
+                ? "key-authorization"
+                : config.firstWalk
+                  ? "first-walk"
+                  : "retained",
             },
           ]
         : []),
@@ -1461,6 +1482,7 @@ function executionManifest(identity) {
     expiresAt: identity.expiresAt,
     ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
     ...(identity.firstWalk ? { firstWalk: true } : {}),
+    ...(identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
 }
 
@@ -1490,7 +1512,10 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
     ...(retainedImage ? { retainedImage } : {}),
-    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(process.env.QUALIFICATION_MODE === "key-authorization"
+      ? { keyAuthorizationOnly: true }
+      : {}),
   };
 }
 
@@ -1510,6 +1535,8 @@ export function verifyAttestationIdentity(attestation, expected, { finalized } =
   if (fields.some((field) => attestation?.[field] !== expected[field])) {
     throw new Error("authority attestation identity does not match protected expectations");
   }
+  if (Boolean(attestation?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly))
+    throw new Error("authority key-only purpose differs from protected expectations");
   const enrolledAt = Date.parse(attestation.enrolledAt);
   const expiresAt = Date.parse(attestation.expiresAt);
   const finalizingAt = Date.parse(attestation.finalizingAt ?? "");
@@ -1594,6 +1621,7 @@ async function verifyExecutionDeployment(cf, expected) {
     transportProps?.deploymentHash !== expected.deploymentHash ||
     transportProps?.expiresAt !== expected.expiresAt ||
     Boolean(transportProps?.firstWalk) !== Boolean(expected.firstWalk) ||
+    Boolean(transportProps?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     canonical(transportProps?.retainedImage ?? null) !==
       canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
@@ -1898,6 +1926,7 @@ async function deploy() {
     expiresAt,
     ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
     ...(config.firstWalk ? { firstWalk: true } : {}),
+    ...(config.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
@@ -2240,6 +2269,7 @@ async function arm() {
     discovered.run?.candidateWorker !== expected.candidateWorker ||
     discovered.run?.deploymentHash !== expected.deploymentHash ||
     discovered.run?.expiresAt !== expected.expiresAt ||
+    Boolean(discovered.run?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     discovered.run?.cleanupState !== "claimed"
   ) {
     throw new Error("authority registry identity does not match protected expectations");
@@ -2269,6 +2299,19 @@ async function arm() {
     armedAt,
   });
   appendOutput("armed_at", armedAt);
+  if (expected.keyAuthorizationOnly) {
+    // Protected code alone owns this fixed diagnostic; no candidate execution.
+    const result = await controllerCall(cf, controllerURL, token, "key-authorization", {
+      runId: expected.runId,
+    });
+    if (result?.passed !== true || result?.checks !== 13 || Object.keys(result).length !== 2)
+      throw new Error("key-only authorization proof is incomplete; finalize original owner");
+    writeJSON(path.join(proofDir, "key-authorization.json"), {
+      version: 1,
+      passed: true,
+      checks: 13,
+    });
+  }
 }
 
 async function namespaceResidue(cf, worker) {
@@ -2686,7 +2729,8 @@ async function cleanupRun({
         run.candidateSha !== expected.candidateSha ||
         run.candidateWorker !== expected.candidateWorker ||
         run.deploymentHash !== expected.deploymentHash ||
-        run.expiresAt !== expected.expiresAt
+        run.expiresAt !== expected.expiresAt ||
+        Boolean(run.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly)
       ) {
         throw new Error("authority registry identity does not match protected expectations");
       }
@@ -2710,9 +2754,10 @@ async function cleanupRun({
         verifyAttestationIdentity(firstAttestation, expected, { finalized: true });
         verifyQualificationEvidence(
           firstAttestation,
-          readExecutionProof(),
+          expected?.keyAuthorizationOnly ? {} : readExecutionProof(),
           expected?.retainedImage,
           expected?.firstWalk,
+          expected?.keyAuthorizationOnly,
         );
       } catch (error) {
         recordQualificationFailure(error);
@@ -2835,7 +2880,7 @@ function readExecutionProof() {
       throw new Error("execution proof checksum mismatch");
     }
   }
-  if (process.env.QUALIFICATION_MODE === "first-walk") {
+  if (privateQualificationMode(process.env.QUALIFICATION_MODE)) {
     // A failed executor may stop before either observation file exists. Keep
     // this a qualification failure; cleanupRun still exports its independent
     // authoritative cleanup evidence and settles every admitted resource.
@@ -2888,7 +2933,45 @@ export function verifyFirstWalkPreparation(prepared) {
     throw new Error("fixed source preparation did not qualify");
 }
 
-export function verifyQualificationEvidence(attestation, proof, retainedImage, firstWalk = false) {
+export function verifyQualificationEvidence(
+  attestation,
+  proof,
+  retainedImage,
+  firstWalk = false,
+  keyAuthorizationOnly = false,
+) {
+  if (keyAuthorizationOnly) {
+    const checks = attestation?.authorizationChecks;
+    const counts = attestation?.finalReceipt?.finalCounts;
+    const expectedProbes = [
+      "tags-restated",
+      ...Array.from({ length: 4 }, (_, i) => [
+        `tag-missing-${i}`,
+        `tag-changed-${i}`,
+        `tag-removed-${i}`,
+      ]).flat(),
+    ];
+    if (
+      !counts ||
+      Object.keys(counts).sort().join(",") !== "images,instances,keyPairs,snapshots,volumes" ||
+      attestation?.keyAuthorizationOnly !== true ||
+      !attestation.finalized ||
+      !Array.isArray(checks) ||
+      checks.length !== 13 ||
+      checks.some(
+        (c, i) =>
+          c.probe !== expectedProbes[i] ||
+          c.outcome !== "passed" ||
+          c.action !== (i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags") ||
+          c.code !== (i === 0 ? "DryRunOperation" : "UnauthorizedOperation"),
+      ) ||
+      attestation?.operations?.length !== 1 ||
+      attestation.operations[0].action !== "ImportKeyPair" ||
+      Object.values(attestation?.finalReceipt?.finalCounts ?? {}).some(Number)
+    )
+      throw new Error("key-only diagnostic or complete settlement is unverified");
+    return;
+  }
   if (firstWalk) {
     const operations = attestation?.operations ?? [];
     const receipt = attestation?.finalReceipt;
@@ -3148,14 +3231,14 @@ async function main() {
     return;
   }
   if (command === "first-walk-recipe") {
-    if (args.length !== 2 || process.env.QUALIFICATION_MODE !== "first-walk") {
+    if (args.length !== 2 || !privateQualificationMode(process.env.QUALIFICATION_MODE)) {
       throw new Error("first-walk-recipe requires first-walk mode and two arguments");
     }
     stageFirstWalkRecipe(path.resolve(args[0]), path.resolve(args[1]));
     return;
   }
   if (command === "prepare-build") {
-    if (args.length !== (process.env.QUALIFICATION_MODE === "first-walk" ? 4 : 3))
+    if (args.length !== (privateQualificationMode(process.env.QUALIFICATION_MODE) ? 4 : 3))
       throw new Error("prepare-build requires source checkouts and receipt");
     prepareCandidateBuild(
       path.resolve(args[0]),

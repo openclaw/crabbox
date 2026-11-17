@@ -48,6 +48,7 @@ export const recoveryBinding = (a) =>
       "authoritySha",
       "authorityVersion",
       "policyHash",
+      ...(a.keyAuthorizationOnly === true ? ["keyAuthorizationOnly"] : []),
     ].map((key) => [key, a[key]]),
   );
 const admission = (record) =>
@@ -458,7 +459,7 @@ export async function recoveryCommand(args, env = process.env) {
   }
   if (
     handoff.startsAt !== plan.handoffStartedAt ||
-    handoff.mode !== "first-walk" ||
+    handoff.mode !== (plan.binding.keyAuthorizationOnly ? "key-authorization" : "first-walk") ||
     [
       "runId",
       "candidateSha",

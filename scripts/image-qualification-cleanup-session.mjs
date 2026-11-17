@@ -5,6 +5,7 @@ import path from "node:path";
 import { canonical, digest, authorityName } from "./image-qualification-isolation.mjs";
 import {
   validateRunSession,
+  keyAuthorizationProfile,
   runSessionTags,
   cleanupSessionPolicy,
 } from "./image-qualification-run-session.mjs";
@@ -39,13 +40,15 @@ export function validateCleanupSession(plan, handoff) {
     c.scope.startsAt !== plan.handoffStartedAt ||
     c.scope.recoveryExpiresAt !== plan.deadline ||
     c.scope.expiresAt !== plan.binding.expiresAt ||
+    (c.scope.profile === keyAuthorizationProfile) !== Boolean(plan.binding.keyAuthorizationOnly) ||
     c.scope.runId !== plan.binding.runId ||
     c.scope.candidateSha !== plan.binding.candidateSha
   )
     fail();
   if (
     handoff &&
-    (handoff.mode !== "first-walk" ||
+    (handoff.mode !==
+      (c.scope.profile === keyAuthorizationProfile ? "key-authorization" : "first-walk") ||
       [
         "repository",
         "workflowSha",

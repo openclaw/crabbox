@@ -22,6 +22,7 @@ import {
 } from "./image-qualification-isolation.mjs";
 import { readPrivateJSON } from "./image-qualification-journal.mjs";
 import {
+  recoveryBinding,
   validateRecoveryPlan,
   initialRecoveryState,
   recoverTransition,
@@ -1192,3 +1193,18 @@ process.on("exit", () => fs.writeFileSync(file, JSON.stringify({ sourceSha: inpu
 for (const cleanup of [false, true])
   test(`recovery command reloads original receipts and settles ${cleanup ? "lost cleanup-session delivery" : "lost secret-preserving upload"} across processes`, (t) =>
     recoveryCommandFixture(t, cleanup));
+
+test("recovery preserves immutable key-only purpose and rejects a false marker", () => {
+  const a = { runId: "image-qualification-42-1", keyAuthorizationOnly: true };
+  assert.equal(recoveryBinding(a).keyAuthorizationOnly, true);
+  assert.equal(
+    Object.hasOwn(
+      recoveryBinding({ ...a, keyAuthorizationOnly: undefined }),
+      "keyAuthorizationOnly",
+    ),
+    false,
+  );
+  const f = fixture();
+  f.plan.binding.keyAuthorizationOnly = false;
+  assert.throws(() => validateRecoveryPlan(f.plan));
+});
