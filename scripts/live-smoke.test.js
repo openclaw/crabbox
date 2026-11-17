@@ -1324,6 +1324,52 @@ esac
   assert.doesNotMatch(tenkiCalls, /^sandbox /m);
 });
 
+test("Tenki live smoke prefers luxor and falls back to the legacy tenki command", () => {
+  for (const installed of [["luxor", "tenki"], ["tenki"]]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-cli-"));
+    const bin = path.join(dir, "bin");
+    const fakeCrabbox = path.join(bin, "crabbox");
+    const cliLog = path.join(dir, "cli.log");
+    fs.mkdirSync(bin);
+    writeExecutable(path.join(bin, "rg"), "#!/usr/bin/env bash\nexit 0\n");
+    writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\ncat >/dev/null\nexit 1\n");
+    writeExecutable(
+      fakeCrabbox,
+      `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "config path" ]] && exit 0
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+    );
+    for (const name of installed) {
+      writeExecutable(
+        path.join(bin, name),
+        `#!/usr/bin/env bash
+printf '%s %s\\n' "${name}" "$*" >>"${cliLog}"
+printf '{"status":"Logged out"}\\n'
+`,
+      );
+    }
+
+    const env = {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "tenki",
+      CRABBOX_LIVE_REPO: repoRoot,
+    };
+    delete env.TENKI_CLI;
+    delete env.CRABBOX_TENKI_CLI;
+    const result = spawnSync("bash", ["scripts/live-smoke.sh"], { cwd: repoRoot, env, encoding: "utf8" });
+
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.equal(fs.readFileSync(cliLog, "utf8"), `${installed[0]} status --json\n`);
+  }
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

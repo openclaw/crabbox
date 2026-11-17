@@ -952,7 +952,7 @@ tenki_smoke() {
   need_tool jq
   need_tool rg
 
-  local tenki_cli="${CRABBOX_TENKI_CLI:-${TENKI_CLI:-}}"
+  local tenki_cli="${CRABBOX_TENKI_CLI:-${TENKI_CLI:-$(config_value tenki.cliPath || true)}}"
   if [[ -z "$tenki_cli" ]]; then
     tenki_cli=luxor
     command -v luxor >/dev/null 2>&1 || tenki_cli=tenki

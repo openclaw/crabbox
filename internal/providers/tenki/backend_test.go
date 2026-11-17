@@ -1283,18 +1283,25 @@ func TestTenkiScalarFallbackValues(t *testing.T) {
 
 func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
 	for _, tc := range []struct {
-		name, cli string
-		missing   bool
-		want      []string
+		name, cli     string
+		lookupErr     error
+		legacyMissing bool
+		want          []string
 	}{
 		{name: "luxor found", want: []string{"luxor"}},
-		{name: "luxor missing", missing: true, want: []string{"luxor", "tenki"}},
-		{name: "explicit path missing", cli: "/opt/luxor/bin/luxor", missing: true, want: []string{"/opt/luxor/bin/luxor"}},
+		{name: "luxor missing", lookupErr: exec.ErrNotFound, want: []string{"luxor", "tenki"}},
+		{name: "luxor relative to cwd", lookupErr: exec.ErrDot, want: []string{"luxor", "tenki"}},
+		{name: "both missing", lookupErr: exec.ErrNotFound, legacyMissing: true, want: []string{"luxor", "tenki"}},
+		{name: "explicit luxor missing", cli: "luxor", lookupErr: exec.ErrNotFound, want: []string{"luxor", "tenki"}},
+		{name: "explicit path missing", cli: "/opt/luxor/bin/luxor", lookupErr: exec.ErrNotFound, want: []string{"/opt/luxor/bin/luxor"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				if tc.missing && req.Name != "tenki" {
-					return core.LocalCommandResult{ExitCode: 1}, &exec.Error{Name: req.Name, Err: exec.ErrNotFound}
+				if tc.lookupErr != nil && (req.Name != "tenki" || tc.legacyMissing) {
+					return core.LocalCommandResult{ExitCode: 1}, &exec.Error{Name: req.Name, Err: tc.lookupErr}
+				}
+				if req.Name == "tenki" && req.Args[0] == "status" {
+					return core.LocalCommandResult{ExitCode: 1}, core.Exit(1, "exit status 1")
 				}
 				return core.LocalCommandResult{}, nil
 			}}
@@ -1312,8 +1319,15 @@ func TestTenkiDefaultCLIFallsBackToLegacyCommand(t *testing.T) {
 			if !reflect.DeepEqual(names, tc.want) {
 				t.Fatalf("commands=%q want %q", names, tc.want)
 			}
-			if wantErr := tc.cli != ""; (err != nil) != wantErr {
+			if wantErr := (tc.cli != "" && tc.cli != "luxor" && tc.lookupErr != nil) || tc.legacyMissing; (err != nil) != wantErr {
 				t.Fatalf("err=%v", err)
+			}
+			if tc.legacyMissing && !strings.Contains(err.Error(), `"luxor"`) {
+				t.Fatalf("missing CLIs must report the luxor lookup: %v", err)
+			}
+			_, err = backend.runTenki(context.Background(), []string{"status"}, io.Discard, io.Discard)
+			if hinted := err != nil && strings.Contains(err.Error(), "install the Luxor CLI"); hinted != (len(tc.want) == 2 && !tc.legacyMissing) {
+				t.Fatalf("legacy CLI failure hint=%v for %q: %v", hinted, tc.name, err)
 			}
 		})
 	}
