@@ -1270,8 +1270,10 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(f.invoke("deploy").status, 0);
       const handoff = f.prepared();
       f.update({
-        now: Date.parse(handoff.workExpiresAt) - 1,
-        armDelay: 1,
+        // Keep the simulated cutoff at attest without racing the real discovery
+        // readiness timer while its management fences run against the fake clock.
+        now: Date.parse(handoff.workExpiresAt) - 1_000,
+        armDelay: 1_000,
       });
       const result = f.invoke("arm", f.armEnv());
       assert.notEqual(result.status, 0);
