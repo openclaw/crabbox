@@ -384,6 +384,9 @@ for (const [label, mutate] of Object.entries({
   changedPlanDependency: (f) => {
     f.plan.sources["image-qualification-control.mjs"] = "0".repeat(64);
   },
+  changedControllerTransport: (f) => {
+    f.context.recovery.sources["image-qualification-controller-http.mjs"] = "0".repeat(64);
+  },
   unknownOriginal: (f) => {
     f.context.recovery.originalSourceSha = "0".repeat(40);
   },

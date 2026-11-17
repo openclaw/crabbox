@@ -47,6 +47,7 @@ const seal = (v) => ({ ...v, integrity: recordHash(v) });
 const sourceFiles = [
   "image-qualification-session-replacement.mjs",
   "image-qualification-control.mjs",
+  "image-qualification-controller-http.mjs",
   "image-qualification-idle-controller.mjs",
   "image-qualification-isolation.mjs",
   "image-qualification-journal.mjs",

@@ -108,6 +108,11 @@ function installAPI(file) {
     if (url.hostname.endsWith(".example.workers.dev")) {
       if (route === "/transport-open") {
         state.probe = { protocol: 1, ...JSON.parse(init.body), state: "pending" };
+        if (state.controllerHTML)
+          return new Response("<!DOCTYPE html>synthetic-private-response-secret", {
+            status: state.controllerHTML,
+            headers: { "content-type": "text/html", "cf-ray": "0123456789abcdef-DFW" },
+          });
         return json(state.probe);
       }
       if (route === "/transport-discover") return json({ probe: state.probe ?? null });
@@ -1245,7 +1250,8 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       });
       const result = f.invoke("arm", f.armEnv());
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /work window is not active/);
+      assert.match(result.stderr, /qualification controller request failed/);
+      assert.match(result.stderr, /"action":"attest","reason":"deadline"/);
       assert.equal(
         fs.existsSync(path.join(f.directory, "arm-proof", "execution-manifest.json")),
         false,
@@ -1347,4 +1353,47 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
         ),
     );
   });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  for (const status of [200, 503]) {
+    test(`non-JSON transport-open ${status} retains sanitized failure and recovers without replay`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ controllerHTML: status });
+      const deployed = f.invoke("deploy");
+      assert.equal(deployed.status, 1);
+      assert.match(deployed.stderr, /qualification controller request failed/);
+      assert(!deployed.stderr.includes("synthetic-private-response-secret"));
+      const directory = path.join(f.directory, "deploy-proof");
+      const failures = fs
+        .readdirSync(directory)
+        .filter((name) => /^controller-http-failure-.*\.json$/.test(name));
+      assert.equal(failures.length, 1);
+      const receipt = JSON.parse(fs.readFileSync(path.join(directory, failures[0]), "utf8"));
+      assert.equal(receipt.action, "transport-open");
+      assert.equal(receipt.status, status);
+      assert.equal(receipt.bodyFormat, "html");
+      assert.equal(receipt.ray, "0123456789abcdef-DFW");
+      const custody = JSON.parse(
+        fs.readFileSync(path.join(directory, "transport-custody/transport-state.json"), "utf8"),
+      );
+      assert.equal(custody.phase, "opening");
+      assert.equal(f.state().identity, undefined);
+      assert(
+        !f.state().events.some((event) => event.endsWith("/v1/qualification/transport-probe")),
+      );
+      const opens = f.state().events.filter((event) => event.endsWith("/transport-open")).length;
+      assert.equal(opens, 1);
+      const recovered = f.invoke("reap");
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(f.state().probe.state, "cancelled");
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(
+        f.state().events.filter((event) => event.endsWith("/transport-open")).length,
+        opens,
+      );
+    });
+  }
 }

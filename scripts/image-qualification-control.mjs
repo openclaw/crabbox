@@ -26,6 +26,10 @@ import {
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
 import { handoffSession } from "./image-qualification-run-session.mjs";
 import {
+  ControllerHTTPError,
+  requestControllerJSON,
+} from "./image-qualification-controller-http.mjs";
+import {
   packageFile,
   qualificationPackagePath,
   qualificationIdentity,
@@ -1615,21 +1619,37 @@ async function controllerCall(cf, url, token, action, value = {}, authorityCF = 
   await verifyAuthority(authorityCF);
   await cf.verifyController();
   if (cf.beforeRecoveryCall) await cf.beforeRecoveryCall(action);
-  const response = await fetch(`${url}/${action}`, {
-    method: "POST",
-    ...(cf.recoverySignal ? { signal: cf.recoverySignal(action), redirect: "error" } : {}),
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(value),
-  });
-  const data = await response.json();
-  if (!response.ok)
-    throw new Error(
-      `qualification controller ${action} failed: ${data.message ?? response.status}`,
-    );
-  return data;
+  const deadlines = [
+    cf.controllerDeadline,
+    action === "transport-open" ? Date.parse(value.expiresAt) : undefined,
+    action === "claim" ? Date.parse(value.identity?.expiresAt) : undefined,
+  ].filter((value) => value !== undefined);
+  try {
+    return await requestControllerJSON({
+      url,
+      token,
+      action,
+      value,
+      signal: cf.recoverySignal?.(action),
+      ...(deadlines.length ? { deadline: Math.min(...deadlines) } : {}),
+    });
+  } catch (error) {
+    if (error instanceof ControllerHTTPError && process.env.QUALIFICATION_PROOF_DIR) {
+      try {
+        writeJSON(
+          path.join(
+            path.resolve(process.env.QUALIFICATION_PROOF_DIR),
+            `controller-http-failure-${crypto.randomUUID()}.json`,
+          ),
+          error.receipt,
+        );
+      } catch {
+        // Diagnostics cannot replace the original failure or obstruct recovery.
+        console.error("qualification controller HTTP failure receipt could not be written");
+      }
+    }
+    throw error;
+  }
 }
 
 async function cloudflareFromEnv() {
@@ -1909,6 +1929,7 @@ async function deploy() {
       type: entry.path.endsWith(".wasm") ? "application/wasm" : "application/javascript+module",
     }));
   const cf = await cloudflareFromEnv();
+  cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   await Promise.all(
     [candidateWorker, relayWorker, controllerName].map((name) => requireAbsent(cf, name)),
   );
@@ -2207,6 +2228,7 @@ async function arm() {
       throw new Error("deployment differs from prepared handoff");
   }
   const cf = await cloudflareFromEnv();
+  cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   await verifyExecutionDeployment(cf, expected);
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
   await cf.verifyController();
