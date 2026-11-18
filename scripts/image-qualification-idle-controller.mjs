@@ -19,6 +19,13 @@ import {
   recordManagementFailure,
 } from "./image-qualification-binding-probe.mjs";
 import { readPrivateJSON, withQualificationJournal } from "./image-qualification-journal.mjs";
+import { assertSettledTransportDiscovery } from "./image-qualification-transport.mjs";
+
+import {
+  validateInstallation,
+  verifyInstallation,
+  installedURL,
+} from "./image-qualification-installation.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceFiles = [
@@ -29,6 +36,9 @@ const sourceFiles = [
   "image-qualification-binding-probe.mjs",
   "image-qualification-journal.mjs",
   "image-qualification-idle-controller.mjs",
+  "image-qualification-installation.mjs",
+  "image-qualification-transport.mjs",
+  "image-qualification-network.ts",
 ];
 const equal = (a, b) => canonical(a) === canonical(b);
 const sha = /^[0-9a-f]{64}$/;
@@ -90,6 +100,7 @@ export function validateIdlePlan(plan) {
     Date.parse(plan.deadline) !== Date.parse(plan.startsAt) + 20 * 60_000
   )
     fail("invalid frozen plan/source/custody");
+  if (plan.installation !== undefined) validateInstallation(plan.installation);
   // Existing full isolation admission still owns the authority and its namespaces.
   return readAdmission({
     CLOUDFLARE_ACCOUNT_ID: plan.isolation?.accountId,
@@ -150,6 +161,28 @@ function refers(value) {
   );
 }
 
+async function idleInventory(api) {
+  const scripts = await api.list("/workers/scripts");
+  const names = scripts.map((v) => v.id ?? v.name);
+  if (
+    names.some((v) => !/^[a-zA-Z0-9_-]{1,63}$/.test(v ?? "")) ||
+    new Set(names).size !== names.length
+  )
+    fail("invalid Worker inventory");
+  const namespaces = await api.list("/workers/durable_objects/namespaces");
+  const domains = await api.list("/workers/domains");
+  if (
+    [...namespaces, ...domains].some(
+      (v) => v.script === controllerName || v.service === controllerName,
+    )
+  )
+    fail("caller acquired namespace/domain");
+  const incoming = [];
+  for (const name of names) if (refers(await api.settings(name))) incoming.push(name);
+  if (incoming.length) fail("incoming caller reference");
+  return { scripts: names.sort(), namespaceIds: namespaces.map((v) => v.id).sort(), incoming };
+}
+
 // save must resolve only after durable commit. State records effects, never tokens.
 export async function idleController(
   cf,
@@ -158,6 +191,8 @@ export async function idleController(
   { mode = "run", save, token, signal, now = Date.now, invoke = fetch } = {},
 ) {
   const admission = validateIdlePlan(plan);
+  if (plan.installation)
+    return installedIdleController(cf, plan, state, { mode, save, token, signal, now });
   const allowedPhases = [
     "prepared",
     "create-intent",
@@ -289,27 +324,7 @@ export async function idleController(
     )
       fail("authority/default environment drift");
   };
-  const inventory = async () => {
-    const scripts = await api.list("/workers/scripts");
-    const names = scripts.map((v) => v.id ?? v.name);
-    if (
-      names.some((v) => !/^[a-zA-Z0-9_-]{1,63}$/.test(v ?? "")) ||
-      new Set(names).size !== names.length
-    )
-      fail("invalid Worker inventory");
-    const namespaces = await api.list("/workers/durable_objects/namespaces");
-    const domains = await api.list("/workers/domains");
-    if (
-      [...namespaces, ...domains].some(
-        (v) => v.script === controllerName || v.service === controllerName,
-      )
-    )
-      fail("caller acquired namespace/domain");
-    const incoming = [];
-    for (const name of names) if (refers(await api.settings(name))) incoming.push(name);
-    if (incoming.length) fail("incoming caller reference");
-    return { scripts: names.sort(), namespaceIds: namespaces.map((v) => v.id).sort(), incoming };
-  };
+  const inventory = () => idleInventory(api);
   const inspect = async () => {
     if (!state.createAt) fail("no durable create intent");
     const settings = await api.request(`${script}/settings`, {}, { allow404: true });
@@ -552,6 +567,157 @@ export async function idleController(
   return state;
 }
 
+// Same authority and authenticated controller, with no provisioning/exposure or
+// deletion. A fresh process makes new reads within the ORIGINAL frozen deadline.
+async function installedIdleController(cf, plan, state, { mode, save, token, signal, now }) {
+  if (
+    !["run", "recover"].includes(mode) ||
+    typeof token !== "string" ||
+    token.length < 32 ||
+    state.profile !== plan.profile ||
+    state.planHash !== digest(canonical(plan)) ||
+    state.integrity !== stateHash(state) ||
+    !Number.isSafeInteger(state.sequence) ||
+    state.sequence < 0 ||
+    state.sequence > 1900 ||
+    !Array.isArray(state.events) ||
+    (mode === "run" && (state.sequence !== 0 || state.phase !== "prepared"))
+  )
+    fail("invalid retained installation custody");
+  cf.admission = validateIdlePlan(plan);
+  cf.installation = validateInstallation(plan.installation);
+  const originalRequest = cf.request;
+  const api = Object.create(cf);
+  let requests = 0;
+  const originalRequests = state.requests;
+  let pending = Promise.resolve();
+  const persist = (phase, delta = {}) => {
+    const write = async () => {
+      const next = seal({
+        ...state,
+        ...delta,
+        phase,
+        sequence: state.sequence + 1,
+        events: [...state.events, { phase, at: new Date(now()).toISOString() }],
+        requests: originalRequests + requests,
+      });
+      if (next.sequence > 2000) fail("retained observation bound exhausted");
+      await save(next);
+      Object.assign(state, next);
+    };
+    pending = pending.then(write);
+    return pending;
+  };
+  const check = () => {
+    if (
+      signal?.aborted ||
+      now() < Date.parse(plan.startsAt) ||
+      now() >= Date.parse(plan.deadline) ||
+      originalRequests + requests >= plan.maxRequests
+    )
+      fail("retained observation cancelled or expired");
+  };
+  api.request = async (route, init = {}, options = {}) => {
+    check();
+    if ((init.method ?? "GET") !== "GET")
+      fail("retained idle observation cannot mutate management state");
+    requests++;
+    await persist(state.phase);
+    return originalRequest.call(
+      api,
+      route,
+      {
+        ...init,
+        redirect: "error",
+        signal: AbortSignal.any([
+          AbortSignal.timeout(Math.max(1, Math.min(15_000, Date.parse(plan.deadline) - now()))),
+          ...(signal ? [signal] : []),
+          ...(init.signal ? [init.signal] : []),
+        ]),
+      },
+      { ...options, boundedBytes: 1024 * 1024 },
+    );
+  };
+  api.controllerDeadline = Date.parse(plan.deadline);
+  api.recoverySignal = () => signal;
+  try {
+    check();
+    const credential = await api.request("/tokens/verify");
+    if (
+      credential.id !== plan.tokenId ||
+      credential.status !== "active" ||
+      !Number.isFinite(Date.parse(credential.expires_on)) ||
+      Date.parse(credential.expires_on) < Date.parse(plan.deadline) + 5 * 60_000
+    )
+      fail("credential identity/lifetime changed");
+    const before = await idleInventory(api);
+    if (digest(canonical(before)) !== plan.originalInventorySha256)
+      fail("retained inventory changed");
+    await verifyAuthority(api);
+    if (
+      digest(canonical(await api.settings(authorityName))) !== plan.authoritySettingsSha256 ||
+      !equal(
+        await api.request(
+          `/workers/scripts/${authorityName}/content/v2`,
+          {},
+          { contentIdentityBytes: 1024 * 1024 },
+        ),
+        plan.authorityModule,
+      )
+    )
+      fail("retained authority differs");
+    await verifyInstallation(api);
+    const { controllerCall } = await import("./image-qualification-control.mjs");
+    const url = await installedURL(api, controllerName);
+    const settings = await api.settings(controllerName);
+    const identity = JSON.parse(
+      settings.bindings.find((b) => b.name === "QUALIFICATION_TRANSPORT_IDENTITY")?.text ?? "null",
+    );
+    if (!sha.test(identity?.deploymentHash ?? "")) fail("installed controller identity missing");
+    const challenge = randomBytes(32).toString("hex");
+    const controllerVersion = await api.verifyController();
+    const reply = await controllerCall(api, url, token, "binding-identity", { challenge });
+    if (
+      !equal(reply, {
+        controllerVersion,
+        identity: {
+          protocol: 1,
+          role: "controller",
+          challenge,
+          props: { deploymentHash: identity.deploymentHash },
+          authorityVersion: api.admission.authority.version,
+        },
+      })
+    )
+      fail("installed runtime identity differs");
+    await persist("identity-verified", { identityDigest: digest(canonical(reply)) });
+    const probe = await controllerCall(api, url, token, "transport-discover");
+    assertSettledTransportDiscovery(probe);
+    const discovered = await controllerCall(api, url, token, "discover");
+    if (!equal(discovered, { run: null })) fail("installation registry is active or unknown");
+    await verifyInstallation(api);
+    await verifyAuthority(api);
+    if (!equal(await idleInventory(api), before))
+      fail("retained inventory changed during observation");
+    check();
+    await persist("discovery-complete", { discovery: "idle" });
+    await persist("settled", {
+      settled: true,
+      failed: state.failed === true,
+      installationRetained: true,
+      installationId: cf.installation.id,
+    });
+  } catch (error) {
+    await persist("unresolved", {
+      settled: false,
+      failed: true,
+      failure: managementFailure(error) ?? { reason: "retained-observation-unverified" },
+    });
+    throw error;
+  }
+  return state;
+}
+
 export async function idleControllerCommand(command, args, Cloudflare, env = process.env) {
   if (args.length !== 1 || !["idle-controller-run", "idle-controller-recover"].includes(command))
     fail("requires original private recovery directory");
@@ -608,7 +774,9 @@ export async function idleControllerCommand(command, args, Cloudflare, env = pro
       (value, save) =>
         idleController(new Cloudflare(admission.accountId, env.CLOUDFLARE_API_TOKEN), plan, value, {
           mode: command === "idle-controller-run" ? "run" : "recover",
-          token: randomBytes(32).toString("hex"),
+          token: plan.installation
+            ? env.QUALIFICATION_CONTROLLER_TOKEN
+            : randomBytes(32).toString("hex"),
           save,
           signal: cancellation.signal,
         }),

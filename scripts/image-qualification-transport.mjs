@@ -91,6 +91,73 @@ function exactReceipt(receipt, request, state) {
   return receipt;
 }
 
+// Historical terminal custody belongs to its original run. Validate it without
+// requiring a live expiry or settling/replaying any operation against that run.
+export function assertSettledTransportDiscovery(reply) {
+  if (!reply || Object.keys(reply).join(",") !== "probe")
+    throw Error("invalid transport discovery");
+  if (reply.probe === null) return;
+  const { protocol, state, observedAt, ...request } = reply.probe;
+  const identity = request.identity;
+  const version = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+  if (
+    protocol !== 1 ||
+    !["verified", "cancelled"].includes(state) ||
+    Object.keys(request).sort().join(",") !==
+      "authorityVersion,candidateVersion,challenge,expiresAt,identity" ||
+    !/^[0-9a-f]{64}$/.test(request.challenge ?? "") ||
+    !version.test(request.authorityVersion ?? "") ||
+    !version.test(request.candidateVersion ?? "") ||
+    typeof request.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(request.expiresAt)) ||
+    !identity ||
+    Array.isArray(identity) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId ?? "") ||
+    typeof identity.owner !== "string" ||
+    !identity.owner.trim() ||
+    identity.owner.length > 256 ||
+    !/^[0-9a-f]{40}$/.test(identity.candidateSha ?? "") ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(identity.candidateWorker ?? "") ||
+    !/^[0-9a-f]{64}$/.test(identity.deploymentHash ?? "") ||
+    typeof identity.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(identity.expiresAt)) ||
+    Object.keys(identity).some(
+      (key) =>
+        ![
+          "runId",
+          "owner",
+          "candidateSha",
+          "candidateWorker",
+          "deploymentHash",
+          "expiresAt",
+          "firstWalk",
+          "keyAuthorizationOnly",
+          "taggingContract",
+          "retainedImage",
+        ].includes(key),
+    ) ||
+    (identity.firstWalk !== undefined && identity.firstWalk !== true) ||
+    (identity.taggingContract !== undefined && identity.taggingContract !== "creation-only/v1") ||
+    (identity.firstWalk && identity.taggingContract !== "creation-only/v1") ||
+    (identity.keyAuthorizationOnly !== undefined &&
+      (identity.keyAuthorizationOnly !== true ||
+        !identity.firstWalk ||
+        identity.retainedImage !== undefined)) ||
+    (identity.retainedImage !== undefined &&
+      (!identity.retainedImage ||
+        Object.keys(identity.retainedImage).sort().join(",") !==
+          "capsuleSha256,imageId,snapshotId,sourceSha" ||
+        !/^ami-[0-9a-f]+$/.test(identity.retainedImage.imageId ?? "") ||
+        !/^snap-[0-9a-f]+$/.test(identity.retainedImage.snapshotId ?? "") ||
+        !/^[0-9a-f]{40}$/.test(identity.retainedImage.sourceSha ?? "") ||
+        !/^[0-9a-f]{64}$/.test(identity.retainedImage.capsuleSha256 ?? ""))) ||
+    Date.parse(request.expiresAt) > Date.parse(identity.expiresAt) ||
+    JSON.stringify(identity).length > 2048
+  )
+    throw Error("installation transport probe unresolved or malformed");
+  exactReceipt(reply.probe, request, state);
+}
+
 // The existing protected controller/registry own effects; local custody records
 // exact intent before open. Recovery never redispatches a candidate or opens anew.
 export async function proveCandidateTransport({

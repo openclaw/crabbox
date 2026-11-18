@@ -5,6 +5,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { installationId } from "./image-qualification-installation.mjs";
+import { serveQualificationFixture } from "./image-qualification-http-fixture.mjs";
+import controllerWorker from "./image-qualification-controller-worker.mjs";
 
 import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
@@ -51,7 +54,7 @@ const capsulePaths = [
   "scripts/mint-aws-devtools-image.sh",
 ];
 
-function installAPI(file) {
+async function installAPI(file) {
   const state = JSON.parse(fs.readFileSync(file, "utf8"));
   const isolation = fixtureAdmission("0".repeat(32));
   Date.now = () => state.now;
@@ -108,6 +111,35 @@ function installAPI(file) {
       throw new Error(`unexpected GitHub fixture route: ${route}`);
     }
     if (url.hostname.endsWith(".example.workers.dev")) {
+      if (route === "/binding-identity") {
+        const controller = state.workers["crabbox-image-qualification-controller"];
+        const identity = JSON.parse(
+          controller.metadata.bindings.find((b) => b.name === "QUALIFICATION_TRANSPORT_IDENTITY")
+            .text,
+        );
+        const env = Object.fromEntries(
+          controller.metadata.bindings.map((b) => [
+            b.name,
+            b.type === "version_metadata"
+              ? state.omitControllerRuntimeVersion
+                ? undefined
+                : { id: workerVersion }
+              : b.name === "CONTROLLER_TOKEN"
+                ? process.env.QUALIFICATION_CONTROLLER_TOKEN
+                : b.text,
+          ]),
+        );
+        env.AUTHORITY = {
+          bindingIdentity: async (challenge) => ({
+            protocol: 1,
+            role: "controller",
+            challenge,
+            props: { deploymentHash: identity.deploymentHash },
+            authorityVersion: workerVersion,
+          }),
+        };
+        return await controllerWorker.fetch(new Request(input, init), env);
+      }
       if (route === "/transport-open") {
         state.probe = { protocol: 1, ...JSON.parse(init.body), state: "pending" };
         if (state.controllerHTML)
@@ -181,8 +213,19 @@ function installAPI(file) {
     }
     assert.equal(url.hostname, "api.cloudflare.com", "real network access is forbidden");
     const cfRoute = route.replace(/^\/client\/v4\/accounts\/0{32}/, "");
+    if (cfRoute === "/tokens/verify")
+      return api({
+        id: "a".repeat(32),
+        status: "active",
+        expires_on: new Date(state.now + 86400000).toISOString(),
+      });
     if (cfRoute.startsWith("/workers/scripts/crabbox-aws-qualification-authority/")) {
       if (cfRoute.endsWith("/settings")) return api({ bindings: isolation.bindings });
+      if (cfRoute.endsWith("/content/v2")) {
+        const form = new FormData();
+        form.set("authority.js", new Blob(["synthetic-authority"]), "authority.js");
+        return new Response(form);
+      }
       if (cfRoute.endsWith("/deployments"))
         return api({
           deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
@@ -194,6 +237,13 @@ function installAPI(file) {
     if (match) {
       const [, name, suffix] = match;
       if (!suffix && method === "PUT") {
+        const isCandidate = /^crabbox-image-qualification-[0-9]+-1$/.test(name);
+        if (
+          isCandidate &&
+          (state.candidateFault === "put-before" ||
+            (state.candidateFault === "second-put-before" && state.candidateUploads === 1))
+        )
+          throw Error("candidate upload uncertain before write");
         if (state.echoExecutorToken)
           throw new Error(
             `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
@@ -201,6 +251,8 @@ function installAPI(file) {
         const isRelay = name.startsWith("crabbox-image-qualification-relay-");
         if (isRelay && state.relayFault === "put-before")
           throw new Error("relay upload failed before create");
+        state.mutationTimes ??= [];
+        state.mutationTimes.push(state.now);
         const metadata = JSON.parse(await init.body.get("metadata").text());
         // Validate the wire format, rather than accepting Wrangler config here.
         // The upload API takes one migration object; config uses an array.
@@ -238,6 +290,7 @@ function installAPI(file) {
           });
         }
         state.workers[name] = {
+          moduleBytes: await init.body.get(metadata.main_module).text(),
           metadata: {
             ...metadata,
             bindings: [
@@ -254,6 +307,13 @@ function installAPI(file) {
           },
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
+        if (isCandidate) state.candidateUploads = (state.candidateUploads ?? 0) + 1;
+        if (
+          isCandidate &&
+          (state.candidateFault === "put-lost" ||
+            (state.candidateFault === "second-put-lost" && state.candidateUploads === 2))
+        )
+          throw Error("candidate upload uncertain after write");
         if (metadata.main_module === "private-bootstrap.mjs" && state.failPrivateUpload === "after")
           throw new Error("private upload response lost after create");
         if (state.tombstoneDrift && metadata.main_module === "tombstone.mjs")
@@ -268,12 +328,16 @@ function installAPI(file) {
         if (state.uploadDelay) state.now += state.uploadDelay;
         if (isRelay && state.relayFault === "put-lost")
           throw new Error("relay upload response lost after create");
+        if (name === "crabbox-image-qualification-controller" && state.activateAt)
+          state.now = state.activateAt;
         return api({
           deployment_id: isRelay && state.relayFault === "ack-invalid" ? "invalid" : workerVersion,
         });
       }
       if (!suffix && method === "DELETE") {
-        delete state.workers[name];
+        if (state.deleteFault === "denied") return api(null, 403);
+        if (state.deleteFault !== "stale") delete state.workers[name];
+        if (state.deleteFault === "lost") throw Error("delete response lost");
         return api({});
       }
       const relayRead =
@@ -411,6 +475,17 @@ function installAPI(file) {
           return api({ deployments: null, items: [] });
       }
       if (suffix === "/settings") {
+        if (
+          /^crabbox-image-qualification-[0-9]+-1$/.test(name) &&
+          state.candidateUploads > 0 &&
+          state.candidateFault
+        ) {
+          if (state.candidateFault === "missing") return api(null, 404);
+          if (state.candidateFault === "denied") return api(null, 403);
+          if (state.candidateFault === "malformed") return new Response("malformed");
+          if (state.candidateFault === "foreign")
+            return api({ ...state.workers[name].metadata, tags: [] });
+        }
         if (!state.workers[name]) return api(null, 404);
         const metadata = structuredClone(state.workers[name].metadata);
         if (state.tombstoneReadbackMismatch && metadata.main_module === "tombstone.mjs") {
@@ -434,12 +509,27 @@ function installAPI(file) {
         return api({
           deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
         });
+      if (suffix === "/content/v2" && state.httpInstallation) {
+        const form = new FormData();
+        const worker = state.workers[name];
+        form.set(
+          worker.metadata.main_module,
+          new Blob([worker.moduleBytes]),
+          worker.metadata.main_module,
+        );
+        return new Response(form);
+      }
       if (suffix === "/content/v2")
         return controllerContent(
           fs.readFileSync(path.join(root, "scripts/image-qualification-controller-worker.mjs")),
         );
       if (suffix === "/subdomain") {
-        if (method === "POST") state.workers[name].subdomain = JSON.parse(init.body);
+        if (method === "POST") {
+          if (state.exposureFault === "denied") return api(null, 403);
+          if (state.exposureFault !== "stale")
+            state.workers[name].subdomain = JSON.parse(init.body);
+          if (state.exposureFault === "lost") throw Error("exposure write response lost");
+        }
         return api(state.workers[name].subdomain);
       }
       if (suffix === "/schedules") return api({ schedules: [] });
@@ -460,6 +550,7 @@ function installAPI(file) {
     if (cfRoute.endsWith("/routes") || cfRoute === "/workers/domains") return api([]);
     throw new Error(`unexpected Cloudflare fixture route: ${cfRoute}`);
   };
+  if (state.httpInstallation) globalThis.fetch = await serveQualificationFixture(globalThis.fetch);
 }
 
 function fixture(t, mode = "retained") {
@@ -621,16 +712,17 @@ function fixture(t, mode = "retained") {
     fs.writeFileSync(output, "");
     const child = spawnSync(process.execPath, ["--import", import.meta.url, control, command], {
       encoding: "utf8",
-      timeout: 15_000,
+      timeout: state().httpInstallation ? 30_000 : 15_000,
       env: {
         ...env,
         ...(command !== "admit"
           ? {
               CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
-              QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
+              QUALIFICATION_CONTROLLER_TOKEN: "f".repeat(64),
             }
           : {}),
-        ...(command === "deploy" && fs.existsSync(path.join(handoffDir, "executor-identity.json"))
+        ...(["deploy", "deploy-and-arm"].includes(command) &&
+        fs.existsSync(path.join(handoffDir, "executor-identity.json"))
           ? {
               QUALIFICATION_EXECUTOR_CREDENTIAL: encodeExecutorCredential({
                 ...JSON.parse(
@@ -676,11 +768,11 @@ function fixture(t, mode = "retained") {
         ["EXECUTION_MANIFEST_DIGEST", "execution_manifest_digest"],
       ].map(([key, output]) => [`QUALIFICATION_EXPECTED_${key}`, outputs[output]]),
     );
-  return { invoke, state, update, prepared, env, outputs, armEnv, handoffDir, directory };
+  return { invoke, state, update, prepared, env, outputs, armEnv, handoffDir, directory, artifact };
 }
 
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
-  installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
+  await installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
   for (const fault of [
     "404-settings",
@@ -1468,3 +1560,510 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
       assert.throws(() => verifyQualificationEvidence(b, {}, undefined, true, true));
     }
   });
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  function historicalProbe(now, state) {
+    const expired = new Date(now - 60_000).toISOString();
+    return {
+      protocol: 1,
+      state: state === "malformed" ? "verified" : state,
+      identity: {
+        runId: "image-qualification-1-1",
+        owner: "historical-owner",
+        candidateSha,
+        candidateWorker: "crabbox-image-qualification-1-1",
+        deploymentHash: "d".repeat(64),
+        expiresAt: expired,
+      },
+      challenge: "e".repeat(64),
+      candidateVersion: workerVersion,
+      authorityVersion: workerVersion,
+      expiresAt: expired,
+      observedAt: new Date(now - 120_000).toISOString(),
+    };
+  }
+  function reusable(t, setupFault = {}, profile = "candidate-transport-v2", mode = "first-walk") {
+    const f = fixture(t, mode);
+    if (profile === null) delete f.env.QUALIFICATION_TRANSPORT_PROFILE;
+    else f.env.QUALIFICATION_TRANSPORT_PROFILE = profile;
+    const installation = {
+      profile: "qualification-installation/v1",
+      accountId: "0".repeat(32),
+      candidateSha,
+      candidate: {
+        name: "crabbox-image-qualification-99-1",
+        namespaceId: "0".repeat(32),
+        module: {
+          module: "index.js",
+          count: 1,
+          sha256: digest(fs.readFileSync(path.join(f.artifact, "worker/index.js"))),
+        },
+      },
+      controller: {
+        name: "crabbox-image-qualification-controller",
+        module: {
+          module: "controller.mjs",
+          count: 1,
+          sha256: digest(
+            fs.readFileSync(path.join(root, "scripts/image-qualification-controller-worker.mjs")),
+          ),
+        },
+      },
+      relay: {
+        name: "crabbox-image-qualification-relay-99-1",
+        module: {
+          module: "relay.mjs",
+          count: 1,
+          sha256: digest(
+            fs.readFileSync(path.join(root, "scripts/image-qualification-relay-worker.mjs")),
+          ),
+        },
+      },
+    };
+    installation.id = installationId(installation);
+    const set = (v) => {
+      f.env.QUALIFICATION_INSTALLATION_JSON = JSON.stringify(v);
+      f.env.QUALIFICATION_INSTALLATION_SHA256 = digest(canonical(v));
+    };
+    set(installation);
+    f.update({ httpInstallation: true, ...setupFault });
+    const installed = f.invoke("install");
+    if (
+      Object.keys(setupFault).length ||
+      profile !== "candidate-transport-v2" ||
+      !["first-walk", "key-authorization"].includes(mode)
+    ) {
+      assert.equal(installed.status, 1, installed.stderr);
+      return f;
+    }
+    assert.equal(installed.status, 0, installed.stderr);
+    const receipt = JSON.parse(
+      fs.readFileSync(path.join(f.directory, "install-proof/installation.json")),
+    );
+    set(receipt.installation);
+    const scope = JSON.parse(f.env.QUALIFICATION_AWS_SESSION_JSON);
+    const start = f.state().now;
+    for (const [field, minutes] of [
+      ["startsAt", 0],
+      ["workExpiresAt", 130],
+      ["expiresAt", 150],
+      ["recoveryExpiresAt", 270],
+    ])
+      scope[field] = new Date(start + minutes * 60_000).toISOString();
+    f.env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify(scope);
+    f.update({ events: [], candidateUploads: 0, activateAt: start });
+    return f;
+  }
+  for (const mode of ["retained", "mint"])
+    for (const command of ["install", "admit", "deploy-and-arm", "arm"])
+      test(`HTTP retained installation rejects nonprivate ${mode} ${command} before effects`, (t) => {
+        const f =
+          command === "install" ? reusable(t, {}, "candidate-transport-v2", mode) : reusable(t);
+        if (command !== "install") f.update({ events: [] });
+        f.env.QUALIFICATION_MODE = mode;
+        const result = f.invoke(command);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /requires a private first-walk or key-authorization build/);
+        assert.ok(
+          !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+        );
+      });
+  for (const mode of ["first-walk", "key-authorization"])
+    test(`HTTP ${mode} retained preparation preserves the hundred-minute executor reserve`, (t) => {
+      const f = reusable(t, {}, "candidate-transport-v2", mode);
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ now: Date.parse(f.prepared().workExpiresAt) - 99 * 60_000, events: [] });
+      const result = f.invoke("deploy-and-arm");
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /existing executor reserve/);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
+  for (const profile of [null, "", "unknown"])
+    test(`HTTP retained installation rejects ${String(profile)} transport before mutation`, (t) => {
+      const f = reusable(t, {}, profile);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
+  for (const profile of [null, "", "unknown"])
+    test(`HTTP retained binding update rejects ${String(profile)} transport before mutation`, (t) => {
+      const f = reusable(t);
+      assert.equal(f.invoke("admit").status, 0);
+      if (profile === null) delete f.env.QUALIFICATION_TRANSPORT_PROFILE;
+      else f.env.QUALIFICATION_TRANSPORT_PROFILE = profile;
+      f.update({ events: [] });
+      const result = f.invoke("deploy");
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /requires candidate-transport-v2/);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
+  for (const probeState of [
+    "empty",
+    "pending",
+    "verified",
+    "cancelled",
+    "malformed",
+    "missing-controller-version",
+  ])
+    test(`HTTP installed idle observation and fresh process recovery classify ${probeState} custody`, (t) => {
+      const f = reusable(t);
+      const unresolved = ["pending", "malformed", "missing-controller-version"].includes(
+        probeState,
+      );
+      if (probeState === "missing-controller-version")
+        f.update({ omitControllerRuntimeVersion: true });
+      else if (probeState !== "empty")
+        f.update({
+          probe:
+            probeState === "malformed"
+              ? { state: "verified" }
+              : historicalProbe(f.state().now, probeState),
+        });
+      const script = path.join(f.directory, "observe-installed.mjs");
+      fs.writeFileSync(
+        script,
+        `
+      import fs from 'node:fs';
+      import {idleFixture} from ${JSON.stringify(new URL("./fixtures/qualification-idle-controller.mjs", import.meta.url).href)};
+      import {idleController,idleInitialState} from ${JSON.stringify(new URL("./image-qualification-idle-controller.mjs", import.meta.url).href)};
+      import {Cloudflare} from ${JSON.stringify(new URL("./image-qualification-control.mjs", import.meta.url).href)};
+      import {canonical,digest} from ${JSON.stringify(new URL("./image-qualification-isolation.mjs", import.meta.url).href)};
+      const directory = ${JSON.stringify(f.directory)};
+      const plan = idleFixture().plan;
+      plan.installation = JSON.parse(process.env.QUALIFICATION_INSTALLATION_JSON);
+      plan.isolation = JSON.parse(process.env.QUALIFICATION_ISOLATION_JSON);
+      const cf = new Cloudflare(plan.isolation.accountId, 'synthetic-cloudflare-token');
+      const settings = await cf.settings('crabbox-aws-qualification-authority');
+      plan.authoritySettingsSha256 = digest(canonical(settings));
+      plan.authorityModule = {module:'authority.js',count:1,sha256:digest('synthetic-authority')};
+      plan.originalInventorySha256 = digest(canonical({scripts:(await cf.list('/workers/scripts')).map(v=>v.id).sort(),namespaceIds:(await cf.list('/workers/durable_objects/namespaces')).map(v=>v.id).sort(),incoming:[]}));
+      plan.startsAt = new Date(Date.now()).toISOString();
+      plan.forwardStopsAt = new Date(Date.now()+600000).toISOString();
+      plan.deadline = new Date(Date.now()+1200000).toISOString();
+      const target = directory+'/idle-custody.json';
+      const recovery = process.env.IDLE_TEST_RECOVER === 'yes';
+      const state = recovery ? JSON.parse(fs.readFileSync(target)) : idleInitialState(plan);
+      try { await idleController(cf,plan,state,{mode:recovery?'recover':'run',token:process.env.QUALIFICATION_CONTROLLER_TOKEN,save:async next=>fs.writeFileSync(target,JSON.stringify(next),{mode:0o600})}); }
+      catch (error) { console.error(error.message); process.exitCode=1; }
+    `,
+      );
+      const observe = (recover) =>
+        spawnSync(process.execPath, ["--import", import.meta.url, script], {
+          env: {
+            ...f.env,
+            QUALIFICATION_CONTROLLER_TOKEN: "f".repeat(64),
+            IDLE_TEST_RECOVER: recover ? "yes" : "no",
+          },
+          encoding: "utf8",
+          timeout: 30000,
+        });
+      const original = observe(false);
+      assert.equal(original.status, unresolved ? 1 : 0, original.stderr);
+      const saved = () => JSON.parse(fs.readFileSync(path.join(f.directory, "idle-custody.json")));
+      assert.equal(saved().settled, !unresolved);
+      f.update({ probe: null, events: [], omitControllerRuntimeVersion: false });
+      const recovered = observe(true);
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(saved().installationRetained, true);
+      assert.equal(saved().failed, unresolved);
+      assert.ok(saved().requests > 100 && saved().requests <= 800);
+      assert.ok(
+        !f
+          .state()
+          .events.some(
+            (e) => /^(PUT|PATCH|DELETE) /.test(e) || e.startsWith("POST api.cloudflare.com"),
+          ),
+      );
+    });
+  test("HTTP retained installation prepares a different run, then fresh reaper settles without management writes", (t) => {
+    const f = reusable(t);
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    assert.equal(f.outputs.candidate_worker, "crabbox-image-qualification-99-1");
+    assert.equal(f.outputs.run_id, "image-qualification-42-1");
+    assert.ok(
+      f
+        .state()
+        .events.filter((e) => e.startsWith("PUT "))
+        .every((e) => !e.includes("namespaces")),
+    );
+    assert.ok(
+      !f
+        .state()
+        .events.some((e) => e.startsWith("POST api.cloudflare.com") || e.startsWith("DELETE ")),
+    );
+    f.update({ events: [] });
+    const reaped = f.invoke("reap");
+    assert.equal(reaped.status, 0, reaped.stderr);
+    assert.equal(f.state().identity, undefined);
+    assert.equal(Object.keys(f.state().workers).length, 3);
+    assert.ok(
+      !f
+        .state()
+        .events.some(
+          (e) => /^(PUT|PATCH|DELETE) /.test(e) || e.startsWith("POST api.cloudflare.com"),
+        ),
+    );
+    const proof = JSON.parse(
+      fs.readFileSync(path.join(f.directory, "reap-proof/finalization.json")),
+    );
+    assert.equal(proof.result, "finalized");
+  });
+  for (const fault of [
+    "put-before",
+    "put-lost",
+    "ownership-drift",
+    "binding-drift",
+    "wrong-version",
+    "denied",
+    "malformed-json",
+    "404-persistent",
+    "cancel",
+    "empty-deadline",
+  ]) {
+    test(`HTTP retained preparation fault ${fault} preserves installation and durable pre-deployment custody`, (t) => {
+      const f = reusable(t);
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ relayFault: fault });
+      const result = f.invoke("deploy");
+      assert.equal(result.status, 1);
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            f.directory,
+            "deploy-proof/installation/prepare-run/installation-operation.json",
+          ),
+        ),
+      );
+      assert.equal(journal.outcome, "unresolved");
+      assert.ok(journal.events.length > 0);
+      assert.equal(Object.keys(f.state().workers).length, 3);
+      assert.ok(!f.state().events.some((e) => e.startsWith("DELETE ")));
+      assert.ok(!JSON.stringify(journal).includes("synthetic-cloudflare-token"));
+      assert.ok(!JSON.stringify(journal).includes("6".repeat(64)));
+    });
+  }
+  test("HTTP missing installed controller fails recovery without a replacement upload", (t) => {
+    const f = reusable(t);
+    const state = f.state();
+    delete state.workers["crabbox-image-qualification-controller"];
+    f.update({ workers: state.workers });
+    const result = f.invoke("reap");
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /installed recovery controller missing/);
+    assert.ok(!f.state().events.some((e) => e.startsWith("PUT ")));
+  });
+  for (const fault of ["put-before", "put-lost", "missing", "denied", "malformed", "foreign"]) {
+    test(`HTTP candidate ${fault} is not replayed or admitted without deployment.json`, (t) => {
+      const f = reusable(t);
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ candidateFault: fault });
+      const result = f.invoke("deploy");
+      assert.equal(result.status, 1);
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            f.directory,
+            "deploy-proof/installation/prepare-run/installation-operation.json",
+          ),
+        ),
+      );
+      assert.equal(journal.outcome, "unresolved");
+      assert.ok(!fs.existsSync(path.join(f.directory, "deploy-proof/deployment.json")));
+      assert.ok(f.state().events.filter((e) => e.startsWith("PUT ")).length <= 1);
+      assert.ok(!f.state().identity);
+      if (["put-before", "put-lost"].includes(fault)) {
+        f.update({ candidateFault: null });
+        const recovered = f.invoke("reap");
+        assert.equal(recovered.status, 0, recovered.stderr);
+        assert.equal(
+          JSON.parse(fs.readFileSync(path.join(f.directory, "reap-proof/finalization.json")))
+            .result,
+          "idle",
+        );
+      }
+    });
+  }
+  for (const fault of ["stale", "denied", "lost"]) {
+    test(`HTTP installation exposure ${fault} keeps bounded original custody without replay`, (t) => {
+      const f = reusable(t, { exposureFault: fault });
+      const journal = JSON.parse(
+        fs.readFileSync(
+          path.join(f.directory, "install-proof/installation/install/installation-operation.json"),
+        ),
+      );
+      assert.equal(journal.outcome, "unresolved");
+      assert.ok(!fs.existsSync(path.join(f.directory, "install-proof/installation.json")));
+      assert.equal(journal.events.filter((e) => e.method === "POST").length, 1);
+      if (fault === "stale") assert.ok(journal.events.some((e) => e.enabled === true));
+    });
+  }
+  for (const fault of ["stale", "denied", "lost"]) {
+    test(`HTTP fresh process recovers partial install after ${fault} without upload replay`, (t) => {
+      const f = reusable(t, { exposureFault: fault });
+      f.update({ exposureFault: null, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 0);
+      assert.equal(f.state().tombstoneUploads, 1);
+      assert.equal(
+        f.state().events.filter((e) => e.startsWith("PUT ")).length,
+        1,
+        "only the existing namespace-deletion migration is allowed",
+      );
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "install-proof/installation-recovery.json")),
+      );
+      assert.equal(receipt.installation, "absent");
+      assert.equal(receipt.measurement, "not-started");
+    });
+  }
+  for (const fault of ["put-before", "put-lost", "second-put-before", "second-put-lost"]) {
+    test(`HTTP install ${fault} reconciles uncertain upload without replay in fresh process`, (t) => {
+      const f = reusable(t, { candidateFault: fault });
+      f.update({ candidateFault: null, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 0);
+      assert.ok(!f.state().identity);
+    });
+  }
+  test("HTTP complete installation recovery retains all resources without writes", (t) => {
+    const f = reusable(t);
+    f.update({ events: [] });
+    const result = f.invoke("install-recover", {
+      QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Object.keys(f.state().workers).length, 3);
+    assert.ok(!f.state().events.some((e) => /^(PUT|POST|DELETE) api.cloudflare/.test(e)));
+  });
+  for (const state of ["verified", "cancelled", "pending", "observed", "malformed"]) {
+    test(`HTTP installation recovery classifies historical ${state} probe without writes`, (t) => {
+      const f = reusable(t);
+      const probe = historicalProbe(f.state().now, state);
+      if (state === "malformed") delete probe.challenge;
+      f.update({ probe, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, ["verified", "cancelled"].includes(state) ? 0 : 1, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 3);
+      assert.deepEqual(f.state().probe, probe);
+      assert.ok(
+        !f
+          .state()
+          .events.some(
+            (e) =>
+              /^(PUT|PATCH|DELETE) /.test(e) ||
+              (e.startsWith("POST ") && !/\/(discover|transport-discover)$/.test(e)),
+          ),
+      );
+    });
+  }
+  for (const fault of ["foreign", "denied", "missing", "malformed"]) {
+    test(`HTTP partial installation ${fault} metadata never authorizes deletion`, (t) => {
+      const f = reusable(t, { exposureFault: "lost" });
+      f.update({ exposureFault: null, candidateFault: fault, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 1);
+      assert.ok(!f.state().events.some((e) => /^(PUT|POST|DELETE) api.cloudflare/.test(e)));
+    });
+  }
+  test("HTTP interrupted install deletion is observed on fresh recovery without a second DELETE", (t) => {
+    const f = reusable(t, { exposureFault: "lost" });
+    f.update({ exposureFault: null, deleteFault: "lost", events: [] });
+    const options = { QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof") };
+    assert.equal(f.invoke("install-recover", options).status, 1);
+    f.update({ deleteFault: null, events: [] });
+    const result = f.invoke("install-recover", options);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Object.keys(f.state().workers).length, 0);
+    assert.ok(!f.state().events.some((e) => e.startsWith("DELETE ")));
+  });
+  test("HTTP expired original installation recovery clock cannot reset or mutate", (t) => {
+    const f = reusable(t, { exposureFault: "lost" });
+    f.update({ exposureFault: null, now: f.state().now + 31 * 60_000, events: [] });
+    const result = f.invoke("install-recover", {
+      QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /original installation recovery deadline expired/);
+    assert.equal(f.state().events.length, 0);
+  });
+  test("HTTP legacy deletion is independently observed and does not imply a measurement passed", (t) => {
+    const f = fixture(t, "first-walk");
+    f.update({ httpInstallation: true });
+    f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    const finalized = f.invoke("finalize", f.armEnv());
+    assert.equal(finalized.status, 1);
+    const proof = JSON.parse(
+      fs.readFileSync(path.join(f.directory, "finalize-proof/finalization.json")),
+    );
+    assert.equal(proof.cleanup, "finalized");
+    assert.equal(proof.result, "failed");
+    assert.equal(Object.keys(f.state().workers).length, 0);
+  });
+
+  test("HTTP run binding preparation preserves fixed active session and combined arm exact versions", (t) => {
+    const f = reusable(t);
+    const scope = JSON.parse(f.env.QUALIFICATION_AWS_SESSION_JSON);
+    const start = f.state().now;
+    for (const [field, minutes] of [
+      ["startsAt", 0],
+      ["workExpiresAt", 130],
+      ["expiresAt", 150],
+      ["recoveryExpiresAt", 270],
+    ])
+      scope[field] = new Date(start + minutes * 60_000).toISOString();
+    f.env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify(scope);
+    assert.equal(f.invoke("admit").status, 0);
+    f.update({ activateAt: start, mutationTimes: [] });
+    const result = f.invoke("deploy-and-arm");
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(f.state().mutationTimes.every((at) => at >= start));
+    assert.ok(Date.parse(f.state().enrolledAt) >= start);
+    assert.ok(f.outputs.armed_at);
+    assert.equal(f.state().identity.runId, scope.runId);
+  });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  for (const fault of ["denied", "stale", "lost"])
+    test(`HTTP legacy deletion ${fault} keeps settlement unknown and never passes measurement`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.update({ httpInstallation: true });
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      const deployed = f.invoke("deploy");
+      assert.equal(deployed.status, 0, deployed.stderr);
+      f.update({ deleteFault: fault, events: [] });
+      const finalized = f.invoke("finalize", f.armEnv());
+      assert.equal(finalized.status, 1);
+      const proof = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "finalize-proof/finalization.json")),
+      );
+      assert.equal(proof.result, "failed");
+      assert.notEqual(proof.cleanup, "finalized");
+      assert.ok(f.state().identity, "registry cannot retire before verified physical settlement");
+      assert.ok(!f.state().events.some((e) => e.endsWith("/retire")));
+      f.update({ deleteFault: null });
+      const recovered = f.invoke("reap");
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.deepEqual(f.state().workers, {});
+    });
+}

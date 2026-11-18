@@ -22,6 +22,8 @@ import {
   runSessionPolicy,
 } from "./image-qualification-run-session.mjs";
 
+import { validateInstallation, verifyInstallation } from "./image-qualification-installation.mjs";
+
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(directory);
 const secretNames = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
@@ -58,6 +60,7 @@ const sourceFiles = [
   "image-qualification-network.ts",
   "image-qualification-executor-token.mjs",
   "image-qualification-run-session.mjs",
+  "image-qualification-installation.mjs",
 ];
 export const replacementSources = () =>
   Object.fromEntries(
@@ -126,6 +129,7 @@ export function validateReplacementPlan(plan, sources = replacementSources()) {
     QUALIFICATION_ISOLATION_JSON: JSON.stringify(plan.isolation),
     QUALIFICATION_ISOLATION_SHA256: digest(canonical(plan.isolation)),
   });
+  if (plan.installation !== undefined) validateInstallation(plan.installation);
   if (plan.runSession !== undefined) {
     const scope = validateRunSession(plan.runSession);
     if (
@@ -233,6 +237,9 @@ export function verifyReplacementIdle(
     state.settled !== true ||
     state.failed !== false ||
     state.discovery !== "idle" ||
+    !equal(ownerPlan.installation, plan.installation) ||
+    (plan.installation &&
+      (state.installationRetained !== true || state.installationId !== plan.installation.id)) ||
     !sha.test(state.identityDigest ?? "") ||
     !Array.isArray(state.events)
   )
@@ -610,6 +617,7 @@ async function replaceIdleSessionOperation(
   let requests = 0;
   const api = Object.create(cf);
   api.admission = admission;
+  api.installation = plan.installation;
   api.request = async (route, init = {}, options = {}) => {
     clock(mode === "deliver");
     if (++requests > 400 || (init.method ?? "GET") !== "GET") fail();
@@ -662,6 +670,7 @@ async function replaceIdleSessionOperation(
     }
   };
   api.list = async (route) => {
+    if (plan.installation && route === "/workers/scripts") return await api.request(route);
     const all = [];
     for (let page = 1; page <= 100; page++) {
       const reply = await api.request(
@@ -738,8 +747,16 @@ async function replaceIdleSessionOperation(
       names.some((v) => !/^[a-zA-Z0-9_-]{1,63}$/.test(v ?? ""))
     )
       fail();
+    if (plan.installation) await verifyInstallation(api);
     for (const name of names)
-      if (name !== authorityName) {
+      if (
+        name !== authorityName &&
+        ![
+          plan.installation?.candidate.name,
+          plan.installation?.controller.name,
+          plan.installation?.relay.name,
+        ].includes(name)
+      ) {
         const clientSettings = await api.settings(name);
         if (
           !Array.isArray(clientSettings.bindings) ||
@@ -985,6 +1002,9 @@ async function replaceIdleSessionOperation(
       ...safeEnv(),
       CLOUDFLARE_ACCOUNT_ID: admission.accountId,
       CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+      ...(plan.installation
+        ? { QUALIFICATION_CONTROLLER_TOKEN: env.QUALIFICATION_CONTROLLER_TOKEN }
+        : {}),
       QUALIFICATION_IDLE_SOURCE_SHA: plan.sourceSha,
       QUALIFICATION_IDLE_PLAN_SHA256: digest(canonical(proof.ownerPlan)),
     },

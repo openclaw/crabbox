@@ -377,3 +377,48 @@ test("only first-walk admits the longer handoff while preserving exact expiry", 
     assert.throws(() => readExecutorCredential(candidate, { now: expiry, mask() {} }));
   }
 });
+
+test("retained executor v2 binds installation and relay without changing run or preparation bounds", () => {
+  const { env } = fixture();
+  env.QUALIFICATION_INSTALLATION_ID = "d".repeat(64);
+  env.QUALIFICATION_RELAY_WORKER = "crabbox-image-qualification-relay-99-1";
+  const identity = executorCredentialIdentity(env);
+  assert.equal(identity.version, 2);
+  env.QUALIFICATION_EXECUTOR_CREDENTIAL = encode({ ...identity, token });
+  assert.equal(readExecutorCredential(env, { mask() {} }).tokenSha256, tokenSha256);
+  for (const change of [
+    (r) => (r.installationId = "e".repeat(64)),
+    (r) => (r.relayWorker = "crabbox-image-qualification-relay-98-1"),
+    (r) => (r.runId = "41"),
+    (r) => delete r.installationId,
+  ]) {
+    const value = { ...identity, token };
+    change(value);
+    assert.throws(() =>
+      readExecutorCredential(
+        { ...env, QUALIFICATION_EXECUTOR_CREDENTIAL: encode(value) },
+        { mask() {} },
+      ),
+    );
+  }
+  const now = Date.now(),
+    start = new Date(now + 30 * 60_000).toISOString();
+  env.QUALIFICATION_MODE = "first-walk";
+  env.QUALIFICATION_EXPIRES_AT = new Date(Date.parse(start) + 150 * 60_000).toISOString();
+  env.QUALIFICATION_EXECUTOR_CREDENTIAL = encode({ ...executorCredentialIdentity(env), token });
+  assert.throws(
+    () => readExecutorCredential(env, { now, mask() {} }),
+    "executor cannot use preparation allowance",
+  );
+  assert.equal(
+    readExecutorCredential(env, { now, mask() {}, preparationStartsAt: start }).tokenSha256,
+    tokenSha256,
+  );
+  assert.throws(() =>
+    readExecutorCredential(env, {
+      now,
+      mask() {},
+      preparationStartsAt: new Date(now + 61 * 60_000).toISOString(),
+    }),
+  );
+});
