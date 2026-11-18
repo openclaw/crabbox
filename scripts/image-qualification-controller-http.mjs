@@ -168,13 +168,17 @@ export async function requestControllerJSON({
   }
 }
 
-// Only canonical discovery is read-only. Never wrap a mutating controller action
-// in this observation loop, even when its HTTP result is unconfirmed.
+// Only registry and transport-probe discovery are read-only. Never wrap a
+// mutating controller action here, even when its HTTP result is unconfirmed.
 export async function observeControllerDiscovery(
   observe,
-  { deadline = Infinity, signal, pause = delay } = {},
+  { action = "discover", deadline = Infinity, signal, pause = delay } = {},
 ) {
-  if (typeof observe !== "function" || !(Number.isFinite(deadline) || deadline === Infinity))
+  if (
+    typeof observe !== "function" ||
+    !["discover", "transport-discover"].includes(action) ||
+    !(Number.isFinite(deadline) || deadline === Infinity)
+  )
     throw new Error("invalid discovery observation bounds");
   const stopsAt = Math.min(Date.now() + 60_000, deadline);
   const stop = new AbortController();
@@ -193,10 +197,11 @@ export async function observeControllerDiscovery(
         return result;
       } catch (error) {
         const r = error instanceof ControllerHTTPError ? error.receipt : undefined;
-        // HTML404 can precede workers.dev activation. It is never evidence of
-        // an idle registry. Preserve the original error for all other outcomes.
+        // Observe only the same read-only action after this exact HTML404. The
+        // reply establishes neither activation delay nor idle state. All other
+        // errors preserve their original outcome without another dispatch.
         if (
-          r?.action !== "discover" ||
+          r?.action !== action ||
           r.reason !== "http-error" ||
           r.status !== 404 ||
           r.contentType !== "html" ||

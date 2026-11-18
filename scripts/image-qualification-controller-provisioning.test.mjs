@@ -704,3 +704,116 @@ test("HTTP: recursive transport recovery retains the replacement version for ori
   await f.cf.deleteScript(controllerName);
   assert.equal(f.state.present, false);
 });
+
+function runtimeHTML404(res) {
+  res.writeHead(404, { "content-type": "text/html", "cf-ray": "0123456789abcdef-DFW" });
+  res.end(`<!doctype html><p>${marker}</p>`);
+}
+
+test("HTTP: transport discovery HTML404 then canonical probe uses one upload and settles", async (t) => {
+  let failed = false;
+  const f = await fixture(t, {
+    reply: async ({ route, res }) => {
+      if (route === "/transport-discover" && !failed) {
+        failed = true;
+        runtimeHTML404(res);
+        return true;
+      }
+    },
+  });
+  assert.deepEqual((await f.invoke({ probeOnly: true })).discovered, { probe: null });
+  assert(failed);
+  assert.equal(f.state.rpc, 2);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.state.present, false);
+  const r = f.receipt();
+  assert.equal(r.acknowledgedVersion, r.verifiedVersion);
+  assert.equal(r.discovery, "probe-observed");
+  assert.equal(r.outcome, "verified");
+  assert.equal(r.settlement, "deleted-and-absent");
+  const failures = fs.readdirSync(f.dir).filter((n) => n.startsWith("controller-http-failure-"));
+  assert.equal(failures.length, 1);
+  const failure = JSON.parse(fs.readFileSync(path.join(f.dir, failures[0])));
+  assert.equal(failure.action, "transport-discover");
+  assert.equal(failure.status, 404);
+  assert(!JSON.stringify(failure).includes(marker));
+  await assert.rejects(f.invoke({ probeOnly: true }), /receipt exists/);
+  assert.equal(f.state.puts, 1);
+});
+
+for (const kind of ["JSON404", "network", "cancel", "deadline"]) {
+  test(`HTTP: transport discovery ${kind} stops and original cleanup settles`, async (t) => {
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    let failed = false;
+    const stop = new AbortController();
+    const f = await fixture(t, {
+      reply: async ({ route, req, res }) => {
+        if (route !== "/transport-discover") return;
+        assert(!failed);
+        failed = true;
+        if (kind === "network") req.socket.destroy();
+        else if (kind === "cancel") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write("{");
+          setTimeout(() => stop.abort(), 10);
+        } else if (kind === "deadline") {
+          now += 60_001;
+          runtimeHTML404(res);
+        } else {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: marker }));
+        }
+        return true;
+      },
+    });
+    await assert.rejects(f.invoke({ v2: true, idleOnly: false, signal: stop.signal }));
+    assert(failed);
+    assert.equal(f.state.rpc, 1);
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+    assert.equal(f.state.present, false);
+    assert.equal(f.receipt().failedStage, "discovery");
+    assert.equal(f.receipt().outcome, "failed");
+    assert.equal(f.receipt().settlement, "deleted-and-absent");
+    assert(
+      !f.state.requests.some((r) =>
+        ["/discover", "/transport-open", "/transport-settle"].includes(r.route),
+      ),
+    );
+    await assert.rejects(f.invoke({ v2: true, idleOnly: false }), /receipt exists/);
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+  });
+}
+
+test("HTTP: reaper transport discovery readiness precedes registry observation and original finalizer", async (t) => {
+  let failed = false;
+  const f = await fixture(t, {
+    reply: async ({ route, res }) => {
+      if (route === "/transport-discover" && !failed) {
+        failed = true;
+        runtimeHTML404(res);
+        return true;
+      }
+    },
+  });
+  assert.deepEqual((await f.invoke({ v2: true, idleOnly: false })).discovered, { run: null });
+  assert(failed);
+  assert.deepEqual(
+    f.state.requests
+      .filter((r) => r.method === "POST" && !r.route.includes("/workers/"))
+      .map((r) => r.route),
+    ["/transport-discover", "/transport-discover", "/discover"],
+  );
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 0);
+  assert.equal(f.receipt().settlement, "retained-for-original-finalizer");
+  // The admitted caller stays with the original finalizer and exact version.
+  f.cf.discoverySignal = new AbortController().signal;
+  assert.equal(await f.cf.verifyController(), version);
+  await f.cf.deleteScript(controllerName);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.state.present, false);
+});

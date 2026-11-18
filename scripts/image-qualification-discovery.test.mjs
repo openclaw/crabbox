@@ -374,16 +374,17 @@ test("successful but invalid canonical discovery fails closed without a retry", 
 
 test("invalid discovery input is rejected before management or runtime dispatch", async (t) => {
   const f = fixture(t, async () => assert.fail("invalid input dispatched"));
-  for (const value of [
-    null,
-    [],
-    new Date(),
-    "",
-    { run: "other" },
-    { [Symbol()]: true },
-    Object.create(null),
-  ])
-    await assert.rejects(f.call("discover", value), /empty input/);
+  for (const action of ["discover", "transport-discover"])
+    for (const value of [
+      null,
+      [],
+      new Date(),
+      "",
+      { run: "other" },
+      { [Symbol()]: true },
+      Object.create(null),
+    ])
+      await assert.rejects(f.call(action, value), /empty input/);
   assert.equal(f.state.rpc, 0);
   assert.equal(f.state.gets.length, 0);
 });
@@ -396,7 +397,6 @@ for (const action of [
   "begin-finalization",
   "retire",
   "transport-open",
-  "transport-discover",
   "transport-settle",
 ]) {
   test(`${action} remains single-shot even on HTML404`, async (t) => {
@@ -416,6 +416,106 @@ for (const action of [
     assert.equal(f.state.rpc, 1);
     // Existing content-fence signal plus the original action-time signal.
     assert.equal(signalCalls, 2);
+    assert.equal(f.cf.discoverySignal, undefined);
+  });
+}
+
+// The transport probe is a read-only prerequisite to registry discovery. Its
+// failure never licenses transport-open/settle or another upload.
+for (const action of ["discover", "transport-discover"]) {
+  const response = action === "discover" ? { run: null } : { probe: null };
+  test(`${action} observation is action-bound and capped at twelve reads`, async () => {
+    let calls = 0;
+    const deadlines = new Set();
+    await assert.rejects(
+      observeControllerDiscovery(
+        async (observation) => {
+          deadlines.add(observation.deadline);
+          return requestControllerJSON({
+            url,
+            token,
+            action,
+            ...observation,
+            invoke: async () => {
+              calls++;
+              return html404();
+            },
+          });
+        },
+        { action, pause: immediate },
+      ),
+      ControllerHTTPError,
+    );
+    assert.equal(calls, 12);
+    assert.equal(deadlines.size, 1);
+    let mismatched = 0;
+    await assert.rejects(
+      observeControllerDiscovery(
+        async () => {
+          mismatched++;
+          return requestControllerJSON({
+            url,
+            token,
+            action: action === "discover" ? "transport-discover" : "discover",
+            invoke: async () => html404(),
+          });
+        },
+        { action, pause: immediate },
+      ),
+      ControllerHTTPError,
+    );
+    assert.equal(mismatched, 1);
+    // A fresh successful request remains the canonical reply, never an inferred idle.
+    assert.deepEqual(await observeControllerDiscovery(async () => response, { action }), response);
+  });
+}
+
+for (const action of ["claim", "transport-open", "transport-settle", "unknown"]) {
+  test(`observation helper refuses ${action} before calling its observer`, async () => {
+    let calls = 0;
+    await assert.rejects(
+      observeControllerDiscovery(async () => calls++, { action }),
+      /invalid/,
+    );
+    assert.equal(calls, 0);
+  });
+}
+
+for (const drift of ["authorityVersion", "controllerVersion", "ownership"]) {
+  test(`transport discovery ${drift} drift blocks observation redispatch`, async (t) => {
+    const f = fixture(t, async (_route, _init, state) => {
+      if (drift === "ownership") state.settings.tags = [];
+      else state[drift] = "22222222-2222-4222-8222-222222222222";
+      return html404();
+    });
+    await assert.rejects(f.call("transport-discover"), /drifted|changed|unowned/);
+    assert.equal(f.state.rpc, 1);
+    assert.equal(f.cf.discoverySignal, undefined);
+  });
+}
+
+for (const [name, reply] of [
+  ["JSON404", () => Response.json({ error: marker }, { status: 404 })],
+  ["denied", () => Response.json({ error: marker }, { status: 403 })],
+  ["conflict", () => Response.json({ error: marker }, { status: 409 })],
+  [
+    "HTML503",
+    () =>
+      new Response("<!doctype html>", { status: 503, headers: { "content-type": "text/html" } }),
+  ],
+  [
+    "network failure",
+    () => {
+      throw new Error(marker);
+    },
+  ],
+  ["malformed success", () => new Response("{")],
+  ["invalid probe envelope", () => Response.json({ run: null })],
+]) {
+  test(`transport discovery ${name} fails without redispatch`, async (t) => {
+    const f = fixture(t, reply);
+    await assert.rejects(f.call("transport-discover"));
+    assert.equal(f.state.rpc, 1);
     assert.equal(f.cf.discoverySignal, undefined);
   });
 }
