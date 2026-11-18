@@ -602,8 +602,8 @@ function fixture(t, mode = "retained") {
   env.QUALIFICATION_AWS_SESSION_JSON = JSON.stringify({
     profile:
       mode === "key-authorization"
-        ? "key-tag-authorization-aws-session/v1"
-        : "first-walk-aws-session/v1",
+        ? "key-tag-authorization-aws-session/v2"
+        : "first-walk-aws-session/v2",
     repository: env.GITHUB_REPOSITORY,
     workflowSha,
     candidateSha,
@@ -1429,7 +1429,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
 if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
   test("key-only result requires all fixed probes and explicit complete settlement", () => {
     const probes = [
-      "tags-restated",
+      "tags-immutable",
       ...Array.from({ length: 4 }, (_, i) => [
         `tag-missing-${i}`,
         `tag-changed-${i}`,
@@ -1438,6 +1438,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
     ];
     const a = {
       keyAuthorizationOnly: true,
+      taggingContract: "creation-only/v1",
       finalized: true,
       operations: [{ action: "ImportKeyPair" }],
       finalReceipt: {
@@ -1447,11 +1448,14 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
         probe,
         outcome: "passed",
         action: i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags",
-        code: i === 0 ? "DryRunOperation" : "UnauthorizedOperation",
+        code: "UnauthorizedOperation",
       })),
     };
     assert.doesNotThrow(() => verifyQualificationEvidence(a, {}, undefined, true, true));
     for (const change of [
+      (x) => delete x.taggingContract,
+      (x) => (x.authorizationChecks[0].code = "DryRunOperation"),
+      (x) => (x.authorizationChecks[0].probe = "tags-restated"),
       (x) => delete x.finalReceipt.finalCounts,
       (x) => x.finalReceipt.finalCounts.volumes++,
       (x) => x.authorizationChecks.pop(),

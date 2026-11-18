@@ -54,14 +54,17 @@ belong in internal artifacts, outside this package and public build outputs.
 
 The private first-walk authority performs fixed EC2 DryRun checks after its
 existing request and ledger validation, before forward launch, capture, copy,
-attachment, mapping and tag effects. Before launch it also tests unchanged,
-missing, changed and removed ownership tags against its already-owned physical
-key. Callers cannot select probes, actions or DryRun parameters.
+attachment and mapping effects. Ownership tags are supplied only at resource
+creation. Before launch it tests standalone restatement, missing, changed and
+removed ownership tags against its already-owned physical key; all thirteen
+standalone mutation/removal probes must return `UnauthorizedOperation`. Callers
+cannot select probes, actions or DryRun parameters, and candidate requests cannot
+proxy standalone `CreateTags` or `DeleteTags`.
 
 Each run permits at most 32 persisted checks, with one DryRun per request
-digest and no retries. The unchanged-tag check first reads the ledger's exact
-key ID, verifies its name and all four ownership tags, then performs its existing
-DryRun. Both requests share one ten-second timeout and the original forward
+digest and no retries. The `tags-immutable` check first reads the ledger's exact
+key ID, verifies its name and all four ownership tags, then performs the fixed
+negative DryRun. Both requests share one ten-second timeout and the original forward
 deadline. Key metadata is capped at 64 KiB and error XML at 16 KiB.
 
 Additive `keyObservation` evidence records a resource digest and fixed-order
@@ -96,7 +99,7 @@ rejects candidate AWS requests and first-walk preparation, while the temporary
 session policy independently denies compute and storage effects. Only trusted
 controller code constructs tagging probes; IAM is not a DryRun-only boundary.
 
-This mode requires the distinct `key-tag-authorization-aws-session/v1` session
+This mode requires the distinct `key-tag-authorization-aws-session/v2` session
 profile with matching handoff and recovery identity. It keeps the existing
 130/150/270-minute lifecycle offsets; the diagnostic itself has a ten-minute
 forward-work bound and does not reopen after an uncertain result. Preserve the
@@ -105,3 +108,36 @@ requires all thirteen checks and authoritative zero-residue finalization. It is
 an authorization diagnostic, not evidence of first-walk performance improvement.
 Installation, namespace-preserving deployment and execution require separate
 operator admission; merging tooling performs none of those actions.
+
+
+## Creation-only ownership contract
+
+Fresh private first-walk and key-authorization identities require
+`taggingContract: "creation-only/v1"`. The field is bound through service props,
+deployment identity, registry, attestation and recovery binding. Missing or
+unknown values cannot enroll or resume forward work. Existing records without
+this field retain their exact identity for finalization and retirement; recovery
+must not rewrite them into the new contract.
+
+The reusable permission policy v2 requires matching run, owner, source and expiry
+request tags on each created resource. Dependent `ec2:CreateTags` is allowed only
+with the documented `ec2:CreateAction` contexts for `ImportKeyPair`, `RunInstances`,
+`CreateImage` and `CreateVolume`; standalone tag writes and removals are denied.
+Creating operations and exact ownership readback remain mandatory. Negative
+DryRuns alone do not establish successful creation, KMS access or lifecycle
+completion for every resource type.
+
+Fresh sessions use `first-walk-aws-session/v2` or the key profile above. The
+compact session policy retains `CreateTags` for dependent creation authorization
+and the forward-work cutoff. Legacy v1 profiles cannot issue forward sessions;
+they are accepted only by the permanently forward-denied cleanup route for an
+original legacy owner. Session and stored tagging contracts must match. The
+existing permissions boundary, fixed resources, trusted issuer, resource limits
+and independent recovery window remain required.
+
+Install permission changes and update the private authority only through a
+separately admitted migration with no active forward or recovery dependency.
+Preserve the original owner and cleanup credentials until complete settlement.
+Historical positive-tag diagnostics remain historical failures; they do not
+satisfy this changed admission contract. Normal production provider tagging is
+unchanged.

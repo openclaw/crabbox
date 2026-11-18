@@ -5,7 +5,8 @@ import path from "node:path";
 import { canonical, digest, authorityName } from "./image-qualification-isolation.mjs";
 import {
   validateRunSession,
-  keyAuthorizationProfile,
+  keyAuthorizationSession,
+  qualificationTaggingContract,
   runSessionTags,
   cleanupSessionPolicy,
 } from "./image-qualification-run-session.mjs";
@@ -24,7 +25,7 @@ const stamp = (v) => (typeof v === "string" ? Date.parse(v) : NaN);
 export function validateCleanupSession(plan, handoff) {
   const c = plan.cleanupSession;
   if (!c) fail();
-  validateRunSession(c.scope);
+  validateRunSession(c.scope, { cleanupOnly: true });
   if (
     c.profile !== "same-owner-cleanup-session/v1" ||
     !sha.test(c.authoritySettingsSha256 ?? "") ||
@@ -40,15 +41,16 @@ export function validateCleanupSession(plan, handoff) {
     c.scope.startsAt !== plan.handoffStartedAt ||
     c.scope.recoveryExpiresAt !== plan.deadline ||
     c.scope.expiresAt !== plan.binding.expiresAt ||
-    (c.scope.profile === keyAuthorizationProfile) !== Boolean(plan.binding.keyAuthorizationOnly) ||
+    plan.binding.taggingContract !==
+      (c.scope.profile.endsWith("/v2") ? qualificationTaggingContract : undefined) ||
+    keyAuthorizationSession(c.scope) !== Boolean(plan.binding.keyAuthorizationOnly) ||
     c.scope.runId !== plan.binding.runId ||
     c.scope.candidateSha !== plan.binding.candidateSha
   )
     fail();
   if (
     handoff &&
-    (handoff.mode !==
-      (c.scope.profile === keyAuthorizationProfile ? "key-authorization" : "first-walk") ||
+    (handoff.mode !== (keyAuthorizationSession(c.scope) ? "key-authorization" : "first-walk") ||
       [
         "repository",
         "workflowSha",
@@ -341,7 +343,10 @@ export async function manageCleanupSession(
       "43200",
       "--tags",
       JSON.stringify(
-        Object.entries(runSessionTags(c.scope)).map(([Key, Value]) => ({ Key, Value })),
+        Object.entries(runSessionTags(c.scope, { cleanupOnly: true })).map(([Key, Value]) => ({
+          Key,
+          Value,
+        })),
       ),
       "--policy",
       JSON.stringify(cleanupSessionPolicy(c.scope)),

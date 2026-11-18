@@ -34,10 +34,15 @@ const refuse = () => {
 
 export const privateQualificationMode = (mode) =>
   ["first-walk", "key-authorization"].includes(mode);
-export const keyAuthorizationProfile = "key-tag-authorization-aws-session/v1";
+export const qualificationTaggingContract = "creation-only/v1";
+export const keyAuthorizationProfile = "key-tag-authorization-aws-session/v2";
+export const firstWalkSessionProfile = "first-walk-aws-session/v2";
+const legacyProfiles = ["first-walk-aws-session/v1", "key-tag-authorization-aws-session/v1"];
+export const keyAuthorizationSession = (scope) =>
+  [keyAuthorizationProfile, legacyProfiles[1]].includes(scope.profile);
 
 // Private protected input, never candidate-provided or an operational repo record.
-export function validateRunSession(scope) {
+export function validateRunSession(scope, { cleanupOnly = false } = {}) {
   const fields = [
     "profile",
     "repository",
@@ -55,7 +60,11 @@ export function validateRunSession(scope) {
   if (
     !scope ||
     !equal(Object.keys(scope).toSorted(), fields.toSorted()) ||
-    !["first-walk-aws-session/v1", keyAuthorizationProfile].includes(scope.profile) ||
+    ![
+      firstWalkSessionProfile,
+      keyAuthorizationProfile,
+      ...(cleanupOnly ? legacyProfiles : []),
+    ].includes(scope.profile) ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository ?? "") ||
     ![scope.workflowSha, scope.candidateSha].every((v) => /^[0-9a-f]{40}$/.test(v ?? "")) ||
     !/^image-qualification-[1-9][0-9]*-1$/.test(scope.runId ?? "") ||
@@ -72,8 +81,8 @@ export function validateRunSession(scope) {
   return scope;
 }
 
-export function runSessionTags(scope) {
-  validateRunSession(scope);
+export function runSessionTags(scope, options) {
+  validateRunSession(scope, options);
   return Object.fromEntries(
     sessionTagKeys.map((key, i) => [
       key,
@@ -83,7 +92,11 @@ export function runSessionTags(scope) {
 }
 
 export function runSessionPolicy(scope) {
-  validateRunSession(scope);
+  return sessionPolicy(scope, false);
+}
+
+function sessionPolicy(scope, cleanupOnly) {
+  validateRunSession(scope, { cleanupOnly });
   const policy = {
     Version: "2012-10-17",
     Statement: [
@@ -120,7 +133,7 @@ export function runSessionPolicy(scope) {
       },
     ],
   };
-  if (scope.profile === keyAuthorizationProfile) {
+  if (keyAuthorizationSession(scope)) {
     policy.Statement[0].Action = [
       "ec2:Describe*",
       "ec2:GetEbsEncryptionByDefault",
@@ -141,6 +154,7 @@ export function runSessionPolicy(scope) {
       Resource: "*",
     });
   }
+  if (cleanupOnly) policy.Statement.push({ Effect: "Deny", Action: forwardActions, Resource: "*" });
   if (JSON.stringify(policy).length > 2048) refuse();
   return policy;
 }
@@ -148,10 +162,8 @@ export function runSessionPolicy(scope) {
 // Recovery can replace only the original run's session, never reopen work or
 // move its clocks. This is an additional intersection with the installed role.
 export function cleanupSessionPolicy(scope) {
-  const policy = runSessionPolicy(scope);
-  policy.Statement.push({ Effect: "Deny", Action: forwardActions, Resource: "*" });
-  if (JSON.stringify(policy).length > 2048) refuse();
-  return policy;
+  // Legacy profiles are accepted only in this permanently forward-denied path.
+  return sessionPolicy(scope, true);
 }
 
 export function handoffSession(env, identity, manifestSha256) {
@@ -308,16 +320,6 @@ export function reusableQualificationPolicies(config) {
     ...request,
     "ec2:CreateAction": ["RunInstances", "ImportKeyPair", "CreateImage", "CreateVolume"],
   });
-  // Standalone CreateTags uses global resource tags in its request context.
-  // All four ownership fields can only be restated, never replaced. The typed
-  // authority still injects its operation ID and checks exact ledger targets.
-  allow(
-    "RestateOwnedTags",
-    "CreateTags",
-    tagged,
-    { ...identity("aws:ResourceTag"), ...request },
-    { Null: { "ec2:CreateAction": "true" } },
-  );
   for (const [action, type, account] of [
     ["TerminateInstances", "instance", c.accountId],
     ["DeleteVolume", "volume", c.accountId],
@@ -348,27 +350,12 @@ export function reusableQualificationPolicies(config) {
       Resource: "*",
       Action: ["iam:*", "sts:AssumeRole*", "sts:TagSession", "ec2:DeleteTags"],
     },
-    // Never let general retagging create or destroy the data-copy marker.
     {
-      Sid: "NoPromotingDataCopy",
+      Sid: "NoStandaloneTagMutation",
       Effect: "Deny",
       Action: "ec2:CreateTags",
-      Resource: tagged,
-      Condition: {
-        Null: { "ec2:CreateAction": "true" },
-        StringEquals: { "aws:RequestTag/crabbox_qualification_op": "first-walk-data" },
-        StringNotEquals: { "aws:ResourceTag/crabbox_qualification_op": "first-walk-data" },
-      },
-    },
-    {
-      Sid: "PreserveDataCopy",
-      Effect: "Deny",
-      Action: "ec2:CreateTags",
-      Resource: tagged,
-      Condition: {
-        StringEquals: { "aws:ResourceTag/crabbox_qualification_op": "first-walk-data" },
-        StringNotEquals: { "aws:RequestTag/crabbox_qualification_op": "first-walk-data" },
-      },
+      Resource: "*",
+      Condition: { Null: { "ec2:CreateAction": "true" } },
     },
   ];
   const policies = [];
@@ -425,7 +412,7 @@ export function reusableQualificationPolicies(config) {
     ],
   };
   return {
-    profile: "reusable-qualification-permissions/v1",
+    profile: "reusable-qualification-permissions/v2",
     configSha256: digest(canonical(c)),
     policies,
     trust,

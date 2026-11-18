@@ -27,7 +27,7 @@ const config = {
   rootGB: 20,
 };
 const scope = {
-  profile: "first-walk-aws-session/v1",
+  profile: "first-walk-aws-session/v2",
   repository: "example/repo",
   workflowSha: "a".repeat(40),
   candidateSha: "b".repeat(40),
@@ -249,16 +249,12 @@ test("multi-resource attach and launch require every supported resource check", 
   );
 });
 
-// Standalone CreateTags has an action-specific context: global resource tags
-// are present while EC2-prefixed resource tags and ec2:CreateAction are absent.
+// Direct requests have no service-generated ec2:CreateAction. Qualification
+// sessions must not mutate even an exactly matching owned tag set.
 const standaloneTagContext = Object.fromEntries(
   Object.entries(context).filter(([key]) => !key.startsWith("ec2:ResourceTag/")),
 );
-Object.assign(
-  standaloneTagContext,
-  Object.fromEntries(Object.entries(tags).map(([key, value]) => [`aws:ResourceTag/${key}`, value])),
-);
-
+for (const key of sessionTagKeys) standaloneTagContext[`aws:ResourceTag/${key}`] = tags[key];
 for (const [type, account] of [
   ["key-pair", config.accountId],
   ["instance", config.accountId],
@@ -266,83 +262,48 @@ for (const [type, account] of [
   ["image", ""],
   ["snapshot", ""],
 ])
-  test(`standalone CreateTags ${type} requires matching global resource, principal and request identity`, () => {
-    const resources = [arn(type, "test", account)];
-    assert.equal(allowed("ec2:CreateTags", resources, standaloneTagContext), true);
-    for (const prefix of ["aws:PrincipalTag", "aws:RequestTag", "aws:ResourceTag"])
-      for (const key of sessionTagKeys)
-        for (const value of [undefined, "foreign"])
+  test(`standalone tag mutations on ${type} are denied, including exact restatement`, () => {
+    const resource = [arn(type, "test", account)];
+    for (const at of [
+      scope.startsAt,
+      "2030-01-01T01:00:00.000Z",
+      scope.workExpiresAt,
+      scope.recoveryExpiresAt,
+    ]) {
+      const c = { ...standaloneTagContext, "aws:CurrentTime": at };
+      assert.equal(allowed("ec2:CreateTags", resource, c), false);
+      assert.equal(allowed("ec2:DeleteTags", resource, c), false);
+      for (const key of [...sessionTagKeys, "crabbox_qualification_op"])
+        for (const value of [undefined, "foreign", "first-walk-data"])
           assert.equal(
-            allowed("ec2:CreateTags", resources, {
-              ...standaloneTagContext,
-              [`${prefix}/${key}`]: value,
-            }),
+            allowed("ec2:CreateTags", resource, { ...c, [`aws:RequestTag/${key}`]: value }),
             false,
-            `${prefix}/${key}=${value}`,
           );
-    // EC2-prefixed values cannot substitute for missing/mismatched global tags.
-    for (const key of sessionTagKeys)
-      for (const value of [undefined, "foreign"])
-        assert.equal(
-          allowed("ec2:CreateTags", resources, {
-            ...context,
-            ...standaloneTagContext,
-            [`aws:ResourceTag/${key}`]: value,
-          }),
-          false,
-        );
+    }
     assert.equal(
-      allowed("ec2:CreateTags", [arn(type, "test", "999999999999")], standaloneTagContext),
+      allowed("ec2:CreateTags", resource, { ...context, "ec2:CreateAction": "Unknown" }),
       false,
     );
-    assert.equal(allowed("ec2:DeleteTags", resources, standaloneTagContext), false);
-    for (const existing of [undefined, "other", "first-walk-data"])
-      for (const requested of [undefined, "other", "first-walk-data"])
-        assert.equal(
-          allowed("ec2:CreateTags", resources, {
-            ...standaloneTagContext,
-            "aws:ResourceTag/crabbox_qualification_op": existing,
-            "aws:RequestTag/crabbox_qualification_op": requested,
-          }),
-          (existing === "first-walk-data") === (requested === "first-walk-data"),
-          `marker ${existing} -> ${requested}`,
-        );
   });
 
-test("standalone CreateTags keeps creation contexts, session deadlines and cleanup distinct", () => {
-  const resources = [arn("key-pair")];
-  assert.equal(
-    allowed("ec2:CreateTags", resources, {
-      ...standaloneTagContext,
-      "ec2:CreateAction": "UnknownAction",
-    }),
-    false,
-  );
-  for (const at of [scope.startsAt, "2030-01-01T02:09:59.999Z"])
-    assert.equal(
-      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
-      true,
-    );
+test("dependent creation tagging retains forward cutoff while cleanup remains independent", () => {
+  const resource = [arn("key-pair")];
+  const creation = { ...context, "ec2:CreateAction": "ImportKeyPair" };
+  assert.equal(allowed("ec2:CreateTags", resource, creation), true);
   for (const at of [scope.workExpiresAt, scope.expiresAt]) {
     assert.equal(
-      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
+      allowed("ec2:CreateTags", resource, { ...creation, "aws:CurrentTime": at }),
       false,
     );
-    // Cleanup retains its own action-specific EC2 resource-tag conditions.
     assert.equal(
-      allowed("ec2:DeleteKeyPair", resources, { ...context, "aws:CurrentTime": at }),
+      allowed("ec2:DeleteKeyPair", resource, { ...context, "aws:CurrentTime": at }),
       true,
     );
   }
-  for (const at of ["2029-12-31T23:59:59.999Z", scope.recoveryExpiresAt])
-    assert.equal(
-      allowed("ec2:CreateTags", resources, { ...standaloneTagContext, "aws:CurrentTime": at }),
-      false,
-    );
   assert.equal(
-    allowed("ec2:CreateTags", resources, {
-      ...standaloneTagContext,
-      "aws:RequestedRegion": "eu-west-1",
+    allowed("ec2:DeleteKeyPair", resource, {
+      ...context,
+      "aws:CurrentTime": scope.recoveryExpiresAt,
     }),
     false,
   );
@@ -624,6 +585,87 @@ test("key-only handoff profile cannot be dropped or substituted by another mode"
       scope.manifestSha256,
     ),
   );
-  for (const profile of [null, "", "key-tag-authorization-aws-session/v2"])
+  for (const profile of [
+    null,
+    "",
+    "key-tag-authorization-aws-session/v1",
+    "key-tag-authorization-aws-session/v3",
+  ])
     assert.throws(() => validateRunSession({ ...keyScope, profile }));
+});
+
+for (const [action, type, account, extra] of [
+  ["ImportKeyPair", "key-pair", config.accountId, {}],
+  [
+    "RunInstances",
+    "instance",
+    config.accountId,
+    {
+      "ec2:Subnet": arn("subnet", config.subnetId),
+      "ec2:AssociatePublicIpAddress": "true",
+      "ec2:InstanceType": "t3.small",
+      "ec2:MetadataHttpTokens": "required",
+    },
+  ],
+  [
+    "RunInstances",
+    "volume",
+    config.accountId,
+    { "ec2:Encrypted": "true", "ec2:VolumeSize": 20, "ec2:VolumeType": "gp3" },
+  ],
+  ["CreateImage", "image", "", {}],
+  ["CreateImage", "snapshot", "", {}],
+  [
+    "CreateVolume",
+    "volume",
+    config.accountId,
+    {
+      "ec2:AvailabilityZone": config.availabilityZone,
+      "ec2:Encrypted": "true",
+      "ec2:VolumeSize": 20,
+      "ec2:VolumeType": "gp3",
+      "ec2:VolumeIops": 3000,
+      "ec2:VolumeThroughput": 125,
+      "ec2:ParentSnapshot": "snap-owned",
+      "aws:RequestTag/crabbox_qualification_op": "first-walk-data",
+    },
+  ],
+])
+  test(`${action}/${type} requires every matching ownership field at creation and dependent authorization`, () => {
+    const resource = [arn(type, "test", account)],
+      creation = { ...context, ...extra };
+    assert.equal(allowed(`ec2:${action}`, resource, creation), true);
+    const dependent = { ...creation, "ec2:CreateAction": action };
+    assert.equal(allowed("ec2:CreateTags", resource, dependent), true);
+    for (const key of sessionTagKeys)
+      for (const value of [undefined, "foreign"]) {
+        assert.equal(
+          allowed(`ec2:${action}`, resource, { ...creation, [`aws:RequestTag/${key}`]: value }),
+          false,
+        );
+        assert.equal(
+          allowed("ec2:CreateTags", resource, { ...dependent, [`aws:RequestTag/${key}`]: value }),
+          false,
+        );
+        assert.equal(
+          allowed(`ec2:${action}`, resource, { ...creation, [`aws:PrincipalTag/${key}`]: value }),
+          false,
+        );
+      }
+  });
+
+test("legacy scope profiles are cleanup-only and cannot issue fresh forward sessions", () => {
+  for (const profile of ["first-walk-aws-session/v1", "key-tag-authorization-aws-session/v1"]) {
+    const legacy = { ...scope, profile };
+    assert.throws(() => validateRunSession(legacy));
+    assert.throws(() => runSessionPolicy(legacy));
+    assert.deepEqual(runSessionTags(legacy, { cleanupOnly: true }), runSessionTags(scope));
+    const policy = cleanupSessionPolicy(legacy);
+    assert(
+      policy.Statement.some(
+        (s) => s.Effect === "Deny" && JSON.stringify(s.Action) === JSON.stringify(forwardActions),
+      ),
+    );
+    assert(JSON.stringify(policy).length <= 2048);
+  }
 });

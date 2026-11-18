@@ -24,7 +24,11 @@ import {
   assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
-import { handoffSession, privateQualificationMode } from "./image-qualification-run-session.mjs";
+import {
+  handoffSession,
+  privateQualificationMode,
+  qualificationTaggingContract,
+} from "./image-qualification-run-session.mjs";
 import {
   ControllerHTTPError,
   requestControllerJSON,
@@ -1173,7 +1177,9 @@ function qualificationConfig() {
         ? 1
         : 3,
     fastSnapshotRestore: false,
-    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? { firstWalk: true, taggingContract: qualificationTaggingContract }
+      : {}),
     ...(process.env.QUALIFICATION_MODE === "key-authorization"
       ? { keyAuthorizationOnly: true }
       : {}),
@@ -1497,6 +1503,7 @@ function executionManifest(identity) {
     expiresAt: identity.expiresAt,
     ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
     ...(identity.firstWalk ? { firstWalk: true } : {}),
+    ...(identity.taggingContract ? { taggingContract: identity.taggingContract } : {}),
     ...(identity.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
 }
@@ -1527,7 +1534,9 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
     ...(retainedImage ? { retainedImage } : {}),
-    ...(privateQualificationMode(process.env.QUALIFICATION_MODE) ? { firstWalk: true } : {}),
+    ...(privateQualificationMode(process.env.QUALIFICATION_MODE)
+      ? { firstWalk: true, taggingContract: qualificationTaggingContract }
+      : {}),
     ...(process.env.QUALIFICATION_MODE === "key-authorization"
       ? { keyAuthorizationOnly: true }
       : {}),
@@ -1546,6 +1555,7 @@ export function verifyAttestationIdentity(attestation, expected, { finalized } =
     "policyHash",
     "enrolledAt",
     "expiresAt",
+    "taggingContract",
   ];
   if (fields.some((field) => attestation?.[field] !== expected[field])) {
     throw new Error("authority attestation identity does not match protected expectations");
@@ -1635,6 +1645,7 @@ async function verifyExecutionDeployment(cf, expected) {
     transportProps?.candidateWorker !== expected.candidateWorker ||
     transportProps?.deploymentHash !== expected.deploymentHash ||
     transportProps?.expiresAt !== expected.expiresAt ||
+    transportProps?.taggingContract !== expected.taggingContract ||
     Boolean(transportProps?.firstWalk) !== Boolean(expected.firstWalk) ||
     Boolean(transportProps?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     canonical(transportProps?.retainedImage ?? null) !==
@@ -2150,7 +2161,7 @@ async function deploy() {
     candidateWorker,
     expiresAt,
     ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
-    ...(config.firstWalk ? { firstWalk: true } : {}),
+    ...(config.firstWalk ? { firstWalk: true, taggingContract: qualificationTaggingContract } : {}),
     ...(config.keyAuthorizationOnly ? { keyAuthorizationOnly: true } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
@@ -2500,6 +2511,7 @@ async function arm() {
     discovered.run?.candidateWorker !== expected.candidateWorker ||
     discovered.run?.deploymentHash !== expected.deploymentHash ||
     discovered.run?.expiresAt !== expected.expiresAt ||
+    discovered.run?.taggingContract !== expected.taggingContract ||
     Boolean(discovered.run?.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly) ||
     discovered.run?.cleanupState !== "claimed"
   ) {
@@ -2538,7 +2550,8 @@ async function arm() {
     if (result?.passed !== true || result?.checks !== 13 || Object.keys(result).length !== 2)
       throw new Error("key-only authorization proof is incomplete; finalize original owner");
     writeJSON(path.join(proofDir, "key-authorization.json"), {
-      version: 1,
+      version: 2,
+      taggingContract: qualificationTaggingContract,
       passed: true,
       checks: 13,
     });
@@ -3215,6 +3228,7 @@ async function cleanupRun({
         run.candidateWorker !== expected.candidateWorker ||
         run.deploymentHash !== expected.deploymentHash ||
         run.expiresAt !== expected.expiresAt ||
+        run.taggingContract !== expected.taggingContract ||
         Boolean(run.keyAuthorizationOnly) !== Boolean(expected.keyAuthorizationOnly)
       ) {
         throw new Error("authority registry identity does not match protected expectations");
@@ -3429,7 +3443,7 @@ export function verifyQualificationEvidence(
     const checks = attestation?.authorizationChecks;
     const counts = attestation?.finalReceipt?.finalCounts;
     const expectedProbes = [
-      "tags-restated",
+      "tags-immutable",
       ...Array.from({ length: 4 }, (_, i) => [
         `tag-missing-${i}`,
         `tag-changed-${i}`,
@@ -3440,6 +3454,7 @@ export function verifyQualificationEvidence(
       !counts ||
       Object.keys(counts).sort().join(",") !== "images,instances,keyPairs,snapshots,volumes" ||
       attestation?.keyAuthorizationOnly !== true ||
+      attestation.taggingContract !== qualificationTaggingContract ||
       !attestation.finalized ||
       !Array.isArray(checks) ||
       checks.length !== 13 ||
@@ -3448,7 +3463,7 @@ export function verifyQualificationEvidence(
           c.probe !== expectedProbes[i] ||
           c.outcome !== "passed" ||
           c.action !== (i > 0 && i % 3 === 0 ? "DeleteTags" : "CreateTags") ||
-          c.code !== (i === 0 ? "DryRunOperation" : "UnauthorizedOperation"),
+          c.code !== "UnauthorizedOperation",
       ) ||
       attestation?.operations?.length !== 1 ||
       attestation.operations[0].action !== "ImportKeyPair" ||
@@ -3470,6 +3485,7 @@ export function verifyQualificationEvidence(
           op.signerDispatches?.some((dispatch) => dispatch.outcome === "accepted"),
       );
     if (
+      attestation?.taggingContract !== qualificationTaggingContract ||
       !attestation?.finalized ||
       !receipt?.completedAt ||
       receipt.failureCodes?.length !== 0 ||

@@ -393,7 +393,7 @@ function cleanupFixture(t, options) {
   const aws = path.join(dir, "aws");
   fs.writeFileSync(aws, "fake-aws", { mode: 0o600 });
   const scope = {
-    profile: "first-walk-aws-session/v1",
+    profile: "first-walk-aws-session/v2",
     repository: "example/repo",
     workflowSha: "1".repeat(40),
     candidateSha: f.plan.binding.candidateSha,
@@ -406,6 +406,7 @@ function cleanupFixture(t, options) {
     expiresAt: at(150),
     recoveryExpiresAt: at(270),
   };
+  f.plan.binding.taggingContract = "creation-only/v1";
   f.plan.cleanupSession = {
     profile: "same-owner-cleanup-session/v1",
     directory: dir,
@@ -626,6 +627,23 @@ test("cleanup scope binds every protected handoff field", (t) => {
     "expiresAt",
   ])
     assert.throws(() => validateCleanupSession(f.plan, { ...handoff, [key]: "foreign" }));
+});
+
+test("cleanup session profiles cannot change the original tagging contract", (t) => {
+  for (const mode of ["first-walk", "key-tag-authorization"]) {
+    const f = cleanupFixture(t);
+    if (mode === "key-tag-authorization") f.plan.binding.keyAuthorizationOnly = true;
+    f.plan.cleanupSession.scope.profile = `${mode}-aws-session/v2`;
+    assert.ok(validateCleanupSession(f.plan));
+    delete f.plan.binding.taggingContract;
+    assert.throws(() => validateCleanupSession(f.plan));
+    f.plan.cleanupSession.scope.profile = `${mode}-aws-session/v1`;
+    assert.ok(validateCleanupSession(f.plan));
+    f.plan.binding.taggingContract = "creation-only/v1";
+    assert.throws(() => validateCleanupSession(f.plan));
+    f.plan.binding.taggingContract = "unknown/v1";
+    assert.throws(() => validateCleanupSession(f.plan));
+  }
 });
 
 for (const drift of ["custody", "settings", "module", "caller", "marker"])
