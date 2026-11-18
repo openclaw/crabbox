@@ -986,11 +986,16 @@ export class Cloudflare {
       const probe = await import("./image-qualification-binding-probe.mjs");
       return await probe.probeContentIdentity(response, contentIdentityBytes);
     }
-    const text = boundedBytes
-      ? await (
-          await import("./image-qualification-binding-probe.mjs")
-        ).readProbeResponse(response, boundedBytes)
-      : await response.text();
+    // Ordinary Worker deletion can acknowledge with an empty HTTP204. It
+    // still requires the subsequent exact absence checks, never an invented body.
+    const text =
+      init.method === "DELETE" && response.status === 204 && response.body === null
+        ? ""
+        : boundedBytes
+          ? await (
+              await import("./image-qualification-binding-probe.mjs")
+            ).readProbeResponse(response, boundedBytes)
+          : await response.text();
     let parsed;
     try {
       parsed = text ? JSON.parse(text) : {};

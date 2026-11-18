@@ -169,8 +169,9 @@ function installAPI(file) {
       return api(isolation.record.authority.namespaces);
     if (route === "/workers/scripts") {
       scriptLists += 1;
-      if (options.idleCleanupFailure && scriptLists > 1) return api(null, 503);
+      if (options.idleCleanupFailure && scriptLists > 2) return api(null, 503);
       return api([
+        ...(state.controller ? [{ id: controller }] : []),
         ...(state.staleCandidate ? [{ id: staleCandidate }] : []),
         ...(state.candidate ? [{ id: candidate }] : []),
       ]);
@@ -252,6 +253,7 @@ function installAPI(file) {
       );
     if (route === `/workers/scripts/${controller}/deployments`) {
       if (options.versionStatus) return api(null, options.versionStatus);
+      if (!state.controller) return missing();
       return api({
         deployments: [{ versions: [{ version_id: state.controller.version, percentage: 100 }] }],
       });
@@ -280,7 +282,7 @@ function installAPI(file) {
           throw new Error("upload response lost");
         }
         if (options.uploadFailure === "after") throw new Error("upload response lost");
-        return api({ id: controller });
+        return api({ id: controller, deployment_id: version });
       }
       assert.equal(method, "DELETE");
       if (options.controllerReferenced && url.searchParams.get("force") !== "true")

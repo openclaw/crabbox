@@ -197,6 +197,25 @@ test("HTTP: acknowledged upload, exact readback, discovery and verified deletion
   assert.equal(f.state.puts, 1);
 });
 
+test("HTTP: empty204 deletion acknowledgement requires exact subsequent absence", async (t) => {
+  const f = await fixture(t, {
+    reply: async ({ req, res, state }) => {
+      if (req.method === "DELETE") {
+        state.present = false;
+        res.writeHead(204);
+        res.end();
+        return true;
+      }
+    },
+  });
+  await f.invoke();
+  assert.equal(f.state.deletes, 1);
+  const r = f.receipt();
+  assert(r.events.some((e) => e.method === "DELETE" && e.response.status === 204));
+  assert.equal(r.settlement, "deleted-and-absent");
+  assert.equal(r.outcome, "verified");
+});
+
 test("HTTP: real five-second observation after deployment404, no duplicate upload", async (t) => {
   let missing = true;
   const f = await fixture(t, {
