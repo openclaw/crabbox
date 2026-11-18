@@ -898,7 +898,12 @@ for (const kind of [
     assert.equal(r.discovery, "probe-observed");
     const last = r.events.at(-1);
     assert.equal(last.category, "worker-inventory");
-    assert.equal(last.failure.endpoint, "worker-inventory");
+    const failure = kind === "incomplete" ? r.cleanupFailure : last.failure;
+    assert.equal(failure.endpoint, "worker-inventory");
+    if (kind === "incomplete") {
+      assert.equal(last.outcome, "acknowledged");
+      assert.equal(failure.reason, "invalid-inventory");
+    }
     assert(!JSON.stringify(r).includes(marker));
     if (kind === "overflow")
       assert.deepEqual(last.failure, {

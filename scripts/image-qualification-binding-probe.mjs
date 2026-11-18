@@ -70,6 +70,7 @@ export function recordManagementFailure(error, route, reason, response, maximum)
       "request-failed",
       "cancelled",
       "invalid-json",
+      "invalid-inventory",
       "http-error",
       "api-error",
       "unconfirmed-existence",

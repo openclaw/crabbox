@@ -1080,7 +1080,12 @@ export class Cloudflare {
   async list(pathname) {
     if (pathname === "/workers/scripts") {
       const scripts = await this.request(pathname);
-      if (!Array.isArray(scripts)) throw new Error("Cloudflare script inventory was not an array");
+      if (!Array.isArray(scripts))
+        throw recordManagementFailure(
+          new Error("Cloudflare script inventory was not an array"),
+          pathname,
+          "invalid-inventory",
+        );
       return scripts;
     }
     const items = [];
@@ -3018,6 +3023,7 @@ export async function discoverWithOwnedController(
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
         receipt.failedStage = receipt.stage;
+        receipt.failure = managementFailure(error) ?? { reason: "verification-failed" };
       } finally {
         if (uploadAttempted && !retainForFinalization) {
           cleaning = true;
@@ -3061,6 +3067,7 @@ export async function discoverWithOwnedController(
                 : "absent-without-upload-acknowledgement";
           } catch (error) {
             receipt.settlement = "unresolved";
+            receipt.cleanupFailure = managementFailure(error) ?? { reason: "verification-failed" };
             const message = error instanceof Error ? error.message : String(error);
             failure = failure
               ? `${failure}; probe cleanup: ${message}`
