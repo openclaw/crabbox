@@ -323,7 +323,7 @@ function fixture(options = {}) {
   return {
     plan,
     workers,
-    remoteState: () => ({ active, finalized, workers }),
+    remoteState: () => ({ active, finalized, workers, taggingContract: binding.taggingContract }),
     events,
     saved,
     fetch,
