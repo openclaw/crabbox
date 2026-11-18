@@ -523,6 +523,54 @@ for (const phase of ["upload", "content"]) {
   });
 }
 
+test("HTTP: observation deadline aborts a stalled management body and preserves cleanup", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let stalled = false;
+  const f = await fixture(t, {
+    reply: async ({ req, res, route, state }) => {
+      // Advance the wall clock without advancing the already armed outer timer.
+      // The observation must independently abort the body within its remainder.
+      if (req.method === "PUT") now += 119_000;
+      if (!stalled && state.present && route.endsWith(`/${controllerName}/deployments`)) {
+        stalled = true;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write("{");
+        return true;
+      }
+    },
+  });
+  const start = performance.now();
+  await assert.rejects(f.invoke());
+  assert(performance.now() - start < 30_000);
+  assert(stalled);
+  assert.equal(f.state.rpc, 0);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.receipt().settlement, "deleted-and-absent");
+  assert.equal(f.receipt().outcome, "failed");
+});
+
+test("HTTP: late successful management read cannot pass the observation deadline", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let advanced = false;
+  const f = await fixture(t, {
+    reply: async ({ route, state }) => {
+      if (!advanced && state.present && route.endsWith(`/${controllerName}/content/v2`)) {
+        advanced = true;
+        now += 60_001;
+      }
+    },
+  });
+  await assert.rejects(f.invoke(), /observation exhausted/);
+  assert(advanced);
+  assert.equal(f.state.rpc, 0);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.receipt().settlement, "deleted-and-absent");
+});
+
 test("HTTP: original deadline exhaustion cannot reset the cleanup clock", async (t) => {
   let now = Date.now();
   t.mock.method(Date, "now", () => now);

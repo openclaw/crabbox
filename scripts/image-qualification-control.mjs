@@ -2704,43 +2704,54 @@ function safeControllerResponse(response) {
 // existing relay readback contract. Missing acknowledgement never permits replay.
 async function observeControllerManagement(cf, metadata, expectedVersion, pause) {
   const until = Math.min(Date.now() + 60_000, cf.controllerObservationDeadline);
-  for (let attempt = 0; attempt < 12; attempt++) {
-    if (Date.now() >= until || cf.discoverySignal.aborted)
-      throw new Error("controller management observation cancelled or exhausted");
-    await verifyAuthority(cf);
-    // Validate visible settings even while the deployment view is unavailable.
-    const settings = await cf.request(
-      `/workers/scripts/${controllerName}/settings`,
-      {},
-      { allow404: true },
-    );
-    if (settings !== undefined) {
-      assertOwnedSettings(cf, controllerName, settings);
-      if (
-        canonical(publicBindingShape(settings.bindings ?? [])) !==
-          canonical(publicBindingShape(metadata.bindings)) ||
-        canonical([...(settings.tags ?? [])].sort()) !== canonical([...metadata.tags].sort())
-      )
-        throw new Error("controller upload settings drifted");
-      await ownedNamespaces(cf, controllerName, settings.bindings);
-    }
-    // ONLY this owned first-upload deployment view's HTTP404 is observable again.
-    // Malformed/empty/split/foreign deployments, denial and other endpoints fail.
-    try {
-      const version = await discoveryControllerVersion(cf, metadata, expectedVersion);
+  const originalSignal = cf.discoverySignal;
+  const observation = new AbortController();
+  const timer = setTimeout(() => observation.abort(), Math.max(1, until - Date.now()));
+  cf.discoverySignal = AbortSignal.any([originalSignal, observation.signal]);
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (Date.now() >= until || cf.discoverySignal.aborted)
+        throw new Error("controller management observation cancelled or exhausted");
       await verifyAuthority(cf);
-      return version;
-    } catch (error) {
-      if (
-        error.status !== 404 ||
-        error.pathname !== `/workers/scripts/${controllerName}/deployments`
-      )
-        throw error;
-      if (attempt === 11) throw error;
-      await pause(Math.min(5_000, Math.max(1, until - Date.now())), undefined, {
-        signal: cf.discoverySignal,
-      });
+      // Validate visible settings even while the deployment view is unavailable.
+      const settings = await cf.request(
+        `/workers/scripts/${controllerName}/settings`,
+        {},
+        { allow404: true },
+      );
+      if (settings !== undefined) {
+        assertOwnedSettings(cf, controllerName, settings);
+        if (
+          canonical(publicBindingShape(settings.bindings ?? [])) !==
+            canonical(publicBindingShape(metadata.bindings)) ||
+          canonical([...(settings.tags ?? [])].sort()) !== canonical([...metadata.tags].sort())
+        )
+          throw new Error("controller upload settings drifted");
+        await ownedNamespaces(cf, controllerName, settings.bindings);
+      }
+      // ONLY this owned first-upload deployment view's HTTP404 is observable again.
+      // Malformed/empty/split/foreign deployments, denial and other endpoints fail.
+      try {
+        const version = await discoveryControllerVersion(cf, metadata, expectedVersion);
+        await verifyAuthority(cf);
+        cf.discoverySignal.throwIfAborted();
+        if (Date.now() >= until) throw new Error("controller management observation exhausted");
+        return version;
+      } catch (error) {
+        if (
+          error.status !== 404 ||
+          error.pathname !== `/workers/scripts/${controllerName}/deployments`
+        )
+          throw error;
+        if (attempt === 11) throw error;
+        await pause(Math.min(5_000, Math.max(1, until - Date.now())), undefined, {
+          signal: cf.discoverySignal,
+        });
+      }
     }
+  } finally {
+    clearTimeout(timer);
+    cf.discoverySignal = originalSignal;
   }
 }
 
