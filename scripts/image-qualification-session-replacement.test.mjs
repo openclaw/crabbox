@@ -26,6 +26,7 @@ import {
   claimSessionIssuance,
   sessionChild,
   replacementRecoverySources,
+  withResealDiagnosticFile,
 } from "./image-qualification-session-replacement.mjs";
 
 const newVersion = "33333333-3333-4333-8333-333333333333";
@@ -1314,4 +1315,248 @@ test("CLI gives secret-safe future-start guidance before any issuance or cloud r
   const state = readPrivateJSON(path.join(f.dir, "session-replacement-state.json"));
   assert.equal(state.phase, "prepared");
   assert.equal(state.sequence, 0);
+});
+
+const diagnosticMarker = "synthetic-private-reseal-value";
+async function diagnosticReseal(f) {
+  return withResealDiagnosticFile(f.plan, f.dir, (diagnostic) =>
+    replaceIdleSession(f.plan, f.state, { ...f.context, mode: "reseal", diagnostic }),
+  );
+}
+function diagnosticRecords(f) {
+  const files = fs.readdirSync(f.dir).filter((n) => /^session-reseal-[a-f0-9]{32}\.jsonl$/.test(n));
+  assert.equal(files.length, 1);
+  const file = path.join(f.dir, files[0]);
+  const bytes = fs.readFileSync(file, "utf8");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.ok(Buffer.byteLength(bytes) <= 128 * 1024);
+  for (const marker of [
+    diagnosticMarker,
+    "fake-cf-token",
+    "fake-new-secret",
+    "fake-new-token",
+    "fake-bootstrap-secret",
+  ])
+    assert.ok(!bytes.includes(marker));
+  const records = bytes
+    .trim()
+    .split("\n")
+    .map((v) => JSON.parse(v));
+  assert.equal(records[0].planSha256, digest(canonical(f.plan)));
+  assert.equal(records[0].attemptId, f.plan.attemptId);
+  return records;
+}
+function noResealReplay(f, originalPlan, intent) {
+  assert.equal(canonical(f.plan), originalPlan);
+  assert.equal(fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8"), intent);
+  assert.equal(f.model.calls.filter((c) => c.method === "PATCH").length, 1);
+  assert.equal(f.model.commands.filter((c) => c.argv.includes("assume-role")).length, 1);
+}
+
+for (const outcome of ["404", "503", "malformed", "lost", "dns"]) {
+  test(`reseal real HTTP client ${outcome} retains safe stage/status without replay`, async (t) => {
+    const f = fixture(t);
+    await f.run("deliver");
+    await f.run("inspect");
+    f.preparePost();
+    const originalPlan = canonical(f.plan);
+    const intent = fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8");
+    const original = f.context.cf.request.bind(f.context.cf);
+    let requests = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      requests++;
+      if (outcome === "lost" || outcome === "dns")
+        throw Object.assign(new Error(diagnosticMarker), {
+          cause: { code: outcome === "dns" ? "ENOTFOUND" : diagnosticMarker },
+        });
+      return new Response(
+        outcome === "malformed"
+          ? diagnosticMarker
+          : JSON.stringify({ success: false, errors: [diagnosticMarker] }),
+        {
+          status: outcome === "malformed" ? 200 : Number(outcome),
+          headers: { "cf-ray": diagnosticMarker, "x-private": diagnosticMarker },
+        },
+      );
+    });
+    f.context.cf.request = (route, init, options) =>
+      route === "/tokens/verify"
+        ? Cloudflare.prototype.request.call(f.context.cf, route, init, options)
+        : original(route, init, options);
+    await assert.rejects(diagnosticReseal(f));
+    const records = diagnosticRecords(f);
+    assert.equal(records.at(-1).stage, "token-verification");
+    assert.equal(records.at(-1).outcome, "failed");
+    const read = records.findLast((v) => v.kind === "management-read");
+    if (["404", "503"].includes(outcome)) assert.equal(read.status, Number(outcome));
+    if (["lost", "dns"].includes(outcome)) assert.equal(read.status, null);
+    assert.equal(
+      read.code,
+      outcome === "dns" ? "ENOTFOUND" : outcome === "malformed" ? undefined : null,
+    );
+    assert.equal(requests, 1);
+    assert.equal(f.state.phase, "reseal-candidate");
+    noResealReplay(f, originalPlan, intent);
+  });
+}
+
+for (const [label, stage, mutate] of [
+  ["invalid tools", "preflight", (f) => fs.appendFileSync(f.plan.tools.aws.path, "changed")],
+  [
+    "version drift",
+    "authority-version",
+    (f) => {
+      f.model.version = version;
+    },
+  ],
+  [
+    "module drift",
+    "authority-fence",
+    (f) => {
+      f.model.module = {};
+    },
+  ],
+  [
+    "missing proof",
+    "post-idle-proof",
+    (f) => {
+      f.context.readProof = () => {
+        throw new Error(diagnosticMarker);
+      };
+    },
+  ],
+  [
+    "malformed proof",
+    "post-idle-proof",
+    (f) => {
+      f.context.readProof = () => ({});
+    },
+  ],
+  [
+    "missing custody",
+    "post-custody",
+    (f) => {
+      f.context.readCustody = () => undefined;
+    },
+  ],
+  [
+    "no recovery advance",
+    "recovery-advancement",
+    (f) => {
+      f.context.command = async () => "";
+    },
+  ],
+  [
+    "final settings drift",
+    "final-authority-fence",
+    (f) => {
+      f.model.command = async () => {
+        f.settings.logpush = true;
+      };
+    },
+  ],
+]) {
+  test(`reseal diagnostic distinguishes ${label} and preserves admission refusal`, async (t) => {
+    const f = fixture(t);
+    await f.run("deliver");
+    await f.run("inspect");
+    f.preparePost();
+    const before = canonical(f.plan),
+      intent = fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8");
+    mutate(f);
+    await assert.rejects(diagnosticReseal(f));
+    const records = diagnosticRecords(f);
+    assert.equal(records.at(-1).stage, stage);
+    assert.equal(records.at(-1).outcome, "failed");
+    assert.notEqual(f.state.phase, "resealed");
+    if (stage === "preflight")
+      assert.equal(records.filter((v) => v.kind === "management-read").length, 0);
+    noResealReplay(f, before, intent);
+  });
+}
+
+for (const mode of ["exit", "timeout", "cancelled"]) {
+  test(`real recovery child ${mode} emits only typed outcome after process settlement`, async (t) => {
+    const f = fixture(t);
+    await f.run("deliver");
+    await f.run("inspect");
+    f.preparePost();
+    const stop = new AbortController();
+    f.context.signal = stop.signal;
+    f.context.command = async () => {
+      const promise = sessionChild(
+        [
+          process.execPath,
+          "-e",
+          mode === "exit"
+            ? `process.stderr.write(${JSON.stringify(diagnosticMarker)});process.exit(7)`
+            : "setInterval(()=>{},1000)",
+        ],
+        {},
+        "",
+        { signal: stop.signal, timeout: mode === "timeout" ? 100 : 5000 },
+      );
+      if (mode === "cancelled") setTimeout(() => stop.abort(), 100);
+      return promise;
+    };
+    await assert.rejects(diagnosticReseal(f));
+    const last = diagnosticRecords(f).at(-1);
+    assert.equal(last.stage, "recovery-child");
+    assert.equal(last.child.reason, mode);
+    assert.equal(last.child.settled, true);
+    if (mode === "exit") assert.equal(last.child.exitCode, 7);
+    assert.notEqual(f.state.phase, "resealed");
+    assert.equal(f.model.calls.filter((v) => v.method === "PATCH").length, 1);
+  });
+}
+
+test("successful reseal records independent recovery and final checks without changing identity or admission", async (t) => {
+  const f = fixture(t);
+  await f.run("deliver");
+  await f.run("inspect");
+  f.preparePost();
+  const before = canonical(f.plan),
+    intent = fs.readFileSync(path.join(f.dir, "session-issuance-intent.json"), "utf8");
+  await diagnosticReseal(f);
+  const records = diagnosticRecords(f);
+  assert.equal(records.at(-1).resealed, true);
+  for (const stage of [
+    "post-idle-proof",
+    "post-custody",
+    "recovery-child",
+    "recovered-proof",
+    "recovery-advancement",
+    "final-authority-fence",
+    "final-token-verification",
+    "persist-reseal",
+  ])
+    assert.ok(records.some((v) => v.stage === stage));
+  assert.equal(f.state.enrollmentAdmitted, false);
+  noResealReplay(f, before, intent);
+});
+
+test("diagnostic sink failure stops before effects and private recorder rejects unsafe custody/bounds", async (t) => {
+  const f = fixture(t);
+  const before = canonical(f.state);
+  await assert.rejects(
+    replaceIdleSession(f.plan, f.state, {
+      ...f.context,
+      mode: "reseal",
+      diagnostic: () => {
+        throw new Error(diagnosticMarker);
+      },
+    }),
+  );
+  assert.equal(f.model.calls.length, 0);
+  assert.equal(f.model.commands.length, 0);
+  assert.equal(canonical(f.state), before);
+  const link = path.join(f.dir, "link");
+  fs.symlinkSync(f.dir, link);
+  await assert.rejects(withResealDiagnosticFile(f.plan, link, () => assert.fail("must refuse")));
+  await assert.rejects(
+    withResealDiagnosticFile(f.plan, f.dir, (write) => write({ padding: "x".repeat(128 * 1024) })),
+  );
+  const files = fs.readdirSync(f.dir).filter((n) => n.endsWith(".jsonl"));
+  assert.equal(files.length, 1);
+  assert.ok(fs.statSync(path.join(f.dir, files[0])).size < 1024);
 });
