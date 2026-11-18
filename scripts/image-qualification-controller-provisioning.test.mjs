@@ -782,7 +782,7 @@ for (const kind of ["JSON404", "network", "cancel", "deadline"]) {
         ["/discover", "/transport-open", "/transport-settle"].includes(r.route),
       ),
     );
-    await assert.rejects(f.invoke(), /receipt exists/);
+    await assert.rejects(f.invoke({ v2: true, idleOnly: false }), /receipt exists/);
     assert.equal(f.state.puts, 1);
     assert.equal(f.state.deletes, 1);
   });
