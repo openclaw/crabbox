@@ -272,7 +272,9 @@ jobs:
     name: Prepare pinned installation bindings and arm
     needs: [authorize, build-candidate, admit]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Initial installation has distinct 15-minute operation and recovery phases,
+    # plus time to upload their evidence. Experiment preparation stays bounded.
+    timeout-minutes: ${{ inputs.operation == 'install' && 35 || 15 }}
     environment: image-qualification
     outputs:
       installation_id: ${{ steps.deploy.outputs.installation_id }}

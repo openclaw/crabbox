@@ -1493,6 +1493,8 @@ fi
 
 test("installation is separate from experiments and recovery never requires executor credentials", () => {
   const deploy = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  assert.match(deploy, /timeout-minutes: \$\{\{ inputs.operation == 'install' && 35 \|\| 15 \}\}/);
+  assert.match(deploy, /node scripts\/image-qualification-control.mjs install-recover/);
   assert.match(deploy, /Download immutable preparation\n        if: inputs.operation != 'install'/);
   assert.match(deploy, /node scripts\/image-qualification-control.mjs install/);
   assert.match(deploy, /node scripts\/image-qualification-control.mjs deploy-and-arm/);

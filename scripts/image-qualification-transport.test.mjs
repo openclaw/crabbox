@@ -5,6 +5,7 @@ import {
   settleCandidateTransport,
   transportMarkers,
   transportBindingShape,
+  assertSettledTransportDiscovery,
 } from "./image-qualification-transport.mjs";
 import {
   assertOwnedSettings,
@@ -81,6 +82,29 @@ function fixture(options = {}) {
     options,
   };
 }
+test("historical terminal discovery validates custody without replay or a live expiry", () => {
+  const f = fixture();
+  f.request.expiresAt = new Date(Date.now() - 60_000).toISOString();
+  const receipt = { protocol: 1, ...f.request, state: "cancelled" };
+  assert.doesNotThrow(() => assertSettledTransportDiscovery({ probe: null }));
+  assert.doesNotThrow(() => assertSettledTransportDiscovery({ probe: receipt }));
+  for (const change of [
+    (v) => (v.probe.state = "pending"),
+    (v) => (v.probe.state = "observed"),
+    (v) => (v.probe.protocol = 2),
+    (v) => delete v.probe.challenge,
+    (v) => (v.probe.identity = {}),
+    (v) => (v.probe.candidateVersion = "foreign"),
+    (v) => (v.probe.state = "verified"), // Missing observation timestamp.
+    (v) => (v.probe.observedAt = v.probe.expiresAt),
+    (v) => (v.extra = true),
+    (v) => (v.probe.extra = true),
+  ]) {
+    const value = { probe: structuredClone(receipt) };
+    change(value);
+    assert.throws(() => assertSettledTransportDiscovery(value));
+  }
+});
 test("only canonical observation admits proof; candidate HTTP identity is ignored", async () => {
   const f = fixture();
   const result = await proveCandidateTransport(f.args);

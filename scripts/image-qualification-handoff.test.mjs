@@ -1840,6 +1840,46 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.equal(Object.keys(f.state().workers).length, 3);
     assert.ok(!f.state().events.some((e) => /^(PUT|POST|DELETE) api.cloudflare/.test(e)));
   });
+  for (const state of ["verified", "cancelled", "pending", "observed", "malformed"]) {
+    test(`HTTP installation recovery classifies historical ${state} probe without writes`, (t) => {
+      const f = reusable(t);
+      const expired = new Date(f.state().now - 60_000).toISOString();
+      const probe = {
+        protocol: 1,
+        state: state === "malformed" ? "verified" : state,
+        identity: {
+          runId: "image-qualification-1-1",
+          owner: "historical-owner",
+          candidateSha,
+          candidateWorker: "crabbox-image-qualification-1-1",
+          deploymentHash: "d".repeat(64),
+          expiresAt: expired,
+        },
+        challenge: "e".repeat(64),
+        candidateVersion: workerVersion,
+        authorityVersion: workerVersion,
+        expiresAt: expired,
+        observedAt: new Date(f.state().now - 120_000).toISOString(),
+      };
+      if (state === "malformed") delete probe.challenge;
+      f.update({ probe, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, ["verified", "cancelled"].includes(state) ? 0 : 1, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 3);
+      assert.deepEqual(f.state().probe, probe);
+      assert.ok(
+        !f
+          .state()
+          .events.some(
+            (e) =>
+              /^(PUT|PATCH|DELETE) /.test(e) ||
+              (e.startsWith("POST ") && !/\/(discover|transport-discover)$/.test(e)),
+          ),
+      );
+    });
+  }
   for (const fault of ["foreign", "denied", "missing", "malformed"]) {
     test(`HTTP partial installation ${fault} metadata never authorizes deletion`, (t) => {
       const f = reusable(t, { exposureFault: "lost" });

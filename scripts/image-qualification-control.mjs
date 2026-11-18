@@ -52,6 +52,7 @@ import {
   transportBindingShape,
   proveCandidateTransport,
   settleCandidateTransport,
+  assertSettledTransportDiscovery,
 } from "./image-qualification-transport.mjs";
 
 import {
@@ -2397,8 +2398,9 @@ export async function recoverInstallation(cf, state) {
       required("QUALIFICATION_CONTROLLER_TOKEN"),
       "transport-discover",
     );
-    if (run !== null || probe.probe !== null)
+    if (run !== null)
       throw Error("installation registry or probe unresolved; preserve recovery dependencies");
+    assertSettledTransportDiscovery(probe);
   }
   if (roles.every((role) => present[role])) {
     // Complete installations are never torn down by installation recovery.
