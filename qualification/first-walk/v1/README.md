@@ -154,6 +154,11 @@ Retained installation admission requires `candidate-transport-v2`; empty or unse
 transport remains supported only for disposable legacy operation. Installed
 controllers bind version metadata so authenticated identity readback proves the
 executing physical version after installation and subsequent binding updates.
+Retention supports only the private `first-walk` and `key-authorization` builds,
+whose pinned overlay provides per-run Fleet routing. Ordinary `mint` and
+`retained` builds keep their disposable lifecycle; installation, admission and
+binding updates reject them before effects. Selecting v2 markers alone does not
+make an ordinary Worker compatible with a retained namespace.
 
 Experiments retain these resources. Preparation verifies canonical idle state,
 updates only run bindings on existing names, and verifies the resulting physical

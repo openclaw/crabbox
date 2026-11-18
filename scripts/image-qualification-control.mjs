@@ -2520,8 +2520,7 @@ async function deploy({ client } = {}) {
   const cf = client ?? (await cloudflareFromEnv());
   cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   if (cf.installation) {
-    cf.preparationStopsAt =
-      Date.parse(handoff.workExpiresAt) - (config.firstWalk ? 100 * 60_000 : 0);
+    cf.preparationStopsAt = Date.parse(handoff.workExpiresAt) - 100 * 60_000;
     if (Date.now() >= cf.preparationStopsAt)
       throw Error("installation binding preparation lacks the existing executor reserve");
     installationModulesMatch(cf.installation, artifactDir, manifest, controllerSource, relaySource);
@@ -4083,6 +4082,12 @@ async function protectedOperation(operation, work, { recover = false } = {}) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (
+    ["admit", "install", "deploy", "deploy-and-arm", "arm"].includes(command) &&
+    readInstallation() &&
+    !privateQualificationMode(process.env.QUALIFICATION_MODE)
+  )
+    throw Error("retained installation requires a private first-walk or key-authorization build");
   if (["binding-probe-plan", "binding-probe-run", "binding-probe-recover"].includes(command)) {
     const { bindingProbeCommand } = await import("./image-qualification-binding-probe.mjs");
     return await bindingProbeCommand(command, args, Cloudflare);
