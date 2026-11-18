@@ -11,6 +11,9 @@ import {
   withBindingProbeJournal,
   readProbeResponse,
   probeContentIdentity,
+  managementEndpoint,
+  managementFailure,
+  recordManagementFailure,
 } from "./image-qualification-binding-probe.mjs";
 import caller from "./image-qualification-binding-caller.mjs";
 
@@ -600,3 +603,69 @@ for (const reason of ["denied", "inactive", "expiry"])
     for (const role of ["caller", "receiver"])
       assert.equal(f.cf.state.saved.at(-1).intents[role].settled, false);
   });
+
+test("bounded management failure waits for original body cancellation and retains no private bytes", async () => {
+  let entered, finish;
+  const started = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const settled = new Promise((resolve) => {
+    finish = resolve;
+  });
+  let returned = false,
+    cancelled = 0;
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.alloc(65_537, 120));
+      },
+      cancel() {
+        cancelled++;
+        entered();
+        return settled;
+      },
+    }),
+  );
+  const original = readProbeResponse(response, 65_536).catch((error) => {
+    returned = true;
+    return recordManagementFailure(
+      error,
+      "/workers/scripts/private-name/settings?private=value",
+      "body-read-error",
+      { status: 200, ray: "private-marker" },
+      65_536,
+    );
+  });
+  await started;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(returned, false);
+  assert.equal(cancelled, 1);
+  finish();
+  const error = await original;
+  assert.deepEqual(managementFailure(error), {
+    endpoint: "settings",
+    reason: "body-too-large",
+    limitBytes: 65_536,
+    observedBytesAtLeast: 65_537,
+    status: 200,
+  });
+  assert(!JSON.stringify(managementFailure(error)).includes("private"));
+  assert(Object.isFrozen(managementFailure(error)));
+});
+
+test("management diagnostic categories and reasons cannot reflect arbitrary error objects", () => {
+  const marker = "private-marker";
+  assert.equal(managementEndpoint(`/private/${marker}?secret=${marker}`), "other");
+  const forged = Object.assign(new Error(marker), {
+    managementFailure: { reason: marker, status: marker },
+  });
+  assert.equal(managementFailure(forged), undefined);
+  recordManagementFailure(
+    forged,
+    `/workers/scripts/${marker}/settings`,
+    marker,
+    { status: 900, ray: marker },
+    Number.MAX_SAFE_INTEGER,
+  );
+  assert.deepEqual(managementFailure(forged), { endpoint: "settings", reason: "request-failed" });
+});

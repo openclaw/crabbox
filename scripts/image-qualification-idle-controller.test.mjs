@@ -312,3 +312,63 @@ test("identity route bounds an oversized reply and a stalled pure RPC", async ()
   env.AUTHORITY.bindingIdentity = () => new Promise(() => {});
   assert.equal((await controller.fetch(request(), env)).status, 409);
 });
+
+test("unrelated inventory drift records its phase and never admits create or recovery as success", async () => {
+  const f = idleFixture();
+  const request = f.cf.request.bind(f.cf);
+  f.cf.request = async (route, init, options) => {
+    const result = structuredClone(await request(route, init, options));
+    if (route.startsWith("/workers/durable_objects/namespaces"))
+      result.result.push({
+        id: "0".repeat(32),
+        script: "unrelated-worker",
+        class: "UnrelatedFixture",
+      });
+    return result;
+  };
+  await f.run();
+  assert.deepEqual(f.state.failure, { stage: "inventory-before", reason: "inventory-mismatch" });
+  assert.equal(f.state.failed, true);
+  assert.equal(f.state.settled, true);
+  assert.equal(f.state.createAt, undefined);
+  assert.equal(f.state.discovery, undefined);
+  assert.equal(f.model.calls.filter((c) => c.method !== "GET").length, 0);
+  await f.recover();
+  assert.equal(f.state.failed, true);
+  assert.equal(f.state.discovery, undefined);
+  assert.deepEqual(f.state.failure, { stage: "inventory-before", reason: "inventory-mismatch" });
+});
+
+test("precreate read failure records only a finite category, preserving the original failure through recovery", async () => {
+  const privateMarker = "private-exception-with-secret-and-account";
+  let denied = false;
+  const f = idleFixture({
+    before(call) {
+      if (!denied && call.pathname === "/workers/scripts") {
+        denied = true;
+        throw new Error(privateMarker);
+      }
+    },
+  });
+  await f.run();
+  assert.deepEqual(f.state.failure, {
+    stage: "inventory-before",
+    endpoint: "worker-inventory",
+    reason: "request-failed",
+  });
+  assert.equal(f.state.failed, true);
+  assert.equal(f.state.settled, true);
+  assert.equal(f.state.createAt, undefined);
+  assert.equal(f.model.calls.filter((c) => c.method !== "GET").length, 0);
+  assert(!JSON.stringify(f.state).includes(privateMarker));
+  const before = structuredClone(f.state.failure);
+  await f.recover();
+  assert.deepEqual(f.state.failure, before);
+  assert.equal(f.state.failed, true);
+});
+
+test("previous helper identities cannot validate a new idle plan", () => {
+  const f = idleFixture();
+  f.plan.sources["image-qualification-binding-probe.mjs"] = "0".repeat(64);
+  assert.throws(() => validateIdlePlan(f.plan), /invalid frozen plan/);
+});

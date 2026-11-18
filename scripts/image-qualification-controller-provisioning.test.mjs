@@ -817,3 +817,154 @@ test("HTTP: reaper transport discovery readiness precedes registry observation a
   assert.equal(f.state.deletes, 1);
   assert.equal(f.state.present, false);
 });
+
+function inventoryResponse(bytes) {
+  const body = { success: true, result: [{ id: authorityName, metadata: "" }] };
+  body.result[0].metadata = "x".repeat(bytes - Buffer.byteLength(JSON.stringify(body)));
+  const text = JSON.stringify(body);
+  assert.equal(Buffer.byteLength(text), bytes);
+  return text;
+}
+function jsonBytes(res, body, status = 200) {
+  res.writeHead(status, { "content-type": "application/json", "cf-ray": "0123456789abcdef-DFW" });
+  res.end(body);
+}
+for (const bytes of [73_817, 1024 * 1024])
+  test(`HTTP: valid unpaginated ${bytes}-byte Worker inventory verifies exact deletion`, async (t) => {
+    const f = await fixture(t, {
+      reply: async ({ route, state, res }) => {
+        if (state.deletes && route === "/workers/scripts") {
+          jsonBytes(res, inventoryResponse(bytes));
+          return true;
+        }
+      },
+    });
+    await f.invoke({ v2: true, probeOnly: true, idleOnly: false });
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+    assert.equal(f.state.present, false);
+    const receipt = f.receipt();
+    assert.equal(receipt.settlement, "deleted-and-absent");
+    assert.equal(receipt.discovery, "probe-observed");
+    assert.equal(receipt.outcome, "verified");
+    assert.equal(receipt.events.at(-1).category, "worker-inventory");
+    await assert.rejects(
+      f.invoke({ v2: true, probeOnly: true, idleOnly: false }),
+      /receipt exists/,
+    );
+    assert.equal(f.state.puts, 1);
+  });
+
+for (const kind of [
+  "overflow",
+  "denied",
+  "malformed",
+  "non-object",
+  "incomplete",
+  "stalled",
+  "redirect",
+])
+  test(`HTTP: ${kind} inventory after deletion remains unresolved with bounded evidence`, async (t) => {
+    const parent = new AbortController();
+    const f = await fixture(t, {
+      reply: async ({ route, state, res, send }) => {
+        if (!state.deletes || route !== "/workers/scripts") return;
+        if (kind === "overflow") jsonBytes(res, inventoryResponse(1024 * 1024 + 1));
+        if (kind === "denied")
+          jsonBytes(res, JSON.stringify({ success: false, errors: [marker] }), 403);
+        if (kind === "malformed") jsonBytes(res, `{"private":"${marker}",`);
+        if (kind === "non-object") jsonBytes(res, "null");
+        if (kind === "incomplete") send({ private: marker });
+        if (kind === "stalled") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write("{");
+          setTimeout(() => parent.abort(), 10);
+        }
+        if (kind === "redirect") {
+          res.writeHead(302, { location: `https://private.invalid/${marker}` });
+          res.end();
+        }
+        return true;
+      },
+    });
+    f.cf.discoverySignal = parent.signal;
+    await assert.rejects(f.invoke({ v2: true, probeOnly: true, idleOnly: false }));
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+    assert.equal(f.state.present, false);
+    const r = f.receipt();
+    assert.equal(r.settlement, "unresolved");
+    assert.equal(r.outcome, "failed");
+    assert.equal(r.discovery, "probe-observed");
+    const last = r.events.at(-1);
+    assert.equal(last.category, "worker-inventory");
+    assert.equal(last.failure.endpoint, "worker-inventory");
+    assert(!JSON.stringify(r).includes(marker));
+    if (kind === "overflow")
+      assert.deepEqual(last.failure, {
+        endpoint: "worker-inventory",
+        reason: "body-too-large",
+        limitBytes: 1024 * 1024,
+        observedBytesAtLeast: 1024 * 1024 + 1,
+        status: 200,
+        ray: "0123456789abcdef-DFW",
+      });
+    if (kind === "denied") assert.equal(last.failure.reason, "http-error");
+    if (["malformed", "non-object"].includes(kind))
+      assert.equal(last.failure.reason, "invalid-json");
+    if (kind === "stalled") assert.equal(last.failure.reason, "cancelled");
+    await assert.rejects(
+      f.invoke({ v2: true, probeOnly: true, idleOnly: false }),
+      /receipt exists/,
+    );
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+  });
+
+test("HTTP: large inventory cannot hide a lingering deployment after physical deletion", async (t) => {
+  const f = await fixture(t, {
+    reply: async ({ route, state, res, send }) => {
+      if (!state.deletes) return;
+      if (route === "/workers/scripts") {
+        jsonBytes(res, inventoryResponse(73_817));
+        return true;
+      }
+      if (route === `/workers/scripts/${controllerName}/deployments`) {
+        send({ deployments: [{ versions: [{ version_id: version, percentage: 100 }] }] });
+        return true;
+      }
+    },
+  });
+  await assert.rejects(f.invoke(), /controller cleanup remains unconfirmed/);
+  assert.equal(f.state.present, false);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.receipt().settlement, "unresolved");
+});
+
+test("HTTP: Worker-list allowance cannot enlarge an upload acknowledgement", async (t) => {
+  const f = await fixture(t, {
+    reply: async ({ req, res }) => {
+      if (req.method === "PUT") {
+        jsonBytes(
+          res,
+          JSON.stringify({
+            success: true,
+            result: { deployment_id: version },
+            padding: "x".repeat(64 * 1024),
+          }),
+        );
+        return true;
+      }
+    },
+  });
+  await assert.rejects(f.invoke(), /response body exceeds bound/);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  const failure = f
+    .receipt()
+    .events.find((e) => e.phase === "upload" && e.outcome === "failed").failure;
+  assert.equal(failure.limitBytes, 64 * 1024);
+  assert.equal(failure.observedBytesAtLeast, 64 * 1024 + 1);
+  assert.equal(failure.endpoint, "worker");
+});

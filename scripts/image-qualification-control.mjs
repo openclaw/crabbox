@@ -23,6 +23,12 @@ import {
   verifyOwned,
   assertOwnedSettings,
 } from "./image-qualification-isolation.mjs";
+import {
+  readProbeResponse,
+  managementEndpoint,
+  managementFailure,
+  recordManagementFailure,
+} from "./image-qualification-binding-probe.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
 import {
   handoffSession,
@@ -965,18 +971,27 @@ export class Cloudflare {
       responseMetadata = false,
     } = {},
   ) {
-    const response = await fetch(`${this.base}${pathname}`, {
-      ...init,
-      ...(this.discoverySignal
-        ? {
-            signal: init.signal
-              ? AbortSignal.any([init.signal, this.discoverySignal])
-              : this.discoverySignal,
-            redirect: "error",
-          }
-        : {}),
-      headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
-    });
+    let response;
+    try {
+      response = await fetch(`${this.base}${pathname}`, {
+        ...init,
+        ...(this.discoverySignal
+          ? {
+              signal: init.signal
+                ? AbortSignal.any([init.signal, this.discoverySignal])
+                : this.discoverySignal,
+              redirect: "error",
+            }
+          : {}),
+        headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
+      });
+    } catch (error) {
+      throw recordManagementFailure(
+        error,
+        pathname,
+        init.signal?.aborted ? "cancelled" : "request-failed",
+      );
+    }
     const ray = response.headers.get("cf-ray");
     const responseInfo = {
       status: response.status,
@@ -988,33 +1003,74 @@ export class Cloudflare {
     }
     if ((probeContentIdentity || contentIdentityBytes) && response.ok) {
       const probe = await import("./image-qualification-binding-probe.mjs");
-      return await probe.probeContentIdentity(response, contentIdentityBytes);
+      try {
+        return await probe.probeContentIdentity(response, contentIdentityBytes);
+      } catch (error) {
+        throw recordManagementFailure(
+          error,
+          pathname,
+          init.signal?.aborted ? "cancelled" : "body-read-error",
+          responseInfo,
+          contentIdentityBytes ?? 64 * 1024,
+        );
+      }
     }
     // Ordinary Worker deletion can acknowledge with an empty HTTP204. It
     // still requires the subsequent exact absence checks, never an invented body.
-    const text =
-      init.method === "DELETE" && response.status === 204 && response.body === null
-        ? ""
-        : boundedBytes
-          ? await (
-              await import("./image-qualification-binding-probe.mjs")
-            ).readProbeResponse(response, boundedBytes)
-          : await response.text();
+    let text;
+    try {
+      text =
+        init.method === "DELETE" && response.status === 204 && response.body === null
+          ? ""
+          : boundedBytes
+            ? await readProbeResponse(response, boundedBytes)
+            : await response.text();
+    } catch (error) {
+      throw recordManagementFailure(
+        error,
+        pathname,
+        init.signal?.aborted ? "cancelled" : "body-read-error",
+        responseInfo,
+        boundedBytes,
+      );
+    }
     let parsed;
     try {
       parsed = text ? JSON.parse(text) : {};
+      if (boundedBytes && (!parsed || typeof parsed !== "object" || Array.isArray(parsed)))
+        throw new Error("invalid envelope");
     } catch {
+      if (boundedBytes)
+        throw recordManagementFailure(
+          new Error("Cloudflare management response is not a JSON object"),
+          pathname,
+          "invalid-json",
+          responseInfo,
+          boundedBytes,
+        );
       parsed = { raw: text.slice(0, 200) };
     }
     if (!response.ok || parsed.success === false) {
-      throw Object.assign(new Error(`Cloudflare API ${pathname} returned ${response.status}`), {
-        status: response.status,
-        responseInfo,
+      throw recordManagementFailure(
+        Object.assign(new Error(`Cloudflare API ${pathname} returned ${response.status}`), {
+          status: response.status,
+          responseInfo,
+          pathname,
+        }),
         pathname,
-      });
+        response.ok ? "api-error" : "http-error",
+        responseInfo,
+        boundedBytes,
+      );
     }
     if (allow404 && (init.method ?? "GET") === "GET" && parsed.result === undefined) {
-      throw new Error(`Cloudflare API ${pathname} did not confirm existence or absence`);
+      throw recordManagementFailure(
+        new Error(`Cloudflare API ${pathname} did not confirm existence or absence`),
+        pathname,
+        "unconfirmed-existence",
+        responseInfo,
+        boundedBytes,
+      );
     }
     if (responseMetadata)
       return { result: envelope ? parsed : parsed.result, response: responseInfo };
@@ -2856,6 +2912,7 @@ export async function discoverWithOwnedController(
           endpoint: pathname.startsWith(own)
             ? pathname.slice(own.length) || "upload"
             : "isolation-fence",
+          category: managementEndpoint(pathname),
           elapsedMs: Date.now() - started,
           outcome: "unconfirmed",
         };
@@ -2873,7 +2930,12 @@ export async function discoverWithOwnedController(
             },
             {
               ...options,
-              boundedBytes: 64 * 1024,
+              // The Worker list is unpaginated and includes shared-account metadata.
+              // Keep acknowledgements and all other management reads at 64KiB.
+              boundedBytes:
+                pathname === "/workers/scripts" && (init.method ?? "GET") === "GET"
+                  ? 1024 * 1024
+                  : 64 * 1024,
               ...(!content ? { responseMetadata: true } : {}),
             },
           );
@@ -2884,6 +2946,10 @@ export async function discoverWithOwnedController(
           return content || options.responseMetadata ? result : result.result;
         } catch (error) {
           event.outcome = "failed";
+          event.failure = managementFailure(error) ?? {
+            endpoint: managementEndpoint(pathname),
+            reason: active.aborted ? "cancelled" : "request-failed",
+          };
           if (error.responseInfo) event.response = safeControllerResponse(error.responseInfo);
           await save(receipt);
           throw error;

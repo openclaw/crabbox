@@ -21,6 +21,65 @@ const moduleName = (role) => `image-qualification-binding-${role}.mjs`;
 const moduleBytes = (role) => fs.readFileSync(path.join(directory, moduleName(role)));
 const nameFor = (id, role) => `crabbox-binding-probe-${id}-${role}`;
 
+// Finite categories only: management receipts must never retain arbitrary paths,
+// bodies, headers or exception messages from a shared account.
+export function managementEndpoint(route) {
+  const pathname = route.split("?")[0];
+  if (pathname === "/workers/scripts") return "worker-inventory";
+  if (pathname === "/workers/durable_objects/namespaces") return "namespace-inventory";
+  if (pathname === "/workers/domains") return "domain-inventory";
+  if (pathname === "/tokens/verify") return "credential-verification";
+  for (const suffix of ["settings", "deployments", "subdomain", "routes", "schedules", "versions"])
+    if (pathname.endsWith(`/${suffix}`)) return suffix;
+  if (pathname.endsWith("/content/v2")) return "module-content";
+  if (/^\/workers\/services\/[^/]+$/.test(pathname)) return "service";
+  if (/^\/workers\/scripts\/[^/]+$/.test(pathname)) return "worker";
+  return "other";
+}
+class ProbeResponseLimitError extends Error {
+  constructor(maximum) {
+    super("qualification binding probe: response body exceeds bound");
+    this.limitBytes = maximum;
+  }
+}
+const managementFailures = new WeakMap();
+export const managementFailure = (error) =>
+  error && typeof error === "object" ? managementFailures.get(error) : undefined;
+export function recordManagementFailure(error, route, reason, response, maximum) {
+  const failure = error && typeof error === "object" ? error : new Error("management read failed");
+  if (managementFailures.has(failure)) return failure;
+  const receipt = {
+    endpoint: managementEndpoint(route),
+    reason: error instanceof ProbeResponseLimitError ? "body-too-large" : reason,
+    ...(Number.isSafeInteger(maximum) && maximum > 0 && maximum <= 4 * 1024 * 1024
+      ? { limitBytes: maximum }
+      : {}),
+    ...(error instanceof ProbeResponseLimitError
+      ? { observedBytesAtLeast: error.limitBytes + 1 }
+      : {}),
+    ...(Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599
+      ? { status: response.status }
+      : {}),
+    ...(/^[a-f0-9]{16}-[A-Z]{3}$/.test(response?.ray ?? "") ? { ray: response.ray } : {}),
+  };
+  // Callers supply fixed reasons. Never accept provider-controlled diagnostic text.
+  if (
+    ![
+      "body-too-large",
+      "body-read-error",
+      "request-failed",
+      "cancelled",
+      "invalid-json",
+      "http-error",
+      "api-error",
+      "unconfirmed-existence",
+    ].includes(receipt.reason)
+  )
+    receipt.reason = "request-failed";
+  managementFailures.set(failure, Object.freeze(receipt));
+  return failure;
+}
+
 async function responseBytes(response, maximum) {
   const reader = response.body?.getReader();
   if (!reader) fail("response body missing");
@@ -31,7 +90,7 @@ async function responseBytes(response, maximum) {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.length;
-      if (length > maximum) fail("response body exceeds bound");
+      if (length > maximum) throw new ProbeResponseLimitError(maximum);
       chunks.push(value);
     }
   } finally {
