@@ -216,6 +216,27 @@ test("HTTP: empty204 deletion acknowledgement requires exact subsequent absence"
   assert.equal(r.outcome, "verified");
 });
 
+test("HTTP: empty204 with controller residue remains unresolved without delete replay", async (t) => {
+  const f = await fixture(t, {
+    reply: async ({ req, res }) => {
+      if (req.method === "DELETE") {
+        res.writeHead(204);
+        res.end();
+        return true;
+      }
+    },
+  });
+  await assert.rejects(f.invoke(), /deletion was not observable/);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  const r = f.receipt();
+  assert.notEqual(r.settlement, "deleted-and-absent");
+  assert.equal(r.settlement, "unresolved");
+  assert.equal(r.outcome, "failed");
+  await assert.rejects(f.invoke(), /receipt exists/);
+  assert.equal(f.state.deletes, 1);
+});
+
 test("HTTP: real five-second observation after deployment404, no duplicate upload", async (t) => {
   let missing = true;
   const f = await fixture(t, {

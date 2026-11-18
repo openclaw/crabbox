@@ -299,7 +299,9 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_TEST_STATE);
 } else {
   function fixture(t, options) {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-reaper-test-"));
+    const directory = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-reaper-test-")),
+    );
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     const stateFile = path.join(directory, "state.json");
     fs.writeFileSync(stateFile, JSON.stringify(initialState(options)));
