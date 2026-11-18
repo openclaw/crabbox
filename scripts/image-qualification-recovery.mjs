@@ -49,6 +49,7 @@ export const recoveryBinding = (a) =>
       "authorityVersion",
       "policyHash",
       ...(a.keyAuthorizationOnly === true ? ["keyAuthorizationOnly"] : []),
+      ...(a.taggingContract !== undefined ? ["taggingContract"] : []),
     ].map((key) => [key, a[key]]),
   );
 const admission = (record) =>
@@ -82,6 +83,8 @@ export function validateRecoveryPlan(plan) {
     corrected.authority.version === original.authority.version ||
     corrected.authority.sourceSha !== plan.sourceSha ||
     corrected.authority.logicalVersion === original.authority.logicalVersion ||
+    (plan.binding.taggingContract !== undefined &&
+      plan.binding.taggingContract !== "creation-only/v1") ||
     !same(plan.binding, recoveryBinding(plan.binding))
   )
     fail();

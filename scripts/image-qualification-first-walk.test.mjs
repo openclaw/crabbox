@@ -691,6 +691,7 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         await checkGuestCleanup(walkCommands[0].input, dir);
         const proofObject = JSON.parse(fs.readFileSync(path.join(proof, "first-walk.json")));
         const attestation = {
+          taggingContract: "creation-only/v1",
           finalized: true,
           firstWalk: {
             finalized: true,
@@ -715,6 +716,15 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         assert.doesNotThrow(() =>
           verifyQualificationEvidence(attestation, completeProof, undefined, true),
         );
+        for (const taggingContract of [undefined, "unknown/v1"])
+          assert.throws(() =>
+            verifyQualificationEvidence(
+              { ...attestation, taggingContract },
+              completeProof,
+              undefined,
+              true,
+            ),
+          );
         for (const altered of [
           { ...completeProof, result: { ...result, unmounted: false } },
           {

@@ -104,7 +104,7 @@ jobs:
         if: inputs.mode == 'first-walk' || inputs.mode == 'key-authorization'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 7b67cd5da03d22622516aa6a712e22dfaa4734b8
+          ref: 592a4982f5e3d376ad9dfda08218d429eb02dd1b
           path: private-baseline
           persist-credentials: false
       - name: Set up Go

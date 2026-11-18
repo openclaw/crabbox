@@ -84,7 +84,7 @@ function fixture(t, { secretProvenance = false } = {}) {
     tools,
   };
   plan.runSession = {
-    profile: "first-walk-aws-session/v1",
+    profile: "first-walk-aws-session/v2",
     repository: "example/repo",
     workflowSha: "1".repeat(40),
     candidateSha: "2".repeat(40),

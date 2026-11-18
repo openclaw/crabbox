@@ -36,6 +36,7 @@ function fixture(options = {}) {
     hash = "b".repeat(64),
     start = Date.parse("2026-11-15T00:00:00Z");
   const binding = {
+    ...(options.taggingContract ? { taggingContract: options.taggingContract } : {}),
     runId: "image-qualification-42-1",
     candidateSha: "a".repeat(40),
     candidateWorker: "crabbox-image-qualification-42-1",
@@ -322,7 +323,7 @@ function fixture(options = {}) {
   return {
     plan,
     workers,
-    remoteState: () => ({ active, finalized, workers }),
+    remoteState: () => ({ active, finalized, workers, taggingContract: binding.taggingContract }),
     events,
     saved,
     fetch,
@@ -373,7 +374,7 @@ async function local(f, run) {
 }
 
 function cleanupFixture(t, options) {
-  const f = fixture(options),
+  const f = fixture({ ...options, taggingContract: "creation-only/v1" }),
     dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "qualification-cleanup-session-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const start = Date.parse(f.plan.handoffStartedAt),
@@ -393,7 +394,7 @@ function cleanupFixture(t, options) {
   const aws = path.join(dir, "aws");
   fs.writeFileSync(aws, "fake-aws", { mode: 0o600 });
   const scope = {
-    profile: "first-walk-aws-session/v1",
+    profile: "first-walk-aws-session/v2",
     repository: "example/repo",
     workflowSha: "1".repeat(40),
     candidateSha: f.plan.binding.candidateSha,
@@ -626,6 +627,23 @@ test("cleanup scope binds every protected handoff field", (t) => {
     "expiresAt",
   ])
     assert.throws(() => validateCleanupSession(f.plan, { ...handoff, [key]: "foreign" }));
+});
+
+test("cleanup session profiles cannot change the original tagging contract", (t) => {
+  for (const mode of ["first-walk", "key-tag-authorization"]) {
+    const f = cleanupFixture(t);
+    if (mode === "key-tag-authorization") f.plan.binding.keyAuthorizationOnly = true;
+    f.plan.cleanupSession.scope.profile = `${mode}-aws-session/v2`;
+    assert.ok(validateCleanupSession(f.plan));
+    delete f.plan.binding.taggingContract;
+    assert.throws(() => validateCleanupSession(f.plan));
+    f.plan.cleanupSession.scope.profile = `${mode}-aws-session/v1`;
+    assert.ok(validateCleanupSession(f.plan));
+    f.plan.binding.taggingContract = "creation-only/v1";
+    assert.throws(() => validateCleanupSession(f.plan));
+    f.plan.binding.taggingContract = "unknown/v1";
+    assert.throws(() => validateCleanupSession(f.plan));
+  }
 });
 
 for (const drift of ["custody", "settings", "module", "caller", "marker"])

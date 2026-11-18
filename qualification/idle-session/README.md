@@ -273,7 +273,7 @@ receive neither its key nor authority credentials and cannot choose sessions.
 For new delivery, add `runSession` to the existing replacement plan. It has
 exactly these nonsecret fields:
 
-- `profile: "first-walk-aws-session/v1"`, `repository`, `workflowSha`, `candidateSha`;
+- `profile: "first-walk-aws-session/v2"`, `repository`, `workflowSha`, `candidateSha`;
 - `runId: "image-qualification-<workflow-run-id>-1"`, `candidateArtifactId`,
   `candidateArtifactDigest` (including `sha256:`), `manifestSha256`;
 - canonical ISO `startsAt`, `workExpiresAt` (start +130 minutes), `expiresAt`
