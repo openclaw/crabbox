@@ -2317,6 +2317,113 @@ async function install({ client: cf }) {
   });
 }
 
+// Consume only original installation custody. No upload or exposure replay.
+// A missing controller is safe here only because install never claims a run.
+export async function recoverInstallation(cf, state) {
+  const record = cf.installation;
+  const present = {};
+  const roles = ["candidate", "relay", "controller"];
+  for (const role of roles) {
+    const worker = record[role];
+    const settings = await verifyOwned(cf, worker.name, { allowAbsent: true });
+    if (!settings) {
+      if ((await cf.list("/workers/scripts")).some((v) => (v.id ?? v.name) === worker.name))
+        throw Error("installation existence readbacks disagree");
+      continue;
+    }
+    const writes = state.events.filter((v) => v.role === role && v.method === "PUT");
+    const last = writes.at(-1);
+    if (!last || state.events.some((v) => v.role === role && v.method === "DELETE"))
+      throw Error("installation write custody is unresolved; never replay deletion");
+    const version = await cf.latestVersion(worker.name);
+    const module = await cf.request(
+      `/workers/scripts/${worker.name}/content/v2`,
+      {},
+      {
+        contentIdentityBytes: 4 * 1024 * 1024,
+      },
+    );
+    if (
+      module.count !== 1 ||
+      module.module !== last.requestedModule ||
+      module.sha256 !== last.requestedModuleSha256 ||
+      digest(canonical([...settings.tags].sort())) !== last.requestedTagsSha256 ||
+      (last.version && version !== last.version) ||
+      (await cf.latestVersion(worker.name)) !== version
+    )
+      throw Error("installation original upload identity differs");
+    const own = await ownedNamespaces(cf, worker.name, settings.bindings);
+    if (role === "candidate") {
+      if (
+        own.length > 1 ||
+        (own.length === 1 &&
+          (own[0].class !== "FleetDurableObject" ||
+            (record.candidate.namespaceId !== "0".repeat(32) &&
+              own[0].id !== record.candidate.namespaceId)))
+      )
+        throw Error("installation candidate namespace differs");
+      if (own.length === 1)
+        cf.installation = {
+          ...record,
+          candidate: { ...record.candidate, namespaceId: own[0].id },
+        };
+    }
+    present[role] = { version, settings, module };
+  }
+  if (present.controller) {
+    cf.controllerVersion = present.controller.version;
+    const url = await installedURL(cf, controllerName);
+    const run = discoveredRun(
+      await controllerCall(cf, url, required("QUALIFICATION_CONTROLLER_TOKEN"), "discover"),
+    );
+    const probe = await controllerCall(
+      cf,
+      url,
+      required("QUALIFICATION_CONTROLLER_TOKEN"),
+      "transport-discover",
+    );
+    if (run !== null || probe.probe !== null)
+      throw Error("installation registry or probe unresolved; preserve recovery dependencies");
+  }
+  if (roles.every((role) => present[role])) {
+    // Complete installations are never torn down by installation recovery.
+    const versions = await verifyInstallation(cf);
+    writeJSON(path.join(path.resolve(required("QUALIFICATION_PROOF_DIR")), "installation.json"), {
+      installation: cf.installation,
+      sha256: digest(canonical(cf.installation)),
+      versions,
+      idle: true,
+    });
+    return { installation: "retained", registry: "idle", measurement: "not-started" };
+  }
+  // Fence every known member before deleting anything. Preserve source, authority,
+  // and its namespaces; only initial installation custody is admissible here.
+  for (const role of roles)
+    if (present[role]) {
+      const worker = record[role].name;
+      if ((await cf.latestVersion(worker)) !== present[role].version)
+        throw Error("installation version changed before settlement");
+    }
+  if (present.controller) await cf.deleteScript(controllerName);
+  if (present.relay) await deleteRelay(cf, record.relay.name);
+  if (present.candidate) await deleteCandidate(cf, record.candidate.name);
+  for (let round = 0; round < 2; round++) {
+    const inventory = await cf.list("/workers/scripts");
+    for (const role of roles) {
+      const name = record[role].name;
+      await requireAbsent(cf, name);
+      if (inventory.some((v) => (v.id ?? v.name) === name))
+        throw Error("installation physical settlement remains unknown");
+    }
+    await verifyAuthority(cf);
+  }
+  return {
+    installation: "absent",
+    registry: present.controller ? "idle" : "not-observed",
+    measurement: "not-started",
+  };
+}
+
 async function deploy({ client } = {}) {
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
@@ -3937,7 +4044,7 @@ async function waitForActivation(startsAt) {
   }
 }
 
-async function protectedOperation(operation, work) {
+async function protectedOperation(operation, work, { recover = false } = {}) {
   if (!readInstallation()) return work(undefined);
   const cf = await cloudflareFromEnv({ verify: false });
   const stop = new AbortController();
@@ -3949,12 +4056,13 @@ async function protectedOperation(operation, work) {
       cf,
       path.join(path.resolve(required("QUALIFICATION_PROOF_DIR")), "installation", operation),
       operation,
-      async (client) => {
+      async (client, state) => {
         await verifyAuthority(client);
-        return work(client);
+        return work(client, state);
       },
       {
         signal: stop.signal,
+        recover,
         deadline: Date.now() + (operation === "prepare-run" ? 75 : 15) * 60_000,
       },
     );
@@ -4058,6 +4166,15 @@ async function main() {
   if (command === "deploy-and-arm") {
     const expected = await protectedOperation("prepare-run", (client) => deploy({ client }));
     return await protectedOperation("arm-run", (client) => arm({ client, expected }));
+  }
+  if (command === "install-recover") {
+    if (!readInstallation()) throw Error("protected installation descriptor required");
+    const result = await protectedOperation("install", recoverInstallation, { recover: true });
+    writeJSON(
+      path.join(path.resolve(required("QUALIFICATION_PROOF_DIR")), "installation-recovery.json"),
+      result,
+    );
+    return;
   }
   if (command === "install")
     return await protectedOperation("install", (client) => install({ client }));

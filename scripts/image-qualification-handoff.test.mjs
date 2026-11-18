@@ -1788,6 +1788,82 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       if (fault === "stale") assert.ok(journal.events.some((e) => e.enabled === true));
     });
   }
+  for (const fault of ["stale", "denied", "lost"]) {
+    test(`HTTP fresh process recovers partial install after ${fault} without upload replay`, (t) => {
+      const f = reusable(t, { exposureFault: fault });
+      f.update({ exposureFault: null, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 0);
+      assert.equal(f.state().tombstoneUploads, 1);
+      assert.equal(
+        f.state().events.filter((e) => e.startsWith("PUT ")).length,
+        1,
+        "only the existing namespace-deletion migration is allowed",
+      );
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "install-proof/installation-recovery.json")),
+      );
+      assert.equal(receipt.installation, "absent");
+      assert.equal(receipt.measurement, "not-started");
+    });
+  }
+  for (const fault of ["put-before", "put-lost"]) {
+    test(`HTTP install ${fault} reconciles uncertain upload without replay in fresh process`, (t) => {
+      const f = reusable(t, { candidateFault: fault });
+      f.update({ candidateFault: null, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(Object.keys(f.state().workers).length, 0);
+      assert.ok(!f.state().identity);
+    });
+  }
+  test("HTTP complete installation recovery retains all resources without writes", (t) => {
+    const f = reusable(t);
+    f.update({ events: [] });
+    const result = f.invoke("install-recover", {
+      QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Object.keys(f.state().workers).length, 3);
+    assert.ok(!f.state().events.some((e) => /^(PUT|POST|DELETE) api.cloudflare/.test(e)));
+  });
+  for (const fault of ["foreign", "denied", "missing", "malformed"]) {
+    test(`HTTP partial installation ${fault} metadata never authorizes deletion`, (t) => {
+      const f = reusable(t, { exposureFault: "lost" });
+      f.update({ exposureFault: null, candidateFault: fault, events: [] });
+      const result = f.invoke("install-recover", {
+        QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+      });
+      assert.equal(result.status, 1);
+      assert.ok(!f.state().events.some((e) => /^(PUT|POST|DELETE) api.cloudflare/.test(e)));
+    });
+  }
+  test("HTTP interrupted install deletion is observed on fresh recovery without a second DELETE", (t) => {
+    const f = reusable(t, { exposureFault: "lost" });
+    f.update({ exposureFault: null, deleteFault: "lost", events: [] });
+    const options = { QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof") };
+    assert.equal(f.invoke("install-recover", options).status, 1);
+    f.update({ deleteFault: null, events: [] });
+    const result = f.invoke("install-recover", options);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Object.keys(f.state().workers).length, 0);
+    assert.ok(!f.state().events.some((e) => e.startsWith("DELETE ")));
+  });
+  test("HTTP expired original installation recovery clock cannot reset or mutate", (t) => {
+    const f = reusable(t, { exposureFault: "lost" });
+    f.update({ exposureFault: null, now: f.state().now + 31 * 60_000, events: [] });
+    const result = f.invoke("install-recover", {
+      QUALIFICATION_PROOF_DIR: path.join(f.directory, "install-proof"),
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /original installation recovery deadline expired/);
+    assert.equal(f.state().events.length, 0);
+  });
   test("HTTP legacy deletion is independently observed and does not imply a measurement passed", (t) => {
     const f = fixture(t, "first-walk");
     f.update({ httpInstallation: true });

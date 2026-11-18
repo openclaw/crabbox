@@ -174,3 +174,18 @@ the frozen start. Forward and recovery cutoffs are unchanged; missed preparation
 cannot move them. An uncertain operation preserves its original private journal
 and cannot be replayed. Installation migration, repair and final removal require
 separate admission with existing recovery dependencies preserved.
+
+
+Interrupted initial installation is reconciled by the protected
+`image-qualification-control.mjs install-recover` command using the original
+private proof directory, pinned descriptor and authority admission. The install
+workflow invokes it in a fresh process after installation failure and retains
+the failure status. Recovery has a separate fifteen-minute reserve after the
+original fifteen-minute installation deadline; a restart never resets that
+clock. It preserves a complete verified installation, or settles only exact
+partial installation custody through the existing deletion implementation. It
+never replays an upload or uncertain deletion. Foreign or missing custody,
+contradictory existence reads, unresolved registry/probe state and expired
+recovery block mutation. Independently restoring a private journal requires
+trusted original workflow/artifact provenance; a public receipt is not an
+authorization capability. The authority and its namespaces remain untouched.

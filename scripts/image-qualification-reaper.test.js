@@ -310,7 +310,9 @@ if (process.env.QUALIFICATION_TEST_STATE) {
       fs.rmSync(proofDirectory, { recursive: true, force: true });
       const child = spawnSync(process.execPath, ["--import", import.meta.url, control, command], {
         encoding: "utf8",
-        timeout: 10_000,
+        // Durable full-path receipts fsync every management observation. Allow
+        // parallel test CPU/I/O contention; owner deadlines remain unchanged.
+        timeout: 30_000,
         env: {
           HOME: directory,
           RUNNER_TEMP: directory,

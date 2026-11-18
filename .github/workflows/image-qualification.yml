@@ -354,7 +354,13 @@ jobs:
           QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-deploy-proof
         run: |
           if [[ "${{ inputs.operation }}" == install ]]; then
-            node scripts/image-qualification-control.mjs install
+            # A fresh process consumes original custody after an interrupted install.
+            # It never retries an upload, resets a clock, or tears down a complete installation.
+            node scripts/image-qualification-control.mjs install || {
+              status=$?
+              node scripts/image-qualification-control.mjs install-recover
+              exit "$status"
+            }
           elif [[ -n "$QUALIFICATION_INSTALLATION_JSON" ]]; then
             node scripts/image-qualification-control.mjs deploy-and-arm
           else

@@ -184,7 +184,7 @@ export async function withInstallationJournal(
   directory,
   operation,
   work,
-  { signal, deadline = Date.now() + 15 * 60_000 } = {},
+  { signal, deadline = Date.now() + 15 * 60_000, recover = false } = {},
 ) {
   if (!Number.isFinite(deadline) || deadline <= Date.now()) fail("deadline expired");
   return withQualificationJournal(
@@ -192,7 +192,7 @@ export async function withInstallationJournal(
     {
       stateName: "installation-operation.json",
       lockName: "installation-operation.lock",
-      create: true,
+      create: !recover,
       initial: () => ({
         profile: "qualification-installation-operation/v1",
         installationId: cf.installation.id,
@@ -205,16 +205,44 @@ export async function withInstallationJournal(
         authorityVersion: cf.admission.authority.version,
         authoritySourceSha: cf.admission.authority.sourceSha,
         operation,
+        deadline,
+        recoveryDeadline: deadline + 15 * 60_000,
         events: [],
         outcome: "pending",
       }),
     },
     async (state, save) => {
-      if (state.events.length || state.outcome !== "pending")
+      if (recover) {
+        if (
+          operation !== "install" ||
+          state.operation !== "install" ||
+          state.profile !== "qualification-installation-operation/v1" ||
+          state.installationId !== cf.installation.id ||
+          state.candidateSha !== cf.installation.candidateSha ||
+          !equal(
+            state.modules,
+            Object.fromEntries(
+              ["candidate", "controller", "relay"].map((role) => [
+                role,
+                cf.installation[role].module,
+              ]),
+            ),
+          ) ||
+          state.authorityVersion !== cf.admission.authority.version ||
+          state.authoritySourceSha !== cf.admission.authority.sourceSha ||
+          !Array.isArray(state.events) ||
+          !Number.isFinite(state.deadline) ||
+          state.recoveryDeadline !== state.deadline + 15 * 60_000
+        )
+          fail("original installation custody differs");
+        deadline = Math.min(deadline, state.recoveryDeadline);
+        if (Date.now() >= deadline) fail("original installation recovery deadline expired");
+      } else if (state.events.length || state.outcome !== "pending")
         fail("original operation exists; reconcile, never replay");
       const original = cf.request;
       const api = Object.create(cf);
       api.recoverySignal = () => signal;
+      api.controllerDeadline = deadline;
       api.request = async (route, init = {}, options = {}) => {
         if (
           (init.method ?? "GET") !== "GET" &&
@@ -245,6 +273,8 @@ export async function withInstallationJournal(
           event.requestedBindingsSha256 = digest(canonical(bindingShape(metadata.bindings)));
           const module = init.body.get(metadata.main_module);
           event.requestedModuleSha256 = digest(Buffer.from(await module.arrayBuffer()));
+          event.requestedModule = metadata.main_module;
+          event.requestedTagsSha256 = digest(canonical([...metadata.tags].sort()));
         }
         state.events.push(event);
         await save(state);
@@ -303,6 +333,7 @@ export async function withInstallationJournal(
               event.bindingsSha256 = digest(canonical(bindingShape(value.bindings)));
           }
           await save(state);
+          if (signal?.aborted || Date.now() >= deadline) fail("cancelled or deadline expired");
           return content || options.responseMetadata ? result : result.result;
         } catch (error) {
           event.outcome = event.method === "GET" ? "unverified" : "uncertain";
@@ -312,7 +343,7 @@ export async function withInstallationJournal(
         }
       };
       try {
-        const value = await work(api);
+        const value = await work(api, state);
         state.outcome = value?.result === "failed" ? "failed" : "verified";
         await save(state);
         return value;
