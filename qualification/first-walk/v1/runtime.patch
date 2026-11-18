@@ -2929,18 +2929,30 @@ index f141618e96e5d3ebb08ad1e37ddf9a3f3bf450dd..a2f5bf0d3637ee6fdf7a734d17df2877
          const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
          if (body.action === "begin") {
 diff --git a/worker/src/index.ts b/worker/src/index.ts
-index 9979268e57af2a5394b8ff91ca314a395ca04e4d..94b5e915234ea56bdc82725d627e15eafc387db5 100644
+index 9979268e57af2a5394b8ff91ca314a395ca04e4d..4858c1572b704e0cf920a20ced16d806f8bc69e1 100644
 --- a/worker/src/index.ts
 +++ b/worker/src/index.ts
-@@ -9,11 +9,21 @@ import type { Env } from "./types";
+@@ -9,11 +9,33 @@ import type { Env } from "./types";
 
  export { FleetDurableObject, ServeRelayDurableObject };
 
 +// Private qualification only: retain the namespace, never another run's Fleet
 +// state. The protected deployer binds this exact run identity before ingress.
 +export function qualificationFleetName(env: Env): string {
-+  const identity = JSON.parse((env as Env & { QUALIFICATION_TRANSPORT_IDENTITY?: string })
-+    .QUALIFICATION_TRANSPORT_IDENTITY ?? "null");
++  const bindings = env as Env & {
++    QUALIFICATION_TRANSPORT_PROFILE?: string;
++    QUALIFICATION_TRANSPORT_IDENTITY?: string;
++  };
++  // Legacy disposable Workers have one Fleet for their own namespace. Only the
++  // explicit v2 profile carries the identity needed to reuse that namespace.
++  if (
++    bindings.QUALIFICATION_TRANSPORT_PROFILE === undefined &&
++    bindings.QUALIFICATION_TRANSPORT_IDENTITY === undefined
++  )
++    return "default";
++  if (!["stage-v2", "final-v2"].includes(bindings.QUALIFICATION_TRANSPORT_PROFILE ?? ""))
++    throw new Error("qualification Fleet profile missing or invalid");
++  const identity = JSON.parse(bindings.QUALIFICATION_TRANSPORT_IDENTITY ?? "null");
 +  if (!/^image-qualification-[0-9]+-1$/.test(identity?.runId ?? ""))
 +    throw new Error("qualification Fleet identity missing");
 +  return `qualification:${identity.runId}`;
@@ -2955,7 +2967,7 @@ index 9979268e57af2a5394b8ff91ca314a395ca04e4d..94b5e915234ea56bdc82725d627e15ea
          return await upgradeServeRelay(
            fleetRequest,
            await fetchReplayableLeaseCreate(fleetRequest, (replay) =>
-@@ -42,7 +52,7 @@ export default {
+@@ -42,7 +64,7 @@ export default {
      ctx.waitUntil(
        requestWithAdminGrantVersion(request, env)
          .then((authorizedRequest) => {
@@ -6381,23 +6393,66 @@ index 39deae3c299a7c9301ebb7b5f009026cfc3132dd..dfadf92fcf41b31a6f8dc1295c83dc7e
      vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
 diff --git a/worker/test/qualification-fleet-identity.test.ts b/worker/test/qualification-fleet-identity.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..519c768022b06849e2f3b3f71df39923965b9ca8
+index 0000000000000000000000000000000000000000..f2abe231982efd0dc57c0b20674a8dfff00aed91
 --- /dev/null
 +++ b/worker/test/qualification-fleet-identity.test.ts
-@@ -0,0 +1,14 @@
-+import { describe, expect, it } from "vitest";
-+import { qualificationFleetName } from "../src/index";
+@@ -0,0 +1,57 @@
++import { describe, expect, it, vi } from "vitest";
++
++import worker, { qualificationFleetName } from "../src/index";
 +import type { Env } from "../src/types";
 +
 +describe("private reusable Fleet namespace", () => {
-+  const env = (runId: unknown) => ({ QUALIFICATION_TRANSPORT_IDENTITY: JSON.stringify({ runId }) }) as unknown as Env;
++  const env = (runId: unknown) =>
++    ({
++      QUALIFICATION_TRANSPORT_PROFILE: "final-v2",
++      QUALIFICATION_TRANSPORT_IDENTITY: JSON.stringify({ runId }),
++    }) as unknown as Env;
 +  it("keeps attempts in distinct durable objects without replacing the namespace", () => {
-+    expect(qualificationFleetName(env("image-qualification-10-1"))).toBe("qualification:image-qualification-10-1");
-+    expect(qualificationFleetName(env("image-qualification-11-1"))).not.toBe(qualificationFleetName(env("image-qualification-10-1")));
++    expect(qualificationFleetName(env("image-qualification-10-1"))).toBe(
++      "qualification:image-qualification-10-1",
++    );
++    expect(qualificationFleetName(env("image-qualification-11-1"))).not.toBe(
++      qualificationFleetName(env("image-qualification-10-1")),
++    );
 +  });
-+  it.each([null, "", "default", "image-qualification-10-2", "foreign"])("fails closed for %s", (value) => {
-+    expect(() => qualificationFleetName(env(value))).toThrow("identity missing");
++  it.each([null, "", "default", "image-qualification-10-2", "foreign"])(
++    "fails closed for v2 identity %s",
++    (value) => {
++      expect(() => qualificationFleetName(env(value))).toThrow("identity missing");
++    },
++  );
++  it("does not downgrade an incomplete or unknown profile to legacy", () => {
++    for (const value of [
++      { QUALIFICATION_TRANSPORT_PROFILE: "final-v2" },
++      { QUALIFICATION_TRANSPORT_PROFILE: "foreign" },
++      { QUALIFICATION_TRANSPORT_IDENTITY: JSON.stringify({ runId: "image-qualification-10-1" }) },
++    ])
++      expect(() => qualificationFleetName(value as unknown as Env)).toThrow();
 +  });
++  for (const profile of ["legacy", "v2"])
++    it(`routes an authenticated ${profile} request through the patched Worker entry point`, async () => {
++      const idFromName = vi.fn((value: string) => value);
++      const fetch = vi.fn(async () => new Response("fleet-reached"));
++      const bindings = {
++        ...(profile === "v2" ? env("image-qualification-10-1") : {}),
++        CRABBOX_SHARED_TOKEN: "synthetic-shared",
++        CRABBOX_DEFAULT_ORG: "example-org",
++        FLEET: { idFromName, get: () => ({ fetch }) },
++      } as unknown as Env;
++      const response = await worker.fetch(
++        new Request("https://qualification.invalid/v1/leases/cbx_000000000001", {
++          headers: { authorization: "Bearer synthetic-shared" },
++        }),
++        bindings,
++      );
++      expect(response.status).toBe(200);
++      expect(await response.text()).toBe("fleet-reached");
++      expect(idFromName).toHaveBeenCalledExactlyOnceWith(
++        profile === "legacy" ? "default" : "qualification:image-qualification-10-1",
++      );
++      expect(fetch).toHaveBeenCalledTimes(1);
++    });
 +});
 diff --git a/worker/test/qualification-transport-probe.test.ts b/worker/test/qualification-transport-probe.test.ts
 new file mode 100644

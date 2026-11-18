@@ -1447,7 +1447,7 @@ function transportV2Enabled() {
   return profile === "candidate-transport-v2";
 }
 
-function candidateBindings(identity, adminToken, sharedToken, config, stage = false) {
+export function candidateBindings(identity, adminToken, sharedToken, config, stage = false) {
   const vars = {
     CRABBOX_DEFAULT_ORG: "image-qualification",
     CRABBOX_GITHUB_ALLOWED_ORG: "example-org.invalid",

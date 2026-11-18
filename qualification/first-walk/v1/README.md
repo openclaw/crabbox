@@ -192,3 +192,7 @@ contradictory existence reads, unresolved registry/probe state and expired
 recovery block mutation. Independently restoring a private journal requires
 trusted original workflow/artifact provenance; a public receipt is not an
 authorization capability. The authority and its namespaces remain untouched.
+
+Legacy disposable transport keeps its original `default` Fleet object. Explicit
+v2 profiles require their immutable identity and select separate Fleet objects
+per run; incomplete or unknown profiles never fall back to legacy routing.
