@@ -36,6 +36,7 @@ function fixture(options = {}) {
     hash = "b".repeat(64),
     start = Date.parse("2026-11-15T00:00:00Z");
   const binding = {
+    ...(options.taggingContract ? { taggingContract: options.taggingContract } : {}),
     runId: "image-qualification-42-1",
     candidateSha: "a".repeat(40),
     candidateWorker: "crabbox-image-qualification-42-1",
@@ -373,7 +374,7 @@ async function local(f, run) {
 }
 
 function cleanupFixture(t, options) {
-  const f = fixture(options),
+  const f = fixture({ ...options, taggingContract: "creation-only/v1" }),
     dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "qualification-cleanup-session-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const start = Date.parse(f.plan.handoffStartedAt),
@@ -406,7 +407,6 @@ function cleanupFixture(t, options) {
     expiresAt: at(150),
     recoveryExpiresAt: at(270),
   };
-  f.plan.binding.taggingContract = "creation-only/v1";
   f.plan.cleanupSession = {
     profile: "same-owner-cleanup-session/v1",
     directory: dir,
