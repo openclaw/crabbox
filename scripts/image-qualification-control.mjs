@@ -1042,7 +1042,14 @@ export class Cloudflare {
     } catch {
       if (boundedBytes)
         throw recordManagementFailure(
-          new Error("Cloudflare management response is not a JSON object"),
+          // Readiness observes only the exact owned deployments HTTP404. Keep
+          // its HTTP classification even when the error page is not JSON;
+          // successful malformed replies and every other status still fail.
+          Object.assign(new Error("Cloudflare management response is not a JSON object"), {
+            status: response.status,
+            pathname,
+            responseInfo,
+          }),
           pathname,
           "invalid-json",
           responseInfo,

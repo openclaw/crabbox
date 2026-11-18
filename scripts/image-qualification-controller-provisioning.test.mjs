@@ -261,6 +261,81 @@ test("HTTP: real five-second observation after deployment404, no duplicate uploa
   assert.equal(failed.response.ray, "0123456789abcdef-DFW");
 });
 
+test("HTTP: HTML deployments404 preserves bounded readiness observation and cleanup", async (t) => {
+  let missing = true;
+  const f = await fixture(t, {
+    reply: async ({ route, res, state }) => {
+      if (missing && state.present && route.endsWith(`/${controllerName}/deployments`)) {
+        missing = false;
+        res.writeHead(404, { "content-type": "text/html", "cf-ray": "0123456789abcdef-DFW" });
+        res.end(marker);
+        return true;
+      }
+    },
+  });
+  const start = Date.now();
+  await f.invoke({ pause: undefined });
+  assert(Date.now() - start >= 4900);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 1);
+  const r = f.receipt();
+  assert.equal(r.settlement, "deleted-and-absent");
+  assert.equal(r.outcome, "verified");
+  const event = r.events.find((e) => e.phase === "management-readiness" && e.outcome === "failed");
+  assert.equal(event.failure.status, 404);
+  assert.equal(event.response.ray, "0123456789abcdef-DFW");
+  assert(!JSON.stringify(r).includes(marker));
+});
+
+for (const status of [200, 403, 503]) {
+  test(`HTTP: HTML deployments${status} fails without readiness retry or body disclosure`, async (t) => {
+    let reads = 0;
+    const f = await fixture(t, {
+      reply: async ({ route, res, state }) => {
+        if (state.present && route.endsWith(`/${controllerName}/deployments`) && reads++ === 0) {
+          res.writeHead(status, { "content-type": "text/html" });
+          res.end(marker);
+          return true;
+        }
+      },
+    });
+    await assert.rejects(f.invoke(), /not a JSON object/);
+    const r = f.receipt();
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+    assert.equal(f.state.rpc, 0);
+    assert.equal(r.outcome, "failed");
+    assert.equal(r.settlement, "deleted-and-absent");
+    assert.equal(r.failure.status, status);
+    assert(!JSON.stringify(r).includes(marker));
+  });
+}
+
+test("HTTP: persistent HTML deployments404 retains original bounds and recovery custody", async (t) => {
+  let reads = 0;
+  const f = await fixture(t, {
+    reply: async ({ route, res, state }) => {
+      if (state.present && route.endsWith(`/${controllerName}/deployments`)) {
+        reads++;
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(marker);
+        return true;
+      }
+    },
+  });
+  await assert.rejects(f.invoke(), /not a JSON object/);
+  assert.equal(reads, 24);
+  assert.equal(f.state.puts, 1);
+  assert.equal(f.state.deletes, 0);
+  assert.equal(f.state.rpc, 0);
+  const r = f.receipt();
+  assert.equal(r.settlement, "unresolved");
+  assert.equal(r.failure.status, 404);
+  assert.equal(r.cleanupFailure.status, 404);
+  assert(r.events.length <= 800);
+  assert(!JSON.stringify(r).includes(marker));
+});
+
 for (const kind of [
   "denied",
   "malformed",
