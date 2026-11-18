@@ -2928,6 +2928,42 @@ index f141618e96e5d3ebb08ad1e37ddf9a3f3bf450dd..a2f5bf0d3637ee6fdf7a734d17df2877
        if (parts.length === 4 && parts[3] === "use" && method === "POST") {
          const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
          if (body.action === "begin") {
+diff --git a/worker/src/index.ts b/worker/src/index.ts
+index 9979268e57af2a5394b8ff91ca314a395ca04e4d..94b5e915234ea56bdc82725d627e15eafc387db5 100644
+--- a/worker/src/index.ts
++++ b/worker/src/index.ts
+@@ -9,11 +9,21 @@ import type { Env } from "./types";
+
+ export { FleetDurableObject, ServeRelayDurableObject };
+
++// Private qualification only: retain the namespace, never another run's Fleet
++// state. The protected deployer binds this exact run identity before ingress.
++export function qualificationFleetName(env: Env): string {
++  const identity = JSON.parse((env as Env & { QUALIFICATION_TRANSPORT_IDENTITY?: string })
++    .QUALIFICATION_TRANSPORT_IDENTITY ?? "null");
++  if (!/^image-qualification-[0-9]+-1$/.test(identity?.runId ?? ""))
++    throw new Error("qualification Fleet identity missing");
++  return `qualification:${identity.runId}`;
++}
++
+ export default {
+   async fetch(request: Request, env: Env): Promise<Response> {
+     return routeCoordinatorRequest(request, env, async (fleetRequest) => {
+       try {
+-        const id = env.FLEET.idFromName("default");
++        const id = env.FLEET.idFromName(qualificationFleetName(env));
+         return await upgradeServeRelay(
+           fleetRequest,
+           await fetchReplayableLeaseCreate(fleetRequest, (replay) =>
+@@ -42,7 +52,7 @@ export default {
+     ctx.waitUntil(
+       requestWithAdminGrantVersion(request, env)
+         .then((authorizedRequest) => {
+-          const id = env.FLEET.idFromName("default");
++          const id = env.FLEET.idFromName(qualificationFleetName(env));
+           return env.FLEET.get(id).fetch(authorizedRequest);
+         })
+         .catch((error: unknown) => {
 diff --git a/worker/src/qualification-transport-probe.ts b/worker/src/qualification-transport-probe.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..33a67193892127940d25df086553af92aab7c92b
@@ -6343,6 +6379,26 @@ index 39deae3c299a7c9301ebb7b5f009026cfc3132dd..dfadf92fcf41b31a6f8dc1295c83dc7e
    it("reclaims expired independent fork claims without advancing last use", async () => {
      vi.useFakeTimers();
      vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+diff --git a/worker/test/qualification-fleet-identity.test.ts b/worker/test/qualification-fleet-identity.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..519c768022b06849e2f3b3f71df39923965b9ca8
+--- /dev/null
++++ b/worker/test/qualification-fleet-identity.test.ts
+@@ -0,0 +1,14 @@
++import { describe, expect, it } from "vitest";
++import { qualificationFleetName } from "../src/index";
++import type { Env } from "../src/types";
++
++describe("private reusable Fleet namespace", () => {
++  const env = (runId: unknown) => ({ QUALIFICATION_TRANSPORT_IDENTITY: JSON.stringify({ runId }) }) as unknown as Env;
++  it("keeps attempts in distinct durable objects without replacing the namespace", () => {
++    expect(qualificationFleetName(env("image-qualification-10-1"))).toBe("qualification:image-qualification-10-1");
++    expect(qualificationFleetName(env("image-qualification-11-1"))).not.toBe(qualificationFleetName(env("image-qualification-10-1")));
++  });
++  it.each([null, "", "default", "image-qualification-10-2", "foreign"])("fails closed for %s", (value) => {
++    expect(() => qualificationFleetName(env(value))).toThrow("identity missing");
++  });
++});
 diff --git a/worker/test/qualification-transport-probe.test.ts b/worker/test/qualification-transport-probe.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..314512345d1e2cf803efd3bc18ea1ed826f0a1c7

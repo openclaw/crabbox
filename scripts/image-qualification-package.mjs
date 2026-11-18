@@ -100,7 +100,10 @@ function toolingPath(file) {
     file.startsWith("qualification/") ||
     /^scripts\/image-qualification[^/]*$/.test(file) ||
     /^scripts\/qualification-first-walk[^/]*$/.test(file) ||
-    file === ".github/workflows/image-qualification.yml"
+    [
+      ".github/workflows/image-qualification.yml",
+      ".github/workflows/image-qualification-reaper.yml",
+    ].includes(file)
   );
 }
 

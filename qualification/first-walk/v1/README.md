@@ -141,3 +141,36 @@ Preserve the original owner and cleanup credentials until complete settlement.
 Historical positive-tag diagnostics remain historical failures; they do not
 satisfy this changed admission contract. Normal production provider tagging is
 unchanged.
+
+
+## Retained installation contract
+
+A separately admitted `operation=install` creates the pinned private candidate,
+authenticated relay/controller and candidate namespace once. The protected
+`CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON` descriptor and matching SHA-256
+bind account, accepted source, names, executable modules and exact namespace.
+They are trusted environment configuration, never candidate or PR inputs.
+
+Experiments retain these resources. Preparation verifies canonical idle state,
+updates only run bindings on existing names, and verifies the resulting physical
+versions before the immutable session activation time. It performs no exposure
+writes. Installation ownership remains stable across authority credential delivery;
+the exact authority version and admission hash are still resealed and verified.
+Executor credential v2 binds installation, relay, repository, workflow, candidate,
+run, handoff and expiry. Candidate Fleet objects are named by the exact run
+identity within the retained namespace, preventing state reuse between attempts.
+
+Protected deployment and arm share a job; the executor remains a separate
+credential-free boundary. The finalizer and independent reaper use the installed
+controller and fixed recovery credentials. They settle run resources and source
+pins, prove zero residue, then retire the registry without deleting installation
+resources. Missing or unverified infrastructure blocks admission and recovery;
+there is no automatic replacement upload. Failed measurement, registry state and
+physical settlement remain distinct outcomes.
+
+Build, review, installation checks and approval preparation precede activation.
+Session delivery may prepare at most one hour ahead, with EC2 access denied until
+the frozen start. Forward and recovery cutoffs are unchanged; missed preparation
+cannot move them. An uncertain operation preserves its original private journal
+and cannot be replayed. Installation migration, repair and final removal require
+separate admission with existing recovery dependencies preserved.

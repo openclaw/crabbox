@@ -54,6 +54,14 @@ import {
   settleCandidateTransport,
 } from "./image-qualification-transport.mjs";
 
+import {
+  readInstallation,
+  verifyInstallation,
+  installedURL,
+  installationModulesMatch,
+  withInstallationJournal,
+} from "./image-qualification-installation.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
 const sha64 = /^[0-9a-f]{64}$/;
@@ -1196,6 +1204,7 @@ export class Cloudflare {
   }
 
   async enableSubdomain(name) {
+    if (this.installation) return installedURL(this, name);
     await this.configureSubdomain(name, true);
     const subdomain = await this.request("/workers/subdomain");
     if (!subdomain?.subdomain)
@@ -1272,8 +1281,9 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
     runId,
     attempt: 1,
     owner: `${runId}@example.invalid`,
-    candidateWorker: `crabbox-${runId}`,
-    relayWorker: relayNameForRun(runId),
+    candidateWorker: readInstallation()?.candidate.name ?? `crabbox-${runId}`,
+    relayWorker: readInstallation()?.relay.name ?? relayNameForRun(runId),
+    ...(readInstallation() ? { installationId: readInstallation().id } : {}),
     candidateArtifactId: identityCheck.artifactId,
     candidateArtifactDigest: identityCheck.artifactDigest,
     manifestSha256,
@@ -1286,6 +1296,7 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
         account: required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
         config,
         isolation: readAdmission().sha256,
+        ...(readInstallation() ? { installation: digest(canonical(readInstallation())) } : {}),
         ...(session ? { awsSessionScopeSha256: session.sha256 } : {}),
       }),
     ),
@@ -1306,11 +1317,12 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   };
 }
 
-function assertHandoffWindow(handoff) {
+function assertHandoffWindow(handoff, { preparing = false } = {}) {
   const now = Date.now();
   if (
     !Number.isFinite(Date.parse(handoff.startsAt)) ||
-    Date.parse(handoff.startsAt) > now ||
+    (!preparing && Date.parse(handoff.startsAt) > now) ||
+    (preparing && Date.parse(handoff.startsAt) - now > 60 * 60_000) ||
     now >= Date.parse(handoff.workExpiresAt)
   ) {
     throw new Error("qualification handoff work window is not active");
@@ -1334,12 +1346,18 @@ function publishHandoff(identityCheck, manifest) {
     manifest.manifestSha256,
     new Date(Date.now()).toISOString(),
   );
-  assertHandoffWindow(handoff);
+  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
   const handoffSha256 = digest(canonical(handoff));
   const executorIdentity = executorCredentialIdentity({
     ...process.env,
     QUALIFICATION_HANDOFF_SHA256: handoffSha256,
     QUALIFICATION_EXPIRES_AT: handoff.expiresAt,
+    ...(readInstallation()
+      ? {
+          QUALIFICATION_INSTALLATION_ID: readInstallation().id,
+          QUALIFICATION_RELAY_WORKER: handoff.relayWorker,
+        }
+      : {}),
   });
   const directory = path.resolve(required("QUALIFICATION_HANDOFF_DIR"));
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -1377,7 +1395,7 @@ function publishHandoff(identityCheck, manifest) {
       process.env.GITHUB_STEP_SUMMARY,
       `## Qualification handoff\n\nRun: \`${handoff.runId}\`\n\n` +
         `Work cutoff: ${handoff.workExpiresAt}; absolute expiry: ${handoff.expiresAt}.\n\n` +
-        "Preparation, credential delivery, approvals and deployment consume this window. " +
+        "Finish installation and credential preparation before the fixed activation time. " +
         "Approve deployment only after the exact binding and cleanup custody are verified. " +
         "Expired preparation requires a newly authorized run; it cannot be extended.\n\n" +
         (projection ? `\`\`\`json\n${JSON.stringify(projection, null, 2)}\n\`\`\`\n` : ""),
@@ -1418,7 +1436,7 @@ async function verifyHandoff(identityCheck, manifestSha256) {
   ) {
     throw new Error("qualification handoff artifact changed");
   }
-  assertHandoffWindow(handoff);
+  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
   return handoff;
 }
 
@@ -1652,8 +1670,8 @@ export function verifyAttestationIdentity(attestation, expected, { finalized } =
 
 async function verifyExecutionDeployment(cf, expected) {
   if (
-    expected.candidateWorker !== `crabbox-${expected.runId}` ||
-    expected.relayWorker !== relayNameForRun(expected.runId)
+    expected.candidateWorker !== (cf.installation?.candidate.name ?? `crabbox-${expected.runId}`) ||
+    expected.relayWorker !== (cf.installation?.relay.name ?? relayNameForRun(expected.runId))
   ) {
     throw new Error("relay Worker does not match the registered qualification run");
   }
@@ -1803,26 +1821,39 @@ export async function controllerCall(cf, url, token, action, value = {}, authori
     deadline: cf.controllerDeadline,
     signal,
   });
-  if (action === "discover") discoveredRun(result);
+  if (action === "discover") discoveredRun(result, cf.installation);
   else if (Object.keys(result).join(",") !== "probe")
     throw new Error("invalid transport discovery");
   return result;
 }
 
-async function cloudflareFromEnv() {
+async function cloudflareFromEnv({ verify = true } = {}) {
   const admission = readAdmission();
   const cf = new Cloudflare(
     required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
     required("CLOUDFLARE_API_TOKEN"),
   );
   cf.admission = admission;
-  await verifyAuthority(cf);
+  cf.installation = readInstallation();
+  if (verify) await verifyAuthority(cf);
   return cf;
 }
 
 async function deployController(cf, deploymentHash, token) {
-  await requireAbsent(cf, controllerName);
-  await cf.upload(controllerName, controllerSource, controllerMetadata(deploymentHash, token));
+  if (cf.installation) {
+    await cf.verifyController();
+  } else await requireAbsent(cf, controllerName);
+  cf.controllerVersion = undefined; // New acknowledged run binding, same pinned module.
+  const upload = await cf.upload(
+    controllerName,
+    controllerSource,
+    controllerMetadata(deploymentHash, token),
+  );
+  if (
+    cf.installation &&
+    workerVersion(upload.deployment_id) !== (await cf.latestVersion(controllerName))
+  )
+    throw Error("installed controller upload version mismatch");
   await cf.verifyController();
   return await cf.enableSubdomain(controllerName);
 }
@@ -1869,7 +1900,7 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
 // Only first-upload visibility for this run's relay is reconciled. No writes,
 // credential changes, enrollment, deadline resets or general API retries here.
 function assertRelayReadbackReserve(handoff) {
-  assertHandoffWindow(handoff);
+  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
   const end = Date.parse(handoff.workExpiresAt) - 60_000;
   if (Date.now() >= end) throw new Error("relay readback has no subsequent-gate reserve");
   return end;
@@ -2203,7 +2234,90 @@ export async function enableRelaySubdomain(
   );
 }
 
-async function deploy() {
+// One separately authorized migration; never called by run finalization/reaping.
+async function install({ client: cf }) {
+  if (!cf.installation) throw Error("protected installation descriptor required");
+  const identity = await verifyCandidateIdentity({ artifact: true });
+  const directory = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
+  const manifest = verifyManifest(directory, identity.candidateSha, identity.workflowSha);
+  installationModulesMatch(cf.installation, directory, manifest, controllerSource, relaySource);
+  for (const worker of [cf.installation.candidate.name, cf.installation.relay.name, controllerName])
+    await requireAbsent(cf, worker);
+  const config = qualificationConfig();
+  const candidateWorker = cf.installation.candidate.name;
+  const placeholder = {
+    runId: candidateWorker.slice("crabbox-".length),
+    owner: "installation@example.invalid",
+    candidateSha: identity.candidateSha,
+    candidateWorker,
+    deploymentHash: cf.installation.id,
+    expiresAt: "2000-01-01T00:00:00.000Z",
+    firstWalk: true,
+    taggingContract: qualificationTaggingContract,
+  };
+  const admin = crypto.randomBytes(32).toString("hex"),
+    shared = crypto.randomBytes(32).toString("hex");
+  const bindings = candidateBindings(placeholder, admin, shared, config, true);
+  await preparePrivateCandidate(cf, candidateWorker, bindings);
+  const settings = await verifyOwned(cf, candidateWorker);
+  const namespaceId = settings.bindings.find((b) => b.name === "FLEET")?.namespace_id;
+  bindings.find((b) => b.name === "FLEET").namespace_id = namespaceId;
+  const upload = await cf.upload(
+    candidateWorker,
+    path.join(directory, manifest.mainModule),
+    candidateMetadata(manifest.mainModule, bindings),
+  );
+  if (workerVersion(upload.deployment_id) !== (await cf.latestVersion(candidateWorker)))
+    throw Error("installation candidate upload version mismatch");
+  const relayUpload = await cf.upload(
+    cf.installation.relay.name,
+    relaySource,
+    relayMetadata(
+      candidateWorker,
+      crypto.randomBytes(32).toString("hex"),
+      admin,
+      shared,
+      config,
+      placeholder.owner,
+      placeholder.expiresAt,
+    ),
+  );
+  if (
+    workerVersion(relayUpload.deployment_id) !==
+    (await cf.latestVersion(cf.installation.relay.name))
+  )
+    throw Error("installation relay upload version mismatch");
+  await cf.configureSubdomain(cf.installation.relay.name, true);
+  const controllerUpload = await cf.upload(
+    controllerName,
+    controllerSource,
+    controllerMetadata(cf.installation.id, required("QUALIFICATION_CONTROLLER_TOKEN"), true),
+  );
+  if (workerVersion(controllerUpload.deployment_id) !== (await cf.latestVersion(controllerName)))
+    throw Error("installation controller upload version mismatch");
+  await cf.configureSubdomain(controllerName, true);
+  cf.installation = {
+    ...cf.installation,
+    candidate: { ...cf.installation.candidate, namespaceId },
+  };
+  const versions = await verifyInstallation(cf, { candidateSha: identity.candidateSha });
+  const url = await installedURL(cf, controllerName);
+  if (
+    discoveredRun(
+      await controllerCall(cf, url, required("QUALIFICATION_CONTROLLER_TOKEN"), "discover"),
+    ) !== null
+  )
+    throw Error("installation registry is not idle");
+  writeJSON(path.join(path.resolve(required("QUALIFICATION_PROOF_DIR")), "installation.json"), {
+    installation: cf.installation,
+    sha256: digest(canonical(cf.installation)),
+    versions,
+    manifestSha256: manifest.manifestSha256,
+    idle: true,
+  });
+}
+
+async function deploy({ client } = {}) {
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
   const manifest = verifyManifest(
@@ -2234,10 +2348,19 @@ async function deploy() {
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
-  const { token: executorToken, tokenSha256: executorTokenSha256 } = readExecutorCredential({
-    ...process.env,
-    QUALIFICATION_EXPIRES_AT: expiresAt,
-  });
+  const { token: executorToken, tokenSha256: executorTokenSha256 } = readExecutorCredential(
+    {
+      ...process.env,
+      QUALIFICATION_EXPIRES_AT: expiresAt,
+      ...(readInstallation()
+        ? {
+            QUALIFICATION_INSTALLATION_ID: readInstallation().id,
+            QUALIFICATION_RELAY_WORKER: relayWorker,
+          }
+        : {}),
+    },
+    { preparationStartsAt: readInstallation() ? handoff.startsAt : undefined },
+  );
   executorTokenForRedaction = executorToken;
   const controllerToken = required("QUALIFICATION_CONTROLLER_TOKEN");
   const placeholderIdentity = { ...baseIdentity, deploymentHash: "0".repeat(64) };
@@ -2261,15 +2384,28 @@ async function deploy() {
       file: path.join(artifactDir, entry.path),
       type: entry.path.endsWith(".wasm") ? "application/wasm" : "application/javascript+module",
     }));
-  const cf = await cloudflareFromEnv();
+  const cf = client ?? (await cloudflareFromEnv());
   cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
-  await Promise.all(
-    [candidateWorker, relayWorker, controllerName].map((name) => requireAbsent(cf, name)),
-  );
+  if (cf.installation) {
+    cf.preparationStopsAt = Date.parse(handoff.startsAt);
+    if (Date.now() >= cf.preparationStopsAt)
+      throw Error("installation preparation missed the immutable activation time; do not reset it");
+    installationModulesMatch(cf.installation, artifactDir, manifest, controllerSource, relaySource);
+    await verifyInstallation(cf, { candidateSha: identityCheck.candidateSha });
+    const url = await installedURL(cf, controllerName);
+    await recoverTransportProbe(cf, url, controllerToken);
+    if (discoveredRun(await controllerCall(cf, url, controllerToken, "discover")) !== null)
+      throw Error("installation is active or unknown; recovery required before binding update");
+  } else
+    await Promise.all(
+      [candidateWorker, relayWorker, controllerName].map((name) => requireAbsent(cf, name)),
+    );
   // Only this inert trusted bootstrap can be briefly public on first creation.
   // Candidate bytes are uploaded only after workers.dev is observably disabled.
-  await requireAbsent(cf, candidateWorker);
-  await preparePrivateCandidate(cf, candidateWorker, stagingBindings);
+  if (!cf.installation) {
+    await requireAbsent(cf, candidateWorker);
+    await preparePrivateCandidate(cf, candidateWorker, stagingBindings);
+  }
   const privateSettings = await cf.settings(candidateWorker);
   await ownedNamespaces(cf, candidateWorker, privateSettings.bindings);
   const namespaceId = privateSettings.bindings.find(
@@ -2277,7 +2413,7 @@ async function deploy() {
   )?.namespace_id;
   stagingBindings.find((binding) => binding.name === "FLEET").namespace_id = namespaceId;
   await verifyOwned(cf, candidateWorker);
-  await cf.upload(
+  const stageUpload = await cf.upload(
     candidateWorker,
     mainFile,
     candidateMetadata(manifest.mainModule, stagingBindings),
@@ -2287,6 +2423,8 @@ async function deploy() {
     cf.settings(candidateWorker),
     cf.latestVersion(candidateWorker),
   ]);
+  if (cf.installation && workerVersion(stageUpload.deployment_id) !== stagingVersion)
+    throw Error("installed staging upload version mismatch");
   const stagingShape = {
     bindings: publicBindingShape(stagingSettings.bindings ?? []),
     compatibilityDate: stagingSettings.compatibility_date,
@@ -2363,7 +2501,8 @@ async function deploy() {
     owner,
     expiresAt,
   );
-  await requireAbsent(cf, relayWorker);
+  if (!cf.installation) await requireAbsent(cf, relayWorker);
+  else await verifyOwned(cf, relayWorker);
   // Acknowledgement is required: uncertain PUTs never enter a replay/retry path.
   assertRelayReadbackReserve(handoff);
   const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata, [], {
@@ -2377,13 +2516,9 @@ async function deploy() {
     expectedRelayBindings,
     handoff,
   );
-  const relayURL = await enableRelaySubdomain(
-    cf,
-    relayWorker,
-    relayVersion,
-    expectedRelayBindings,
-    handoff,
-  );
+  const relayURL = cf.installation
+    ? await installedURL(cf, relayWorker)
+    : await enableRelaySubdomain(cf, relayWorker, relayVersion, expectedRelayBindings, handoff);
   const relayBindingDigest = digest(canonical(expectedRelayBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
   await Promise.all([
@@ -2392,6 +2527,11 @@ async function deploy() {
     assertWorkerIsolation(cf, controllerName, 0, true),
   ]);
   await verifyCandidateIdentity({ artifact: true });
+  if (cf.installation) {
+    if (Date.now() > cf.preparationStopsAt)
+      throw Error("installation preparation exceeded activation; finalize original custody");
+    await waitForActivation(handoff.startsAt);
+  }
   assertHandoffWindow(handoff);
   if (transportV2Enabled()) {
     const request = {
@@ -2527,6 +2667,7 @@ async function deploy() {
     bindingDigest,
     relayBindingDigest,
   });
+  if (cf.installation) appendOutput("installation_id", cf.installation.id);
   appendOutput("run_id", runId);
   appendOutput("candidate_worker", candidateWorker);
   appendOutput("relay_worker", relayWorker);
@@ -2547,10 +2688,11 @@ async function deploy() {
   appendOutput("expires_at", expiresAt);
   appendOutput("region", config.region);
   appendOutput("base_ami_id", config.baseAmiId);
+  return { ...protectedIdentity, executionManifestDigest: manifestDigest };
 }
 
-async function arm() {
-  const expected = qualificationExpectedFromEnv();
+async function arm({ client, expected: supplied } = {}) {
+  const expected = supplied ?? qualificationExpectedFromEnv();
   const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const handoff = await verifyHandoff(identityCheck, expected.manifestSha256);
   for (const field of [
@@ -2566,8 +2708,9 @@ async function arm() {
     if (expected[field] !== handoff[field])
       throw new Error("deployment differs from prepared handoff");
   }
-  const cf = await cloudflareFromEnv();
+  const cf = client ?? (await cloudflareFromEnv());
   cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
+  if (cf.installation) await verifyInstallation(cf, { candidateSha: expected.candidateSha });
   await verifyExecutionDeployment(cf, expected);
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
   await cf.verifyController();
@@ -2735,7 +2878,7 @@ async function qualificationRelays(cf) {
   return relays;
 }
 
-function discoveredRun(value) {
+function discoveredRun(value, installation = readInstallation()) {
   const response = objectAt(value, "authority registry discovery");
   if (Object.keys(response).length !== 1 || !Object.hasOwn(response, "run")) {
     throw new Error("authority registry discovery is invalid");
@@ -2745,7 +2888,7 @@ function discoveredRun(value) {
   if (
     !runIdPattern.test(run.runId ?? "") ||
     !workerNamePattern.test(run.candidateWorker ?? "") ||
-    run.candidateWorker !== `crabbox-${run.runId}` ||
+    run.candidateWorker !== (installation?.candidate.name ?? `crabbox-${run.runId}`) ||
     !sha64.test(run.deploymentHash ?? "")
   ) {
     throw new Error("authority registry run identity is invalid");
@@ -3118,6 +3261,8 @@ async function recoverTransportProbe(cf, controllerURL, token) {
   const settings = await verifyOwned(cf, controllerName);
   const owner = transportProfile(settings.bindings ?? [])?.identity.deploymentHash;
   if (owner !== request.identity.deploymentHash) {
+    if (cf.installation)
+      throw Error("installed controller differs from unresolved transport owner");
     // No candidate/registry mutation and no force: replace only our exact trusted
     // caller, then let the existing recovery path settle the canonical owner.
     await cf.verifyController();
@@ -3141,8 +3286,9 @@ async function cleanupRun({
   expected,
   initialQualificationFailure,
   recovery,
+  client,
 } = {}) {
-  const cf = recovery?.callerCF ?? (await cloudflareFromEnv());
+  const cf = recovery?.callerCF ?? client ?? (await cloudflareFromEnv());
   const token = recovery?.token ?? required("QUALIFICATION_CONTROLLER_TOKEN");
   const call = (url, action, value = {}) =>
     controllerCall(cf, url, token, action, value, recovery?.authorityCF ?? cf);
@@ -3162,6 +3308,8 @@ async function cleanupRun({
         await recoverTransportProbe(cf, controllerURL, token);
       discovered = await call(controllerURL, "discover");
     } else {
+      if (cf.installation)
+        throw Error("installed recovery controller missing; do not provision replacement");
       if (recovery) {
         if (!recovery.state.retired)
           throw new Error("original controller unavailable before verified retirement");
@@ -3225,7 +3373,7 @@ async function cleanupRun({
         idleProbe = true;
       }
     }
-    discoveredRun(discovered);
+    discoveredRun(discovered, cf.installation);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -3252,15 +3400,18 @@ async function cleanupRun({
       };
     }
     try {
-      for (const relay of await qualificationRelays(cf)) {
-        await deleteRelay(cf, relay.worker);
-      }
-      for (const candidate of await qualificationCandidates(cf)) {
-        await deleteCandidate(cf, candidate.worker);
-      }
-      if (!idleProbe) {
-        await cf.verifyController();
-        await cf.deleteScript(controllerName);
+      if (cf.installation) await verifyInstallation(cf);
+      else {
+        for (const relay of await qualificationRelays(cf)) {
+          await deleteRelay(cf, relay.worker);
+        }
+        for (const candidate of await qualificationCandidates(cf)) {
+          await deleteCandidate(cf, candidate.worker);
+        }
+        if (!idleProbe) {
+          await cf.verifyController();
+          await cf.deleteScript(controllerName);
+        }
       }
     } catch (error) {
       const message = `idle cleanup: ${error instanceof Error ? error.message : String(error)}`;
@@ -3289,7 +3440,13 @@ async function cleanupRun({
     verifyAttestationIdentity(original, expected);
     if (!original.finalizingAt) throw new Error("recovery owner is not already finalizing");
   }
-  const relayWorker = relayNameForRun(run.runId);
+  const relayWorker = cf.installation?.relay.name ?? relayNameForRun(run.runId);
+  if (cf.installation && run.candidateWorker !== cf.installation.candidate.name)
+    return {
+      result: "failed",
+      runId: run.runId,
+      failure: "registry refers to a different installation; preserve recovery custody",
+    };
   let failure;
   let firstAttestation;
   let qualificationFailure = initialQualificationFailure;
@@ -3323,7 +3480,7 @@ async function cleanupRun({
     // by the relay can then reach neither the signer nor a reopened run.
     await cf.verifyController();
     await call(controllerURL, "begin-finalization", { runId: run.runId });
-    await deleteRelay(cf, relayWorker);
+    if (!cf.installation) await deleteRelay(cf, relayWorker);
     await call(controllerURL, "finalize", { runId: run.runId });
     firstAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
@@ -3342,7 +3499,7 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
-    await deleteCandidate(cf, run.candidateWorker);
+    if (!cf.installation) await deleteCandidate(cf, run.candidateWorker);
     await call(controllerURL, "finalize", { runId: run.runId });
     const finalAttestation = await call(controllerURL, "attest", {
       runId: run.runId,
@@ -3375,7 +3532,8 @@ async function cleanupRun({
     if (after.run !== null) throw new Error("authority registry still has an active run");
     if (recovery) await recovery.checkpoint("retired", finalAttestation);
     await cf.verifyController();
-    await cf.deleteScript(controllerName);
+    if (cf.installation) await verifyInstallation(cf);
+    else await cf.deleteScript(controllerName);
     if (recovery) await recovery.verifyAbsentCallers();
     if (qualificationFailure) {
       return {
@@ -3390,7 +3548,7 @@ async function cleanupRun({
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
     try {
-      await deleteRelay(cf, relayWorker);
+      if (!cf.installation) await deleteRelay(cf, relayWorker);
     } catch (relayError) {
       const relayFailure = relayError instanceof Error ? relayError.message : String(relayError);
       failure = `${failure}; relay cleanup: ${relayFailure}`;
@@ -3759,6 +3917,53 @@ function writeEvidence(result) {
   fs.writeFileSync(path.join(proofDir, "checksums.sha256"), `${checksums}\n`, { mode: 0o600 });
 }
 
+async function waitForActivation(startsAt) {
+  const starts = Date.parse(startsAt);
+  if (!Number.isFinite(starts) || starts - Date.now() > 60 * 60_000)
+    throw Error("activation is outside preparation bound");
+  const cancellation = new AbortController();
+  const cancel = () => cancellation.abort();
+  process.once("SIGINT", cancel);
+  process.once("SIGTERM", cancel);
+  try {
+    while (Date.now() < starts)
+      await delay(Math.min(10_000, starts - Date.now()), undefined, {
+        signal: cancellation.signal,
+      });
+    cancellation.signal.throwIfAborted();
+  } finally {
+    process.removeListener("SIGINT", cancel);
+    process.removeListener("SIGTERM", cancel);
+  }
+}
+
+async function protectedOperation(operation, work) {
+  if (!readInstallation()) return work(undefined);
+  const cf = await cloudflareFromEnv({ verify: false });
+  const stop = new AbortController();
+  const cancel = () => stop.abort();
+  process.once("SIGINT", cancel);
+  process.once("SIGTERM", cancel);
+  try {
+    return await withInstallationJournal(
+      cf,
+      path.join(path.resolve(required("QUALIFICATION_PROOF_DIR")), "installation", operation),
+      operation,
+      async (client) => {
+        await verifyAuthority(client);
+        return work(client);
+      },
+      {
+        signal: stop.signal,
+        deadline: Date.now() + (operation === "prepare-run" ? 75 : 15) * 60_000,
+      },
+    );
+  } finally {
+    process.removeListener("SIGINT", cancel);
+    process.removeListener("SIGTERM", cancel);
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (["binding-probe-plan", "binding-probe-run", "binding-probe-recover"].includes(command)) {
@@ -3850,8 +4055,15 @@ async function main() {
     writeJSON(path.resolve(args[12]), result);
     return;
   }
-  if (command === "deploy") return await deploy();
-  if (command === "arm") return await arm();
+  if (command === "deploy-and-arm") {
+    const expected = await protectedOperation("prepare-run", (client) => deploy({ client }));
+    return await protectedOperation("arm-run", (client) => arm({ client, expected }));
+  }
+  if (command === "install")
+    return await protectedOperation("install", (client) => install({ client }));
+  if (command === "deploy")
+    return await protectedOperation("prepare-run", (client) => deploy({ client }));
+  if (command === "arm") return await protectedOperation("arm-run", (client) => arm({ client }));
   if (command === "finalize") {
     let identityFailure;
     try {
@@ -3866,18 +4078,23 @@ async function main() {
       const message = error instanceof Error ? error.message : String(error);
       identityFailure = identityFailure ? `${identityFailure}; ${message}` : message;
     }
-    const result = await cleanupRun({
-      reaper: true,
-      requireProof: true,
-      expected,
-      initialQualificationFailure: identityFailure,
-    });
+    const result = await protectedOperation("finalize-run", (client) =>
+      cleanupRun({
+        reaper: true,
+        requireProof: true,
+        expected,
+        initialQualificationFailure: identityFailure,
+        client,
+      }),
+    );
     writeEvidence(result);
     if (result.result === "failed") throw new Error(result.failure);
     return;
   }
   if (command === "reap") {
-    const result = await cleanupRun({ reaper: true });
+    const result = await protectedOperation("recover-run", (client) =>
+      cleanupRun({ reaper: true, client }),
+    );
     writeEvidence(result);
     if (result.result === "failed") throw new Error(result.failure);
     return;

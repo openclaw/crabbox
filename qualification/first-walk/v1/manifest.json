@@ -62,6 +62,11 @@
       "afterSha256": "dd17cc08c764db11a524a317df13157fce03c2637d069c1a010f65380ffc77f8"
     },
     {
+      "path": "worker/src/index.ts",
+      "beforeSha256": "c5692102f83b94c03be1171e6085cb58ae24fff0c825f3b489b52ea46e50df52",
+      "afterSha256": "f423646e2930067e984d88339703af3fc95c292a853ace3705a09ef7052d2a32"
+    },
+    {
       "path": "worker/src/qualification-transport-probe.ts",
       "beforeSha256": null,
       "afterSha256": "52db87b04a70e9b2aa67e5b23082ee12c82c6a0132292e224f486a7b91cd2e5a"
@@ -92,6 +97,11 @@
       "afterSha256": "3510be97f55cceab1d1d7dce3e45c44937701f7b5ed45b2aeec0741a41953a19"
     },
     {
+      "path": "worker/test/qualification-fleet-identity.test.ts",
+      "beforeSha256": null,
+      "afterSha256": "51a4625c27accea148900d4123fb1a992cf77b424b2b3263beeced3139067c97"
+    },
+    {
       "path": "worker/test/qualification-transport-probe.test.ts",
       "beforeSha256": null,
       "afterSha256": "a0f5d74ac3059dcedcaf8e019021140946fabd8336c992ecc488cb2fff8a10f8"
@@ -99,10 +109,10 @@
   ],
   "baselineCommit": "592a4982f5e3d376ad9dfda08218d429eb02dd1b",
   "baselineTree": "af7f05e6c4537e9adb4d5aa96d103e034215f340",
-  "overlaySha256": "2fa86c2d1643b79b139888e977dc17457be412050fe1482d97eb4bd00ac230ef",
+  "overlaySha256": "a64dd131aa8a9c38e5893e63bcaa74f907698bb3f23e3a5ec5a9691a15addc8c",
   "preservedCandidate": "7033f4a72d1494ade990e7d7af913c829da5fe18",
   "privateConfigSha256": "ce68fd010139528843b250d9d7acd1c6c55fb8a063c3cefa38c874dd4c1fc2bb",
   "recipeSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4",
-  "workerSourceSha256": "6a517616af32bba51ab4f1ed64dc0c2c2a4bf86045ddfc761c95e3105ebed9b2",
+  "workerSourceSha256": "d43b8341e592181e4d828145ba47131a558dad0cf616f12c003362353d3c9924",
   "authorityConfigSha256": "fdc03224a2c52aa95d1b3cfd2be70d7bd7db08afe9fd5f61ce63c22ec47b990d"
 }

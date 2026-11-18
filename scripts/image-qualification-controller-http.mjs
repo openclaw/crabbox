@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 // Trusted qualification controller transport only. A failed reply never permits
 // replay: the original journal and canonical owner still decide settlement.
 const actions = new Set([
+  "binding-identity",
   "claim",
   "key-authorization",
   "attest",

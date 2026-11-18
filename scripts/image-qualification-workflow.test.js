@@ -151,7 +151,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
 test("candidate downloads extract the artifact at the canonical path", () => {
   const downloadSteps = [
     ...workflow.matchAll(
-      /^      - name: [^\n]+\n        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
+      /^      - name: [^\n]+\n(?:        if: [^\n]+\n)?        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
     ),
   ];
   const candidateDownloads = downloadSteps.filter(([, inputs]) =>
@@ -182,7 +182,7 @@ test("finalization skips protected approval when deployment never started", () =
 
   assert.match(
     finalizeJob,
-    /^    if: \$\{\{ always\(\) && needs\.deploy-enroll\.result != 'skipped' \}\}$/m,
+    /^    if: \$\{\{ always\(\) && inputs\.operation != 'install' && needs\.deploy-enroll\.result != 'skipped' \}\}$/m,
   );
   // Failed uploads can leave no outputs at all. The admitted policy remains
   // available to recovery without manufacturing a deployed run identity.
@@ -339,6 +339,7 @@ test("protected build prep binds source, rejects substitution, and seals exact b
         "image-qualification-binding-probe.mjs",
         "image-qualification-controller-http.mjs",
         "image-qualification-isolation.mjs",
+        "image-qualification-installation.mjs",
         "image-qualification-transport.mjs",
         "image-qualification-journal.mjs",
         "image-qualification-executor-token.mjs",
@@ -1488,4 +1489,15 @@ fi
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("installation is separate from experiments and recovery never requires executor credentials", () => {
+  const deploy = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  assert.match(deploy, /Download immutable preparation\n        if: inputs.operation != 'install'/);
+  assert.match(deploy, /node scripts\/image-qualification-control.mjs install/);
+  assert.match(deploy, /node scripts\/image-qualification-control.mjs deploy-and-arm/);
+  assert.match(workflow, /needs.deploy-enroll.outputs.armed_at != ''/);
+  const finalize = workflow.slice(workflow.indexOf("  finalize:"));
+  assert.ok(!finalize.includes("CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL"));
+  assert.match(finalize, /QUALIFICATION_INSTALLATION_SHA256:/);
 });

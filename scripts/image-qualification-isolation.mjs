@@ -237,7 +237,9 @@ export function ownershipTags(cf, worker, bindings) {
   const profile = transportProfile(bindings);
   return [
     ...(profile ? [`qualification-transport-v2:${profile.profile}`] : []),
-    `qualification-isolation-v1:${cf.admission.sha256}`,
+    ...(cf.installation
+      ? [`qualification-installation-v1:${cf.installation.id}`]
+      : [`qualification-isolation-v1:${cf.admission.sha256}`]),
     `qualification-worker:${worker}`,
     `qualification-bindings:${digest(
       canonical(
@@ -275,6 +277,7 @@ export function assertOwnedSettings(cf, worker, settings) {
       fail("controller authority redirect");
   } else {
     const candidate = /^crabbox-(image-qualification-[0-9]+-[0-9]+)$/.exec(worker);
+    const installed = cf.installation && worker === cf.installation.candidate.name;
     const relay = /^crabbox-image-qualification-relay-([0-9]+-[0-9]+)$/.exec(worker);
     if (!candidate && !relay) fail("unexpected Worker name");
     const services = bindings.filter((b) => b.type === "service");
@@ -290,11 +293,18 @@ export function assertOwnedSettings(cf, worker, settings) {
         : candidate
           ? service.name !== "CRABBOX_AWS_QUALIFICATION_TRANSPORT" ||
             service.service !== authorityName ||
-            (profile?.identity ?? service.props)?.runId !== candidate[1] ||
+            (installed
+              ? !/^image-qualification-[0-9]+-1$/.test(
+                  (profile?.identity ?? service.props)?.runId ?? "",
+                )
+              : (profile?.identity ?? service.props)?.runId !== candidate[1]) ||
             (profile?.identity ?? service.props)?.candidateWorker !== worker ||
             !/^[0-9a-f]{64}$/.test((profile?.identity ?? service.props)?.deploymentHash ?? "")
           : service.name !== "CANDIDATE" ||
-            service.service !== `crabbox-image-qualification-${relay[1]}`) ||
+            service.service !==
+              (cf.installation && worker === cf.installation.relay.name
+                ? cf.installation.candidate.name
+                : `crabbox-image-qualification-${relay[1]}`)) ||
       bindings.some(
         (b) =>
           ![

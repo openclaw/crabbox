@@ -3,6 +3,11 @@ name: Image qualification
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Reuse an admitted installation, or perform a separately authorized one-time installation
+        type: choice
+        default: experiment
+        options: [experiment, install]
       pull_request:
         description: Mint/retained only, open same-repository pull request number; leave blank for first-walk
         required: false
@@ -200,6 +205,7 @@ jobs:
           retention-days: 1
 
   admit:
+    if: inputs.operation != 'install'
     name: Prepare protected qualification handoff
     needs: [authorize, build-candidate]
     runs-on: ubuntu-latest
@@ -236,6 +242,8 @@ jobs:
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
           QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
           QUALIFICATION_AWS_SESSION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_SESSION_JSON }}
+          QUALIFICATION_INSTALLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON }}
+          QUALIFICATION_INSTALLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_SHA256 }}
           QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
           QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -260,12 +268,15 @@ jobs:
           retention-days: 1
 
   deploy-enroll:
-    name: Deploy after exact IAM binding and credential custody
+    if: ${{ always() && needs.authorize.result == 'success' && needs.build-candidate.result == 'success' && (inputs.operation == 'install' || needs.admit.result == 'success') }}
+    name: Prepare pinned installation bindings and arm
     needs: [authorize, build-candidate, admit]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 75
     environment: image-qualification
     outputs:
+      installation_id: ${{ steps.deploy.outputs.installation_id }}
+      armed_at: ${{ steps.deploy.outputs.armed_at }}
       run_id: ${{ steps.deploy.outputs.run_id }}
       candidate_sha: ${{ steps.deploy.outputs.candidate_sha }}
       candidate_worker: ${{ steps.deploy.outputs.candidate_worker }}
@@ -304,6 +315,7 @@ jobs:
           path: ${{ runner.temp }}/image-qualification-candidate
           merge-multiple: true
       - name: Download immutable preparation
+        if: inputs.operation != 'install'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.admit.outputs.handoff_artifact_id }}
@@ -315,6 +327,8 @@ jobs:
           QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
           GH_TOKEN: ${{ github.token }}
           QUALIFICATION_AWS_SESSION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_SESSION_JSON }}
+          QUALIFICATION_INSTALLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON }}
+          QUALIFICATION_INSTALLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_SHA256 }}
           QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
           QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -338,7 +352,14 @@ jobs:
           QUALIFICATION_ROOT_GB: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ROOT_GB }}
           QUALIFICATION_ARTIFACT_DIR: ${{ runner.temp }}/image-qualification-candidate
           QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-deploy-proof
-        run: node scripts/image-qualification-control.mjs deploy
+        run: |
+          if [[ "${{ inputs.operation }}" == install ]]; then
+            node scripts/image-qualification-control.mjs install
+          elif [[ -n "$QUALIFICATION_INSTALLATION_JSON" ]]; then
+            node scripts/image-qualification-control.mjs deploy-and-arm
+          else
+            node scripts/image-qualification-control.mjs deploy
+          fi
       - name: Upload deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -349,6 +370,7 @@ jobs:
           retention-days: 30
 
   arm:
+    if: inputs.operation != 'install' && needs.deploy-enroll.outputs.armed_at == ''
     name: Protected final deployment admission
     needs: [authorize, build-candidate, admit, deploy-enroll]
     runs-on: ubuntu-latest
@@ -376,6 +398,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           QUALIFICATION_AWS_SESSION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_SESSION_JSON }}
+          QUALIFICATION_INSTALLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON }}
+          QUALIFICATION_INSTALLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_SHA256 }}
           QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
           QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -424,7 +448,7 @@ jobs:
           retention-days: 30
 
   execute:
-    if: inputs.mode != 'key-authorization'
+    if: ${{ always() && inputs.operation != 'install' && inputs.mode != 'key-authorization' && needs.deploy-enroll.result == 'success' && (needs.arm.result == 'success' || needs.deploy-enroll.outputs.armed_at != '') }}
     name: Execute candidate without cloud credentials
     needs: [authorize, build-candidate, admit, deploy-enroll, arm]
     # This separate protected environment contains only the exact-run credential.
@@ -454,6 +478,8 @@ jobs:
           merge-multiple: true
       - name: Run publisher rollback qualification
         env:
+          QUALIFICATION_INSTALLATION_ID: ${{ needs.deploy-enroll.outputs.installation_id }}
+          QUALIFICATION_RELAY_WORKER: ${{ needs.deploy-enroll.outputs.installation_id && needs.deploy-enroll.outputs.relay_worker || '' }}
           QUALIFICATION_RELAY_URL: ${{ needs.deploy-enroll.outputs.relay_url }}
           QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
           QUALIFICATION_EXECUTOR_TOKEN_SHA256: ${{ needs.deploy-enroll.outputs.executor_token_sha256 }}
@@ -480,7 +506,7 @@ jobs:
 
   finalize:
     name: Protected finalization and zero-residue proof
-    if: ${{ always() && needs.deploy-enroll.result != 'skipped' }}
+    if: ${{ always() && inputs.operation != 'install' && needs.deploy-enroll.result != 'skipped' }}
     needs: [authorize, deploy-enroll, arm, execute]
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.mode == 'retained' && 8 || 20 }}
@@ -505,6 +531,8 @@ jobs:
       - name: Revalidate identity and finalize idempotently
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_INSTALLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON }}
+          QUALIFICATION_INSTALLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_SHA256 }}
           QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
           QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
