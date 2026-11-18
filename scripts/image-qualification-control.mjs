@@ -2520,7 +2520,8 @@ async function deploy({ client } = {}) {
   const cf = client ?? (await cloudflareFromEnv());
   cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   if (cf.installation) {
-    cf.preparationStopsAt = Date.parse(handoff.workExpiresAt) - 100 * 60_000;
+    cf.preparationStopsAt =
+      Date.parse(handoff.workExpiresAt) - (config.firstWalk ? 100 * 60_000 : 0);
     if (Date.now() >= cf.preparationStopsAt)
       throw Error("installation binding preparation lacks the existing executor reserve");
     installationModulesMatch(cf.installation, artifactDir, manifest, controllerSource, relaySource);

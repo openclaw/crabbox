@@ -1582,8 +1582,8 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       observedAt: new Date(now - 120_000).toISOString(),
     };
   }
-  function reusable(t, setupFault = {}, profile = "candidate-transport-v2") {
-    const f = fixture(t, "first-walk");
+  function reusable(t, setupFault = {}, profile = "candidate-transport-v2", mode = "first-walk") {
+    const f = fixture(t, mode);
     if (profile === null) delete f.env.QUALIFICATION_TRANSPORT_PROFILE;
     else f.env.QUALIFICATION_TRANSPORT_PROFILE = profile;
     const installation = {
@@ -1650,6 +1650,43 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     f.update({ events: [], candidateUploads: 0, activateAt: start });
     return f;
   }
+  for (const mode of ["retained", "mint"])
+    for (const expired of [false, true])
+      test(`HTTP ${mode} retained bindings preserve the existing work cutoff (expired=${expired})`, (t) => {
+        const f = reusable(t, {}, "candidate-transport-v2", mode);
+        assert.equal(f.invoke("admit").status, 0);
+        const handoff = f.prepared();
+        const original = JSON.stringify(handoff);
+        if (expired) f.update({ now: Date.parse(handoff.workExpiresAt), events: [] });
+        const result = f.invoke("deploy-and-arm");
+        assert.equal(result.status, expired ? 1 : 0, result.stderr);
+        assert.equal(
+          JSON.stringify(f.prepared()),
+          original,
+          "preparation never resets the work cutoff",
+        );
+        if (expired) {
+          assert.match(result.stderr, /work window is not active/);
+          assert.ok(
+            !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+          );
+        } else {
+          assert.ok(f.outputs.armed_at);
+          assert.equal(f.invoke("reap").status, 0);
+        }
+      });
+  for (const mode of ["first-walk", "key-authorization"])
+    test(`HTTP ${mode} retained preparation preserves the hundred-minute executor reserve`, (t) => {
+      const f = reusable(t, {}, "candidate-transport-v2", mode);
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ now: Date.parse(f.prepared().workExpiresAt) - 99 * 60_000, events: [] });
+      const result = f.invoke("deploy-and-arm");
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /existing executor reserve/);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
   for (const profile of [null, "", "unknown"])
     test(`HTTP retained installation rejects ${String(profile)} transport before mutation`, (t) => {
       const f = reusable(t, {}, profile);
