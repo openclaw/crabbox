@@ -1604,6 +1604,13 @@ func AWSLaunchCandidates(cfg Config) []string {
 	if cfg.ServerTypeExplicit {
 		return []string{cfg.ServerType}
 	}
+	if awsLinuxNestedVirtualization(cfg) {
+		candidates, _ := awsClassCandidatesForConfig(cfg)
+		if !IsCanonicalProviderClass(cfg.Class) {
+			candidates = appendUniqueExactStrings(candidates, awsNestedVirtualizationFallbackInstanceType)
+		}
+		return filterAWSLinuxKVMInstanceTypes(appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, candidates...))
+	}
 	candidates, matched := awsClassCandidatesForConfig(cfg)
 	if !matched && IsCanonicalProviderClass(cfg.Class) {
 		return nil
@@ -1767,13 +1774,19 @@ type awsCapacityRecommendation struct {
 func awsCapacityRecommendationCandidates(cfg Config) []awsCapacityRecommendation {
 	architecture := effectiveArchitectureForConfig(cfg)
 	var out []awsCapacityRecommendation
+	candidatesForClass := func(class string) []string {
+		if awsLinuxNestedVirtualization(cfg) {
+			return AWSNestedVirtualizationInstanceTypeCandidatesForClass(class)
+		}
+		return awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, class)
+	}
 	for _, class := range []string{"beast", "large", "fast", "standard", "small", "tiny"} {
-		candidates := awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, class)
+		candidates := candidatesForClass(class)
 		if len(candidates) > 0 {
 			out = append(out, awsCapacityRecommendation{class, candidates[0]})
 		}
 	}
-	for _, serverType := range awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, "standard") {
+	for _, serverType := range candidatesForClass("standard") {
 		out = append(out, awsCapacityRecommendation{"standard", serverType})
 	}
 	return out
@@ -1816,6 +1829,19 @@ func AWSInstanceTypeVCPUs(serverType string) int {
 	}
 }
 
+// awsNestedVirtualizationFamilies lists the virtual instance families that
+// accept CpuOptions.NestedVirtualization=enabled:
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html
+// Keep in sync with awsNestedVirtualizationFamilies in worker/src/config.ts.
+var awsNestedVirtualizationFamilies = map[string]bool{
+	"c7i": true, "c7i-flex": true, "c8i": true, "c8id": true, "c8i-flex": true,
+	"m7i": true, "m7i-flex": true, "m8i": true, "m8id": true, "m8i-flex": true,
+	"r7i": true, "r7iz": true, "r8i": true, "r8id": true, "r8i-flex": true,
+	"x8i": true, "i7i": true, "i7ie": true,
+}
+
+// awsInstanceTypeSupportsNestedVirtualization is the Windows WSL2 admission
+// list; it predates the wider Linux family list and stays unchanged.
 func awsInstanceTypeSupportsNestedVirtualization(instanceType string) bool {
 	family, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(instanceType)), ".")
 	switch family {
@@ -1826,8 +1852,77 @@ func awsInstanceTypeSupportsNestedVirtualization(instanceType string) bool {
 	}
 }
 
+// awsInstanceTypeSupportsLinuxNestedVirtualization reports whether a virtual
+// instance type accepts CpuOptions.NestedVirtualization. Bare-metal sizes are
+// excluded: they expose hardware virtualization without the CPU option.
+func awsInstanceTypeSupportsLinuxNestedVirtualization(instanceType string) bool {
+	family, size, _ := strings.Cut(strings.ToLower(strings.TrimSpace(instanceType)), ".")
+	return awsNestedVirtualizationFamilies[family] && size != "" && !strings.HasPrefix(size, "metal")
+}
+
+// awsInstanceTypeIsBareMetal reports *.metal* sizes, which expose /dev/kvm to
+// the guest directly.
+func awsInstanceTypeIsBareMetal(instanceType string) bool {
+	_, size, ok := strings.Cut(strings.ToLower(strings.TrimSpace(instanceType)), ".")
+	return ok && strings.HasPrefix(size, "metal")
+}
+
+// AWSInstanceTypeProvidesLinuxKVM reports whether an aws.nestedVirtualization
+// Linux lease can use the instance type: a supported virtual family (with the
+// CPU option) or a bare-metal size.
+func AWSInstanceTypeProvidesLinuxKVM(instanceType string) bool {
+	return awsInstanceTypeSupportsLinuxNestedVirtualization(instanceType) || awsInstanceTypeIsBareMetal(instanceType)
+}
+
+// AWSNestedVirtualizationInstanceTypeCandidatesForClass mirrors the default
+// Linux amd64 class sizes using families that support nested virtualization.
+// Keep in sync with awsNestedVirtualizationInstanceTypeCandidates in
+// worker/src/config.ts.
+func AWSNestedVirtualizationInstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "tiny":
+		return []string{"m8i.large", "m7i.large", "c8i.xlarge", "c7i.xlarge"}
+	case "small":
+		return []string{"c8i.2xlarge", "c7i.2xlarge", "m8i.xlarge", "m7i.xlarge", "c8i.xlarge", "c7i.xlarge"}
+	case "standard":
+		return []string{"c8i.8xlarge", "c7i.8xlarge", "m8i.8xlarge", "m7i.8xlarge", "c8i.4xlarge", "c7i.4xlarge"}
+	case "fast":
+		return []string{"c8i.16xlarge", "c7i.16xlarge", "m8i.16xlarge", "m7i.16xlarge", "c8i.12xlarge", "c7i.12xlarge", "c8i.8xlarge"}
+	case "large":
+		return []string{"c8i.24xlarge", "c7i.24xlarge", "m8i.24xlarge", "m7i.24xlarge", "r8i.24xlarge", "r7i.24xlarge", "c8i.16xlarge", "c7i.16xlarge"}
+	case "beast":
+		return []string{"c8i.48xlarge", "c7i.48xlarge", "m8i.48xlarge", "m7i.48xlarge", "r8i.48xlarge", "r7i.48xlarge", "c8i.32xlarge", "c8i.24xlarge", "c7i.24xlarge"}
+	default:
+		return nil
+	}
+}
+
+// awsNestedVirtualizationFallbackInstanceType is the last-resort candidate for
+// noncanonical class selectors, matching t3.small for ordinary Linux leases.
+const awsNestedVirtualizationFallbackInstanceType = "m7i.large"
+
+// awsLinuxNestedVirtualization reports an aws.nestedVirtualization Linux lease.
+// Windows WSL2 leases always enable nested virtualization separately.
+func awsLinuxNestedVirtualization(cfg Config) bool {
+	return cfg.AWSNestedVirtualization && normalizeTargetOS(cfg.TargetOS) == targetLinux
+}
+
+func filterAWSLinuxKVMInstanceTypes(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if AWSInstanceTypeProvidesLinuxKVM(value) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func applyAWSRunInstanceTargetOptions(input *ec2.RunInstancesInput, cfg Config) {
-	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+	nested := cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2
+	if awsLinuxNestedVirtualization(cfg) && !awsInstanceTypeIsBareMetal(cfg.ServerType) {
+		nested = true
+	}
+	if nested {
 		input.CpuOptions = &types.CpuOptionsRequest{
 			NestedVirtualization: types.NestedVirtualizationSpecificationEnabled,
 		}
@@ -1850,4 +1945,13 @@ func applyAWSGuestExpiryOptions(input *ec2.RunInstancesInput, cfg Config) {
 	}
 	input.InstanceInitiatedShutdownBehavior = types.ShutdownBehaviorTerminate
 	input.MetadataOptions = &types.InstanceMetadataOptionsRequest{HttpEndpoint: types.InstanceMetadataEndpointStateEnabled, HttpTokens: types.HttpTokensStateRequired, InstanceMetadataTags: types.InstanceMetadataTagsStateEnabled}
+}
+
+func awsNestedVirtualizationFamilyList() string {
+	families := make([]string, 0, len(awsNestedVirtualizationFamilies))
+	for family := range awsNestedVirtualizationFamilies {
+		families = append(families, family)
+	}
+	sort.Strings(families)
+	return strings.Join(families, ", ")
 }

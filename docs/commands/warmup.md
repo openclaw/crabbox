@@ -310,6 +310,13 @@ only for the standard On-Demand quota. An explicit `--type` always means the
 exact type: Crabbox reports quota/capacity/policy failures instead of silently
 switching capacity.
 
+`--aws-nested-virtualization` (config `aws.nestedVirtualization`, env
+`CRABBOX_AWS_NESTED_VIRTUALIZATION=1`) launches AWS Linux leases with nested
+virtualization so the guest has `/dev/kvm`. Class selection and fallback stay
+inside the supported Intel families; an exact `--type` must be one of them or a
+`*.metal*` size. See
+[AWS nested virtualization](../providers/aws.md#nested-virtualization-linux-kvm).
+
 ## Networking
 
 `--tailscale` joins newly created managed Linux leases to the configured
@@ -479,6 +486,7 @@ bootstrap, key migration, or failure cleanup.
 --market spot|on-demand            capacity market (AWS)
 --min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
 --min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
+--aws-nested-virtualization        AWS Linux: expose /dev/kvm on a supported Intel family
 --slug <slug>                      request a friendly slug for a new lease
 --lease-id cbx_<12 lowercase hex> fixed lease ID for idempotent automation
 --pond <name>                      tag this lease into a pond

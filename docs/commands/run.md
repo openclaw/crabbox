@@ -1254,6 +1254,7 @@ lease-acting commands):
 --market spot|on-demand
 --min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
 --min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
+--aws-nested-virtualization        AWS Linux: expose /dev/kvm on a supported Intel family
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
 --expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.

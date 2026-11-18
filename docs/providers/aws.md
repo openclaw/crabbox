@@ -259,6 +259,50 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+### Nested virtualization (Linux KVM)
+
+Linux leases can expose `/dev/kvm` for nested guests such as Android emulators,
+Firecracker, or QEMU/KVM test VMs. Enable it per lease with
+`--aws-nested-virtualization`, in config with `aws.nestedVirtualization: true`,
+or with `CRABBOX_AWS_NESTED_VIRTUALIZATION=1`:
+
+```sh
+crabbox warmup --provider aws --class small --aws-nested-virtualization
+CRABBOX_AWS_NESTED_VIRTUALIZATION=1 crabbox warmup --provider aws --type c8i.2xlarge
+```
+
+The option launches with `CpuOptions.NestedVirtualization=enabled`, which AWS
+supports at no extra cost on the
+[Intel families listed in its documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html):
+C7i, C7i-flex, C8i, C8id, C8i-flex, M7i, M7i-flex, M8i, M8id, M8i-flex, R7i,
+R7iz, R8i, R8id, R8i-flex, X8i, I7i, and I7ie. Without it, these families still
+launch with nested virtualization disabled and no `/dev/kvm`.
+
+- Class selection uses only supported families, mirroring the Linux sizes:
+
+  | Class | First candidate | vCPUs |
+  | --- | --- | --- |
+  | `tiny` | `m8i.large` | 2 |
+  | `small` | `c8i.2xlarge` | 8 |
+  | `standard` | `c8i.8xlarge` | 32 |
+  | `fast` | `c8i.16xlarge` | 64 |
+  | `large` | `c8i.24xlarge` | 96 |
+  | `beast` (default) | `c8i.48xlarge` | 192 |
+
+  Capacity, quota, and Spot-to-On-Demand fallback stay inside these
+  candidates (C8i/C7i/M8i/M7i/R8i/R7i); the noncanonical-class fallback is
+  `m7i.large` instead of `t3.small`.
+- An exact `--type` must be a supported family or a bare-metal `*.metal*` size.
+  Bare-metal sizes already expose KVM, so Crabbox launches them without the CPU
+  option. Other types are rejected before leasing.
+- The option requires `provider=aws`, `target=linux`, and `architecture=amd64`.
+  Windows WSL2 always enables nested virtualization and accepts the option as a
+  no-op; native Windows and macOS reject it.
+- Brokered leases send `awsNestedVirtualization: true` to the coordinator, which
+  applies the same validation and candidate selection. The coordinator must
+  include this change; an older coordinator ignores the field and launches
+  without nested virtualization.
+
 Use `--min-vcpus` and `--min-memory-mib` to filter Linux class candidates by an
 explicit workload requirement. Requests without these options keep the existing
 fallback behavior. See [optional resource minimums](../features/capacity-fallback.md#optional-aws-resource-minimums)
@@ -371,6 +415,7 @@ aws:
   subnetId: ""             # pin a subnet (and its VPC)
   instanceProfile: ""      # IAM instance profile name to attach
   rootGB: 0                # automatic: class default, at least the AMI minimum
+  nestedVirtualization: false # Linux: expose /dev/kvm on supported Intel families
   sshCIDRs: []             # allowed SSH source ranges
   macHostId: ""            # pin an EC2 Mac Dedicated Host
 ```
@@ -446,6 +491,7 @@ AWS_REGION
 CRABBOX_AWS_REGION                  # overrides AWS_REGION / aws.region
 CRABBOX_AWS_AMI
 CRABBOX_AWS_STOCK_IMAGE             # aws.stockImage; brokered AWS, admin-only
+CRABBOX_AWS_NESTED_VIRTUALIZATION   # aws.nestedVirtualization; Linux /dev/kvm
 CRABBOX_AWS_SECURITY_GROUP_ID
 CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
@@ -506,7 +552,7 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 
 | Target | Notes |
 | --- | --- |
-| Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
+| Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration; optional `/dev/kvm` with `--aws-nested-virtualization`. |
 | Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, Node/npm baseline, archive sync; explicit `Start-CrabboxDetachedProcess.ps1` launcher for lease-lifetime daemons; optional desktop with `--desktop`. |
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
 | macOS | Non-root SSH commands, portable workspace ownership, and Node/npm baseline. Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |

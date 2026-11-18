@@ -231,7 +231,7 @@ import {
   codeProxyRequestBodyBytes,
   isIsolatedCodeRequest,
 } from "./code-origin";
-import { InvalidAWSImageSourceError } from "./config";
+import { InvalidAWSImageSourceError, InvalidAWSNestedVirtualizationError } from "./config";
 import {
   assertAzureWindowsARM64Image,
   awsPromotedAMIConfigKey,
@@ -4301,6 +4301,12 @@ export class FleetCoordinator {
       }
       if (error instanceof InvalidAWSImageSourceError) {
         return json({ error: "invalid_aws_image_source", message: error.message }, { status: 400 });
+      }
+      if (error instanceof InvalidAWSNestedVirtualizationError) {
+        return json(
+          { error: "invalid_aws_nested_virtualization", message: error.message },
+          { status: 400 },
+        );
       }
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
