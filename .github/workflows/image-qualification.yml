@@ -272,7 +272,7 @@ jobs:
     name: Prepare pinned installation bindings and arm
     needs: [authorize, build-candidate, admit]
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 15
     environment: image-qualification
     outputs:
       installation_id: ${{ steps.deploy.outputs.installation_id }}

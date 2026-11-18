@@ -1317,12 +1317,11 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   };
 }
 
-function assertHandoffWindow(handoff, { preparing = false } = {}) {
+function assertHandoffWindow(handoff) {
   const now = Date.now();
   if (
     !Number.isFinite(Date.parse(handoff.startsAt)) ||
-    (!preparing && Date.parse(handoff.startsAt) > now) ||
-    (preparing && Date.parse(handoff.startsAt) - now > 60 * 60_000) ||
+    Date.parse(handoff.startsAt) > now ||
     now >= Date.parse(handoff.workExpiresAt)
   ) {
     throw new Error("qualification handoff work window is not active");
@@ -1346,7 +1345,7 @@ function publishHandoff(identityCheck, manifest) {
     manifest.manifestSha256,
     new Date(Date.now()).toISOString(),
   );
-  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
+  assertHandoffWindow(handoff);
   const handoffSha256 = digest(canonical(handoff));
   const executorIdentity = executorCredentialIdentity({
     ...process.env,
@@ -1395,8 +1394,8 @@ function publishHandoff(identityCheck, manifest) {
       process.env.GITHUB_STEP_SUMMARY,
       `## Qualification handoff\n\nRun: \`${handoff.runId}\`\n\n` +
         `Work cutoff: ${handoff.workExpiresAt}; absolute expiry: ${handoff.expiresAt}.\n\n` +
-        "Finish installation and credential preparation before the fixed activation time. " +
-        "Approve deployment only after the exact binding and cleanup custody are verified. " +
+        "Finish builds, installation and human preparation before session issuance. " +
+        "Admit execution only after exact credential, binding and cleanup custody checks. " +
         "Expired preparation requires a newly authorized run; it cannot be extended.\n\n" +
         (projection ? `\`\`\`json\n${JSON.stringify(projection, null, 2)}\n\`\`\`\n` : ""),
       { mode: 0o600 },
@@ -1436,7 +1435,7 @@ async function verifyHandoff(identityCheck, manifestSha256) {
   ) {
     throw new Error("qualification handoff artifact changed");
   }
-  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
+  assertHandoffWindow(handoff);
   return handoff;
 }
 
@@ -1900,7 +1899,7 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
 // Only first-upload visibility for this run's relay is reconciled. No writes,
 // credential changes, enrollment, deadline resets or general API retries here.
 function assertRelayReadbackReserve(handoff) {
-  assertHandoffWindow(handoff, { preparing: Boolean(readInstallation()) });
+  assertHandoffWindow(handoff);
   const end = Date.parse(handoff.workExpiresAt) - 60_000;
   if (Date.now() >= end) throw new Error("relay readback has no subsequent-gate reserve");
   return end;
@@ -2343,15 +2342,31 @@ export async function recoverInstallation(cf, state) {
         contentIdentityBytes: 4 * 1024 * 1024,
       },
     );
-    if (
-      module.count !== 1 ||
-      module.module !== last.requestedModule ||
-      module.sha256 !== last.requestedModuleSha256 ||
-      digest(canonical([...settings.tags].sort())) !== last.requestedTagsSha256 ||
-      (last.version && version !== last.version) ||
-      (await cf.latestVersion(worker.name)) !== version
-    )
+    // An uncertain update may have left its exact acknowledged predecessor in
+    // place. Admit either exact intent, never an arbitrary earlier/foreign version.
+    const previous = writes.at(-2);
+    const possible = [
+      last,
+      ...(!last.version && previous?.outcome === "acknowledged" && previous.version
+        ? [previous]
+        : []),
+    ];
+    const matched = possible.find(
+      (intent) =>
+        module.count === 1 &&
+        module.module === intent.requestedModule &&
+        module.sha256 === intent.requestedModuleSha256 &&
+        digest(canonical([...settings.tags].sort())) === intent.requestedTagsSha256 &&
+        (!intent.version || version === intent.version),
+    );
+    if (!matched || (await cf.latestVersion(worker.name)) !== version)
       throw Error("installation original upload identity differs");
+    state.reconciled ??= {};
+    state.reconciled[role] = {
+      version,
+      moduleSha256: module.sha256,
+      upload: matched === last ? "last-intent" : "preceding-acknowledged",
+    };
     const own = await ownedNamespaces(cf, worker.name, settings.bindings);
     if (role === "candidate") {
       if (
@@ -2494,9 +2509,9 @@ async function deploy({ client } = {}) {
   const cf = client ?? (await cloudflareFromEnv());
   cf.controllerDeadline = Date.parse(handoff.workExpiresAt);
   if (cf.installation) {
-    cf.preparationStopsAt = Date.parse(handoff.startsAt);
+    cf.preparationStopsAt = Date.parse(handoff.workExpiresAt) - 100 * 60_000;
     if (Date.now() >= cf.preparationStopsAt)
-      throw Error("installation preparation missed the immutable activation time; do not reset it");
+      throw Error("installation binding preparation lacks the existing executor reserve");
     installationModulesMatch(cf.installation, artifactDir, manifest, controllerSource, relaySource);
     await verifyInstallation(cf, { candidateSha: identityCheck.candidateSha });
     const url = await installedURL(cf, controllerName);
@@ -2636,8 +2651,7 @@ async function deploy({ client } = {}) {
   await verifyCandidateIdentity({ artifact: true });
   if (cf.installation) {
     if (Date.now() > cf.preparationStopsAt)
-      throw Error("installation preparation exceeded activation; finalize original custody");
-    await waitForActivation(handoff.startsAt);
+      throw Error("installation binding preparation exceeded its reserve; finalize custody");
   }
   assertHandoffWindow(handoff);
   if (transportV2Enabled()) {
@@ -4024,26 +4038,6 @@ function writeEvidence(result) {
   fs.writeFileSync(path.join(proofDir, "checksums.sha256"), `${checksums}\n`, { mode: 0o600 });
 }
 
-async function waitForActivation(startsAt) {
-  const starts = Date.parse(startsAt);
-  if (!Number.isFinite(starts) || starts - Date.now() > 60 * 60_000)
-    throw Error("activation is outside preparation bound");
-  const cancellation = new AbortController();
-  const cancel = () => cancellation.abort();
-  process.once("SIGINT", cancel);
-  process.once("SIGTERM", cancel);
-  try {
-    while (Date.now() < starts)
-      await delay(Math.min(10_000, starts - Date.now()), undefined, {
-        signal: cancellation.signal,
-      });
-    cancellation.signal.throwIfAborted();
-  } finally {
-    process.removeListener("SIGINT", cancel);
-    process.removeListener("SIGTERM", cancel);
-  }
-}
-
 async function protectedOperation(operation, work, { recover = false } = {}) {
   if (!readInstallation()) return work(undefined);
   const cf = await cloudflareFromEnv({ verify: false });
@@ -4063,7 +4057,7 @@ async function protectedOperation(operation, work, { recover = false } = {}) {
       {
         signal: stop.signal,
         recover,
-        deadline: Date.now() + (operation === "prepare-run" ? 75 : 15) * 60_000,
+        deadline: Date.now() + 15 * 60_000,
       },
     );
   } finally {

@@ -153,7 +153,7 @@ They are trusted environment configuration, never candidate or PR inputs.
 
 Experiments retain these resources. Preparation verifies canonical idle state,
 updates only run bindings on existing names, and verifies the resulting physical
-versions before the immutable session activation time. It performs no exposure
+versions within the immutable session window and existing executor reserve. It performs no exposure
 writes. Installation ownership remains stable across authority credential delivery;
 the exact authority version and admission hash are still resealed and verified.
 Executor credential v2 binds installation, relay, repository, workflow, candidate,
@@ -168,10 +168,13 @@ resources. Missing or unverified infrastructure blocks admission and recovery;
 there is no automatic replacement upload. Failed measurement, registry state and
 physical settlement remain distinct outcomes.
 
-Build, review, installation checks and approval preparation precede activation.
-Session delivery may prepare at most one hour ahead, with EC2 access denied until
-the frozen start. Forward and recovery cutoffs are unchanged; missed preparation
-cannot move them. An uncertain operation preserves its original private journal
+Build, review, installation checks and human readiness precede session issuance.
+The existing issuer still refuses issuance before the frozen start and completes
+all ten fixed authorization DryRuns before credential delivery. Only irreducible
+credential delivery, exact resealing and per-run binding verification remain in
+the active window. Binding preparation is bounded to fifteen minutes and retains
+the existing hundred-minute executor reserve. Forward and recovery cutoffs are
+unchanged; missed preparation cannot move them. An uncertain operation preserves its original private journal
 and cannot be replayed. Installation migration, repair and final removal require
 separate admission with existing recovery dependencies preserved.
 

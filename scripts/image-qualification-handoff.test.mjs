@@ -225,7 +225,11 @@ async function installAPI(file) {
       const [, name, suffix] = match;
       if (!suffix && method === "PUT") {
         const isCandidate = /^crabbox-image-qualification-[0-9]+-1$/.test(name);
-        if (isCandidate && state.candidateFault === "put-before")
+        if (
+          isCandidate &&
+          (state.candidateFault === "put-before" ||
+            (state.candidateFault === "second-put-before" && state.candidateUploads === 1))
+        )
           throw Error("candidate upload uncertain before write");
         if (state.echoExecutorToken)
           throw new Error(
@@ -291,7 +295,11 @@ async function installAPI(file) {
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
         if (isCandidate) state.candidateUploads = (state.candidateUploads ?? 0) + 1;
-        if (isCandidate && state.candidateFault === "put-lost")
+        if (
+          isCandidate &&
+          (state.candidateFault === "put-lost" ||
+            (state.candidateFault === "second-put-lost" && state.candidateUploads === 2))
+        )
           throw Error("candidate upload uncertain after write");
         if (metadata.main_module === "private-bootstrap.mjs" && state.failPrivateUpload === "after")
           throw new Error("private upload response lost after create");
@@ -1596,7 +1604,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     );
     set(receipt.installation);
     const scope = JSON.parse(f.env.QUALIFICATION_AWS_SESSION_JSON);
-    const start = f.state().now + 5 * 60_000;
+    const start = f.state().now;
     for (const [field, minutes] of [
       ["startsAt", 0],
       ["workExpiresAt", 130],
@@ -1810,7 +1818,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(receipt.measurement, "not-started");
     });
   }
-  for (const fault of ["put-before", "put-lost"]) {
+  for (const fault of ["put-before", "put-lost", "second-put-before", "second-put-lost"]) {
     test(`HTTP install ${fault} reconciles uncertain upload without replay in fresh process`, (t) => {
       const f = reusable(t, { candidateFault: fault });
       f.update({ candidateFault: null, events: [] });
@@ -1881,10 +1889,10 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.equal(Object.keys(f.state().workers).length, 0);
   });
 
-  test("HTTP run binding preparation precedes fixed activation and combined arm preserves exact versions", (t) => {
+  test("HTTP run binding preparation preserves fixed active session and combined arm exact versions", (t) => {
     const f = reusable(t);
     const scope = JSON.parse(f.env.QUALIFICATION_AWS_SESSION_JSON);
-    const start = f.state().now + 30 * 60_000;
+    const start = f.state().now;
     for (const [field, minutes] of [
       ["startsAt", 0],
       ["workExpiresAt", 130],
@@ -1897,7 +1905,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     f.update({ activateAt: start, mutationTimes: [] });
     const result = f.invoke("deploy-and-arm");
     assert.equal(result.status, 0, result.stderr);
-    assert.ok(f.state().mutationTimes.every((at) => at < start));
+    assert.ok(f.state().mutationTimes.every((at) => at >= start));
     assert.ok(Date.parse(f.state().enrolledAt) >= start);
     assert.ok(f.outputs.armed_at);
     assert.equal(f.state().identity.runId, scope.runId);

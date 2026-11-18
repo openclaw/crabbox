@@ -817,9 +817,7 @@ async function replaceIdleSessionOperation(
     )
       fail();
     const activationWait = time(plan.runSession.startsAt) - now();
-    if (activationWait > 0 && !plan.installation)
-      throw new SessionNotActive(Math.ceil(activationWait / 1000));
-    if (activationWait > 60 * 60_000) fail();
+    if (activationWait > 0) throw new SessionNotActive(Math.ceil(activationWait / 1000));
     const pre = await readProof("pre");
     verifyReplacementIdle(plan, pre, plan.isolation, now());
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
@@ -905,14 +903,13 @@ async function replaceIdleSessionOperation(
         `arn:aws:sts::${admission.aws.accountId}:assumed-role/${roleName}/${sessionName}`
     )
       fail();
-    const authorizationPreflight =
-      activationWait > 0
-        ? {
-            profile: "deferred-until-activation/v1",
-            activationPending: true,
-            authorizationProven: false,
-          }
-        : await importKeyPreflight(plan, run, awsEnv(session, admission.aws.region), signal, now);
+    const authorizationPreflight = await importKeyPreflight(
+      plan,
+      run,
+      awsEnv(session, admission.aws.region),
+      signal,
+      now,
+    );
     verifyReplacementIdle(plan, pre, plan.isolation, now());
     custody(plan, await readCustody("pre"), now(), plan.isolation.authority.version, true);
     await fence(plan.isolation);

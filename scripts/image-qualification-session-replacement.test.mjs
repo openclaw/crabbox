@@ -10,6 +10,7 @@ import { idleFixture } from "./fixtures/qualification-idle-controller.mjs";
 import { runSessionTags, runSessionPolicy } from "./image-qualification-run-session.mjs";
 import { fixtureAdmission, version } from "./fixtures/qualification-isolation.mjs";
 import { Cloudflare } from "./image-qualification-control.mjs";
+import { installationId } from "./image-qualification-installation.mjs";
 import {
   authorityName,
   canonical,
@@ -1271,6 +1272,34 @@ test("future session activation leaves issuance unclaimed and the unchanged plan
   assert.equal(canonical(f.plan), frozen);
   assert.equal(f.state.phase, "delivery-confirmed");
   assert.equal(f.model.commands.filter(({ argv }) => argv.includes("assume-role")).length, 1);
+});
+
+test("installed preparation cannot skip authorization preflight by issuing before activation", async (t) => {
+  const f = fixture(t);
+  futureScope(f);
+  const module = { module: "index.js", count: 1, sha256: "a".repeat(64) };
+  const installation = {
+    profile: "qualification-installation/v1",
+    accountId: f.plan.isolation.accountId,
+    candidateSha: f.plan.runSession.candidateSha,
+    candidate: { name: "crabbox-image-qualification-99-1", namespaceId: "e".repeat(32), module },
+    controller: {
+      name: "crabbox-image-qualification-controller",
+      module: { ...module, module: "controller.mjs" },
+    },
+    relay: {
+      name: "crabbox-image-qualification-relay-99-1",
+      module: { ...module, module: "relay.mjs" },
+    },
+  };
+  installation.id = installationId(installation);
+  f.plan.installation = installation;
+  f.reset();
+  await assert.rejects(f.run("deliver"), /not active.*Retry after [0-9]+ seconds/);
+  assert.equal(f.state.phase, "prepared");
+  assert.equal(f.model.calls.length, 0);
+  assert.equal(f.model.commands.length, 0);
+  assert.equal(fs.existsSync(path.join(f.dir, "session-issuance-intent.json")), false);
 });
 
 test("CLI gives secret-safe future-start guidance before any issuance or cloud request", (t) => {
