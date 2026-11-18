@@ -429,6 +429,7 @@ function installAPI(file) {
           }
         return api(metadata);
       }
+      if (suffix === "/deployments" && !state.workers[name]) return api(null, 404);
       if (suffix === "/deployments")
         return api({
           deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],

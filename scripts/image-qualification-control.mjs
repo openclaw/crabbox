@@ -986,11 +986,16 @@ export class Cloudflare {
       const probe = await import("./image-qualification-binding-probe.mjs");
       return await probe.probeContentIdentity(response, contentIdentityBytes);
     }
-    const text = boundedBytes
-      ? await (
-          await import("./image-qualification-binding-probe.mjs")
-        ).readProbeResponse(response, boundedBytes)
-      : await response.text();
+    // Ordinary Worker deletion can acknowledge with an empty HTTP204. It
+    // still requires the subsequent exact absence checks, never an invented body.
+    const text =
+      init.method === "DELETE" && response.status === 204 && response.body === null
+        ? ""
+        : boundedBytes
+          ? await (
+              await import("./image-qualification-binding-probe.mjs")
+            ).readProbeResponse(response, boundedBytes)
+          : await response.text();
     let parsed;
     try {
       parsed = text ? JSON.parse(text) : {};
@@ -1000,12 +1005,15 @@ export class Cloudflare {
     if (!response.ok || parsed.success === false) {
       throw Object.assign(new Error(`Cloudflare API ${pathname} returned ${response.status}`), {
         status: response.status,
+        responseInfo,
+        pathname,
       });
     }
     if (allow404 && (init.method ?? "GET") === "GET" && parsed.result === undefined) {
       throw new Error(`Cloudflare API ${pathname} did not confirm existence or absence`);
     }
-    if (responseMetadata) return { result: parsed.result, response: responseInfo };
+    if (responseMetadata)
+      return { result: envelope ? parsed : parsed.result, response: responseInfo };
     return envelope ? parsed : parsed.result;
   }
 
@@ -1085,20 +1093,15 @@ export class Cloudflare {
     await verifyOwned(this, controllerName);
     if (this.beforeRecoveryCall) await this.beforeRecoveryCall("controller-content");
     const contentSignals = [this.discoverySignal, this.recoverySignal?.()].filter(Boolean);
-    const response = await fetch(`${this.base}/workers/scripts/${controllerName}/content/v2`, {
-      ...(contentSignals.length
-        ? { signal: AbortSignal.any(contentSignals), redirect: "error" }
-        : {}),
-      headers: { authorization: `Bearer ${this.token}` },
-    });
-    if (!response.ok) throw new Error("controller source unavailable");
-    const form = await response.formData();
-    const entries = [...form.entries()];
+    const identity = await this.request(
+      `/workers/scripts/${controllerName}/content/v2`,
+      contentSignals.length ? { signal: AbortSignal.any(contentSignals), redirect: "error" } : {},
+      { contentIdentityBytes: 64 * 1024 },
+    );
     if (
-      entries.length !== 1 ||
-      entries[0][0] !== "controller.mjs" ||
-      digest(Buffer.from(await entries[0][1].arrayBuffer())) !==
-        digest(fs.readFileSync(controllerSource)) ||
+      identity.count !== 1 ||
+      identity.module !== "controller.mjs" ||
+      identity.sha256 !== digest(fs.readFileSync(controllerSource)) ||
       (await this.latestVersion(controllerName)) !== version
     )
       throw new Error("controller source or version changed");
@@ -2690,63 +2693,317 @@ async function discoveryControllerVersion(cf, metadata, expectedVersion) {
   return version;
 }
 
-async function discoverWithOwnedController(
-  cf,
+function safeControllerResponse(response) {
+  return {
+    status: response.status,
+    ...(/^[a-f0-9]{16}-[A-Z]{3}$/.test(response.ray ?? "") ? { ray: response.ray } : {}),
+  };
+}
+
+// The upload API's deployment_id is the serving version identifier, as in the
+// existing relay readback contract. Missing acknowledgement never permits replay.
+async function observeControllerManagement(cf, metadata, expectedVersion, pause) {
+  const until = Math.min(Date.now() + 60_000, cf.controllerObservationDeadline);
+  const originalSignal = cf.discoverySignal;
+  const observation = new AbortController();
+  const timer = setTimeout(() => observation.abort(), Math.max(1, until - Date.now()));
+  cf.discoverySignal = AbortSignal.any([originalSignal, observation.signal]);
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (Date.now() >= until || cf.discoverySignal.aborted)
+        throw new Error("controller management observation cancelled or exhausted");
+      await verifyAuthority(cf);
+      // Validate visible settings even while the deployment view is unavailable.
+      const settings = await cf.request(
+        `/workers/scripts/${controllerName}/settings`,
+        {},
+        { allow404: true },
+      );
+      if (settings !== undefined) {
+        assertOwnedSettings(cf, controllerName, settings);
+        if (
+          canonical(publicBindingShape(settings.bindings ?? [])) !==
+            canonical(publicBindingShape(metadata.bindings)) ||
+          canonical([...(settings.tags ?? [])].sort()) !== canonical([...metadata.tags].sort())
+        )
+          throw new Error("controller upload settings drifted");
+        await ownedNamespaces(cf, controllerName, settings.bindings);
+      }
+      // ONLY this owned first-upload deployment view's HTTP404 is observable again.
+      // Malformed/empty/split/foreign deployments, denial and other endpoints fail.
+      try {
+        const version = await discoveryControllerVersion(cf, metadata, expectedVersion);
+        await verifyAuthority(cf);
+        cf.discoverySignal.throwIfAborted();
+        if (Date.now() >= until) throw new Error("controller management observation exhausted");
+        return version;
+      } catch (error) {
+        if (
+          error.status !== 404 ||
+          error.pathname !== `/workers/scripts/${controllerName}/deployments`
+        )
+          throw error;
+        if (attempt === 11) throw error;
+        await pause(Math.min(5_000, Math.max(1, until - Date.now())), undefined, {
+          signal: cf.discoverySignal,
+        });
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    cf.discoverySignal = originalSignal;
+  }
+}
+
+export async function discoverWithOwnedController(
+  originalCF,
   deploymentHash,
   token,
-  { idleOnly = false, probeOnly = false, v2 = transportV2Enabled() } = {},
+  { idleOnly = false, probeOnly = false, v2 = transportV2Enabled(), signal, pause = delay } = {},
 ) {
   const metadata = {
     ...controllerMetadata(deploymentHash, token, v2),
-    tags: ownershipTags(cf, controllerName, controllerMetadata(deploymentHash, token, v2).bindings),
+    tags: ownershipTags(
+      originalCF,
+      controllerName,
+      controllerMetadata(deploymentHash, token, v2).bindings,
+    ),
   };
-  await requireControllerAbsent(cf);
-  let version;
-  let failure;
-  let controllerURL;
-  let discovered;
-  let retainForFinalization = false;
-  // Arm cleanup before upload: an API response can be lost after deployment.
-  try {
-    await cf.upload(controllerName, controllerSource, metadata);
-    version = await discoveryControllerVersion(cf, metadata);
-    controllerURL = await cf.enableSubdomain(controllerName);
-    await discoveryControllerVersion(cf, metadata, version);
-    if (probeOnly) {
-      discovered = await controllerCall(cf, controllerURL, token, "transport-discover");
-      if (!discovered || Object.keys(discovered).join(",") !== "probe")
-        throw new Error("invalid probe discovery");
-    } else {
-      if (v2 && !idleOnly) await recoverTransportProbe(cf, controllerURL, token);
-      discovered = await controllerCall(cf, controllerURL, token, "discover");
-    }
-    const run = probeOnly ? null : discoveredRun(discovered);
-    if (idleOnly && run !== null) {
-      throw new Error("idle discovery found an active authority registry run");
-    }
-    retainForFinalization = !idleOnly && !probeOnly;
-  } catch (error) {
-    failure = error instanceof Error ? error.message : String(error);
-  } finally {
-    if (!retainForFinalization) {
-      try {
-        const settings = await cf.request(
-          `/workers/scripts/${controllerName}/settings`,
-          {},
-          { allow404: true },
+  const identity = digest(
+    canonical({
+      authority: originalCF.admission.authority,
+      metadata: {
+        ...metadata,
+        bindings: publicBindingShape(metadata.bindings),
+      },
+    }),
+  );
+  const directory = path.join(
+    path.resolve(required("QUALIFICATION_PROOF_DIR")),
+    `controller-${identity}`,
+  );
+  const started = Date.now();
+  const cycleEnd = Math.min(started + 180_000, originalCF.controllerDeadline ?? Infinity);
+  const forwardEnd = Math.min(started + 120_000, cycleEnd - 60_000);
+  const receipt = { version: 1, identity, stage: "new", settlement: "not-needed", events: [] };
+  return await withQualificationJournal(
+    directory,
+    {
+      stateName: "provisioning.json",
+      lockName: "provisioning.lock",
+      create: true,
+      initial: () => receipt,
+    },
+    async (retained, save) => {
+      if (canonical(retained) !== canonical(receipt))
+        throw new Error(
+          "controller provisioning receipt exists; use recovery, never replay upload",
         );
-        if (settings !== undefined) {
-          await discoveryControllerVersion(cf, metadata, version);
-          await cf.deleteScript(controllerName);
+      const forward = new AbortController(),
+        cleanup = new AbortController();
+      const cancel = () => forward.abort();
+      const timer = setTimeout(cancel, Math.max(1, forwardEnd - Date.now()));
+      const cleanupTimer = setTimeout(() => cleanup.abort(), Math.max(1, cycleEnd - Date.now()));
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+      const cf = Object.create(originalCF);
+      cf.discoverySignal = AbortSignal.any([
+        forward.signal,
+        ...(signal ? [signal] : []),
+        ...(originalCF.discoverySignal ? [originalCF.discoverySignal] : []),
+      ]);
+      cf.controllerDeadline = forwardEnd;
+      cf.controllerObservationDeadline = forwardEnd;
+      // Canonical discovery temporarily installs its own observation signal.
+      // Keep provisioning cancellation in that signal and in runtime requests.
+      cf.recoverySignal = (action) =>
+        AbortSignal.any([
+          cf.discoverySignal,
+          ...(originalCF.recoverySignal ? [originalCF.recoverySignal(action)] : []),
+        ]);
+      let cleaning = false;
+      const request = originalCF.request;
+      cf.request = async (pathname, init = {}, options = {}) => {
+        const active = cf.discoverySignal;
+        if (
+          active.aborted ||
+          Date.now() >= (cleaning ? cycleEnd : forwardEnd) ||
+          receipt.events.length >= (cleaning ? 800 : 600)
+        )
+          throw new Error("controller provisioning request cancelled or bound exhausted");
+        const own = `/workers/scripts/${controllerName}`;
+        const event = {
+          phase: receipt.stage,
+          method: init.method ?? "GET",
+          endpoint: pathname.startsWith(own)
+            ? pathname.slice(own.length) || "upload"
+            : "isolation-fence",
+          elapsedMs: Date.now() - started,
+          outcome: "unconfirmed",
+        };
+        receipt.events.push(event);
+        await save(receipt);
+        try {
+          const content = options.contentIdentityBytes || options.probeContentIdentity;
+          const result = await request.call(
+            cf,
+            pathname,
+            {
+              ...init,
+              redirect: "error",
+              signal: AbortSignal.any([active, ...(init.signal ? [init.signal] : [])]),
+            },
+            {
+              ...options,
+              boundedBytes: 64 * 1024,
+              ...(!content ? { responseMetadata: true } : {}),
+            },
+          );
+          event.outcome = "acknowledged";
+          if (!content) event.response = safeControllerResponse(result.response);
+          else event.contentSha256 = result.sha256;
+          await save(receipt);
+          return content || options.responseMetadata ? result : result.result;
+        } catch (error) {
+          event.outcome = "failed";
+          if (error.responseInfo) event.response = safeControllerResponse(error.responseInfo);
+          await save(receipt);
+          throw error;
         }
+      };
+      let version,
+        failure,
+        controllerURL,
+        discovered,
+        retainForFinalization = false,
+        uploadAttempted = false;
+      try {
+        receipt.stage = "absence";
+        await save(receipt);
+        await verifyAuthority(cf);
+        await requireAbsent(cf, controllerName);
+        // A previous exact caller may have been retired by transport recovery.
+        // This new upload is bound to its own acknowledgement below.
+        cf.controllerVersion = undefined;
+        receipt.stage = "upload";
+        receipt.settlement = "required";
+        await save(receipt);
+        uploadAttempted = true;
+        const ack = await cf.upload(controllerName, controllerSource, metadata, [], {
+          envelope: true,
+          responseMetadata: true,
+        });
+        receipt.upload = {
+          response: safeControllerResponse(ack.response),
+          acknowledged: ack.result?.success === true,
+        };
+        await save(receipt);
+        if (ack.result?.success !== true)
+          throw new Error("controller upload acknowledgement is unconfirmed");
+        receipt.acknowledgedVersion = workerVersion(ack.result?.result?.deployment_id);
+        await save(receipt);
+        receipt.stage = "management-readiness";
+        await save(receipt);
+        version = await observeControllerManagement(
+          cf,
+          metadata,
+          receipt.acknowledgedVersion,
+          pause,
+        );
+        receipt.verifiedVersion = version;
+        receipt.stage = "exposure";
+        await save(receipt);
+        controllerURL = await cf.enableSubdomain(controllerName);
+        await discoveryControllerVersion(cf, metadata, version);
+        receipt.stage = "discovery";
+        await save(receipt);
+        if (probeOnly) {
+          discovered = await controllerCall(cf, controllerURL, token, "transport-discover");
+          if (!discovered || Object.keys(discovered).join(",") !== "probe")
+            throw new Error("invalid probe discovery");
+        } else {
+          if (v2 && !idleOnly) await recoverTransportProbe(cf, controllerURL, token);
+          discovered = await controllerCall(cf, controllerURL, token, "discover");
+        }
+        const run = probeOnly ? null : discoveredRun(discovered);
+        if (idleOnly && run !== null)
+          throw new Error("idle discovery found an active authority registry run");
+        cf.discoverySignal.throwIfAborted();
+        receipt.discovery = probeOnly ? "probe-observed" : run === null ? "idle" : "active";
+        retainForFinalization = !idleOnly && !probeOnly;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        failure = failure ? `${failure}; probe cleanup: ${message}` : `probe cleanup: ${message}`;
+        failure = error instanceof Error ? error.message : String(error);
+        receipt.failedStage = receipt.stage;
+      } finally {
+        if (uploadAttempted && !retainForFinalization) {
+          cleaning = true;
+          receipt.stage = "cleanup";
+          // User cancellation stops forward work; the original owner retains its
+          // reserved cleanup time. No upload or deletion is ever replayed.
+          cf.discoverySignal = AbortSignal.any([
+            cleanup.signal,
+            ...(originalCF.discoverySignal ? [originalCF.discoverySignal] : []),
+          ]);
+          cf.controllerObservationDeadline = cycleEnd;
+          try {
+            await save(receipt);
+            await verifyAuthority(cf);
+            const settings = await cf.request(
+              `/workers/scripts/${controllerName}/settings`,
+              {},
+              { allow404: true },
+            );
+            if (settings !== undefined || receipt.acknowledgedVersion) {
+              const expected = version ?? receipt.acknowledgedVersion;
+              if (expected) await observeControllerManagement(cf, metadata, expected, pause);
+              else await discoveryControllerVersion(cf, metadata);
+              await cf.deleteScript(controllerName);
+            }
+            await requireAbsent(cf, controllerName);
+            const deployment = await cf.request(
+              `/workers/scripts/${controllerName}/deployments`,
+              {},
+              { allow404: true },
+            );
+            const scripts = await cf.list("/workers/scripts");
+            if (
+              deployment !== undefined ||
+              scripts.some((s) => (s.id ?? s.name) === controllerName)
+            )
+              throw new Error("controller cleanup remains unconfirmed");
+            receipt.settlement =
+              receipt.acknowledgedVersion || settings !== undefined
+                ? "deleted-and-absent"
+                : "absent-without-upload-acknowledgement";
+          } catch (error) {
+            receipt.settlement = "unresolved";
+            const message = error instanceof Error ? error.message : String(error);
+            failure = failure
+              ? `${failure}; probe cleanup: ${message}`
+              : `probe cleanup: ${message}`;
+          }
+        } else if (retainForFinalization) {
+          // Transport recovery may have replaced this caller under its exact
+          // canonical owner; controllerCall reverified that replacement.
+          originalCF.controllerVersion = cf.controllerVersion;
+          receipt.retainedVersion = cf.controllerVersion;
+          receipt.settlement = "retained-for-original-finalizer";
+        }
+        receipt.stage = "complete";
+        receipt.outcome = failure ? "failed" : "verified";
+        try {
+          await save(receipt);
+        } finally {
+          clearTimeout(timer);
+          clearTimeout(cleanupTimer);
+          process.removeListener("SIGINT", cancel);
+          process.removeListener("SIGTERM", cancel);
+        }
       }
-    }
-  }
-  if (failure) throw new Error(failure);
-  return { controllerURL, discovered };
+      if (failure) throw new Error(failure);
+      return { controllerURL, discovered };
+    },
+  );
 }
 
 async function recoverTransportProbe(cf, controllerURL, token) {
