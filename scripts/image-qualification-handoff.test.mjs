@@ -1549,6 +1549,26 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE)
   });
 
 if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  function historicalProbe(now, state) {
+    const expired = new Date(now - 60_000).toISOString();
+    return {
+      protocol: 1,
+      state: state === "malformed" ? "verified" : state,
+      identity: {
+        runId: "image-qualification-1-1",
+        owner: "historical-owner",
+        candidateSha,
+        candidateWorker: "crabbox-image-qualification-1-1",
+        deploymentHash: "d".repeat(64),
+        expiresAt: expired,
+      },
+      challenge: "e".repeat(64),
+      candidateVersion: workerVersion,
+      authorityVersion: workerVersion,
+      expiresAt: expired,
+      observedAt: new Date(now - 120_000).toISOString(),
+    };
+  }
   function reusable(t, setupFault = {}) {
     const f = fixture(t, "first-walk");
     f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
@@ -1616,10 +1636,17 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     f.update({ events: [], candidateUploads: 0, activateAt: start });
     return f;
   }
-  for (const unresolved of [false, true])
-    test(`HTTP installed idle observation and fresh process recovery retain failure=${unresolved}`, (t) => {
+  for (const probeState of ["empty", "pending", "verified", "cancelled", "malformed"])
+    test(`HTTP installed idle observation and fresh process recovery classify ${probeState} custody`, (t) => {
       const f = reusable(t);
-      if (unresolved) f.update({ probe: { state: "pending" } });
+      const unresolved = ["pending", "malformed"].includes(probeState);
+      if (probeState !== "empty")
+        f.update({
+          probe:
+            probeState === "malformed"
+              ? { state: "verified" }
+              : historicalProbe(f.state().now, probeState),
+        });
       const script = path.join(f.directory, "observe-installed.mjs");
       fs.writeFileSync(
         script,
@@ -1843,24 +1870,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   for (const state of ["verified", "cancelled", "pending", "observed", "malformed"]) {
     test(`HTTP installation recovery classifies historical ${state} probe without writes`, (t) => {
       const f = reusable(t);
-      const expired = new Date(f.state().now - 60_000).toISOString();
-      const probe = {
-        protocol: 1,
-        state: state === "malformed" ? "verified" : state,
-        identity: {
-          runId: "image-qualification-1-1",
-          owner: "historical-owner",
-          candidateSha,
-          candidateWorker: "crabbox-image-qualification-1-1",
-          deploymentHash: "d".repeat(64),
-          expiresAt: expired,
-        },
-        challenge: "e".repeat(64),
-        candidateVersion: workerVersion,
-        authorityVersion: workerVersion,
-        expiresAt: expired,
-        observedAt: new Date(f.state().now - 120_000).toISOString(),
-      };
+      const probe = historicalProbe(f.state().now, state);
       if (state === "malformed") delete probe.challenge;
       f.update({ probe, events: [] });
       const result = f.invoke("install-recover", {

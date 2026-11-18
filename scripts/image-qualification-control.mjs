@@ -2302,6 +2302,9 @@ async function install({ client: cf }) {
   };
   const versions = await verifyInstallation(cf, { candidateSha: identity.candidateSha });
   const url = await installedURL(cf, controllerName);
+  assertSettledTransportDiscovery(
+    await controllerCall(cf, url, required("QUALIFICATION_CONTROLLER_TOKEN"), "transport-discover"),
+  );
   if (
     discoveredRun(
       await controllerCall(cf, url, required("QUALIFICATION_CONTROLLER_TOKEN"), "discover"),
@@ -3380,7 +3383,10 @@ async function recoverTransportProbe(cf, controllerURL, token) {
     throw new Error("invalid canonical transport probe");
   // A retained tombstone is historical custody, not this controller's mutation
   // target. It must not block cleanup of a later pre-probe partial deployment.
-  if (["verified", "cancelled"].includes(state)) return;
+  if (["verified", "cancelled"].includes(state)) {
+    assertSettledTransportDiscovery(reply);
+    return;
+  }
   const settings = await verifyOwned(cf, controllerName);
   const owner = transportProfile(settings.bindings ?? [])?.identity.deploymentHash;
   if (owner !== request.identity.deploymentHash) {

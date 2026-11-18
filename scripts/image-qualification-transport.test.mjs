@@ -94,6 +94,10 @@ test("historical terminal discovery validates custody without replay or a live e
     (v) => (v.probe.protocol = 2),
     (v) => delete v.probe.challenge,
     (v) => (v.probe.identity = {}),
+    (v) => (v.probe.identity.extra = true),
+    (v) => (v.probe.identity.firstWalk = false),
+    (v) => (v.probe.identity.firstWalk = true),
+    (v) => (v.probe.identity.retainedImage = {}),
     (v) => (v.probe.candidateVersion = "foreign"),
     (v) => (v.probe.state = "verified"), // Missing observation timestamp.
     (v) => (v.probe.observedAt = v.probe.expiresAt),

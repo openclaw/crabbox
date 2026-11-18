@@ -19,6 +19,7 @@ import {
   recordManagementFailure,
 } from "./image-qualification-binding-probe.mjs";
 import { readPrivateJSON, withQualificationJournal } from "./image-qualification-journal.mjs";
+import { assertSettledTransportDiscovery } from "./image-qualification-transport.mjs";
 
 import {
   validateInstallation,
@@ -691,8 +692,7 @@ async function installedIdleController(cf, plan, state, { mode, save, token, sig
       fail("installed runtime identity differs");
     await persist("identity-verified", { identityDigest: digest(canonical(reply)) });
     const probe = await controllerCall(api, url, token, "transport-discover");
-    if (probe.probe !== null && !["verified", "cancelled"].includes(probe.probe?.state))
-      fail("installation has unresolved transport custody");
+    assertSettledTransportDiscovery(probe);
     const discovered = await controllerCall(api, url, token, "discover");
     if (!equal(discovered, { run: null })) fail("installation registry is active or unknown");
     await verifyInstallation(api);
