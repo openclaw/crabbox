@@ -262,11 +262,19 @@ export function assertOwnedSettings(cf, worker, settings) {
   const rawBindings = settings.bindings;
   const profile = transportProfile(rawBindings);
   const bindings = transportBindingShape(rawBindings);
+  if (cf.installation && !profile) fail("retained installation requires v2 bindings");
   if (worker === controllerName) {
     const authority = bindings.find((b) => b.name === "AUTHORITY");
     if (
-      bindings.length !== (profile ? 4 : 2) ||
+      bindings.length !== (profile ? (cf.installation ? 5 : 4) : 2) ||
       (profile && profile.profile !== "controller-v2") ||
+      (cf.installation &&
+        !bindings.some(
+          (b) =>
+            b.name === "CF_VERSION_METADATA" &&
+            b.type === "version_metadata" &&
+            Object.keys(b).length === 2,
+        )) ||
       !bindings.some((b) => b.name === "CONTROLLER_TOKEN" && b.type === "secret_text") ||
       authority?.type !== "service" ||
       authority.service !== authorityName ||

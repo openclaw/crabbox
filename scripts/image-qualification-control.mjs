@@ -1506,12 +1506,18 @@ function candidateMetadata(mainModule, bindings, createNamespace = false) {
   };
 }
 
-function controllerMetadata(deploymentHash, token, v2 = transportV2Enabled()) {
+export function controllerMetadata(
+  deploymentHash,
+  token,
+  v2 = transportV2Enabled(),
+  retained = false,
+) {
   return {
     main_module: "controller.mjs",
     compatibility_date: "2026-09-03",
     bindings: [
       ...(v2 ? transportMarkers("controller-v2", { deploymentHash }) : []),
+      ...(retained ? [{ name: "CF_VERSION_METADATA", type: "version_metadata" }] : []),
       { name: "CONTROLLER_TOKEN", type: "secret_text", text: token },
       {
         name: "AUTHORITY",
@@ -1847,7 +1853,7 @@ async function deployController(cf, deploymentHash, token) {
   const upload = await cf.upload(
     controllerName,
     controllerSource,
-    controllerMetadata(deploymentHash, token),
+    controllerMetadata(deploymentHash, token, transportV2Enabled(), Boolean(cf.installation)),
   );
   if (
     cf.installation &&
@@ -2291,7 +2297,7 @@ async function install({ client: cf }) {
   const controllerUpload = await cf.upload(
     controllerName,
     controllerSource,
-    controllerMetadata(cf.installation.id, required("QUALIFICATION_CONTROLLER_TOKEN"), true),
+    controllerMetadata(cf.installation.id, required("QUALIFICATION_CONTROLLER_TOKEN"), true, true),
   );
   if (workerVersion(controllerUpload.deployment_id) !== (await cf.latestVersion(controllerName)))
     throw Error("installation controller upload version mismatch");

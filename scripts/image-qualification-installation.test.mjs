@@ -5,8 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { once } from "node:events";
-import { Cloudflare } from "./image-qualification-control.mjs";
-import { canonical, digest } from "./image-qualification-isolation.mjs";
+import { Cloudflare, controllerMetadata } from "./image-qualification-control.mjs";
+import {
+  canonical,
+  digest,
+  assertOwnedSettings,
+  ownershipTags,
+  controllerName,
+} from "./image-qualification-isolation.mjs";
+import controllerWorker from "./image-qualification-controller-worker.mjs";
+import { fixtureAdmission, version } from "./fixtures/qualification-isolation.mjs";
 import {
   installationId,
   readInstallation,
@@ -33,14 +41,78 @@ function descriptor() {
   return record;
 }
 
+test("installed and rebound controller metadata satisfies the real authenticated identity handler and exact ownership", async () => {
+  const cf = { admission: fixtureAdmission().admission, installation: descriptor() };
+  const token = "e".repeat(64),
+    challenge = "f".repeat(64);
+  for (const deploymentHash of [cf.installation.id, "d".repeat(64)]) {
+    const { bindings } = controllerMetadata(deploymentHash, token, true, true);
+    const settings = (value) => ({
+      bindings: value,
+      tags: ownershipTags(cf, controllerName, value),
+    });
+    assert.doesNotThrow(() => assertOwnedSettings(cf, controllerName, settings(bindings)));
+    const env = Object.fromEntries(
+      bindings.map((b) => [b.name, b.type === "version_metadata" ? { id: version } : b.text]),
+    );
+    env.AUTHORITY = {
+      bindingIdentity: async (seen) => ({ challenge: seen, props: { deploymentHash } }),
+    };
+    const invoke = () =>
+      controllerWorker.fetch(
+        new Request("https://controller.invalid/binding-identity", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({ challenge }),
+        }),
+        env,
+      );
+    const response = await invoke();
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      controllerVersion: version,
+      identity: { challenge, props: { deploymentHash } },
+    });
+    for (const value of [undefined, {}, { id: "foreign" }]) {
+      env.CF_VERSION_METADATA = value;
+      assert.equal((await invoke()).status, 409);
+    }
+    for (const bad of [
+      bindings.filter((b) => b.name !== "CF_VERSION_METADATA"),
+      bindings.map((b) =>
+        b.name === "CF_VERSION_METADATA" ? { ...b, type: "plain_text", text: version } : b,
+      ),
+      bindings.map((b) => (b.name === "CF_VERSION_METADATA" ? { ...b, extra: true } : b)),
+      [...bindings, { name: "EXTRA", type: "version_metadata" }],
+    ])
+      assert.throws(() => assertOwnedSettings(cf, controllerName, settings(bad)));
+  }
+  for (const v2 of [false, true]) {
+    const { bindings } = controllerMetadata("d".repeat(64), token, v2);
+    const legacy = { admission: cf.admission };
+    assert.doesNotThrow(() =>
+      assertOwnedSettings(legacy, controllerName, {
+        bindings,
+        tags: ownershipTags(legacy, controllerName, bindings),
+      }),
+    );
+  }
+});
+
 test("protected descriptor fails closed and stable ownership excludes only namespace allocation", () => {
   const record = descriptor();
   const env = (r) => ({
+    QUALIFICATION_TRANSPORT_PROFILE: "candidate-transport-v2",
     CLOUDFLARE_ACCOUNT_ID: record.accountId,
     QUALIFICATION_INSTALLATION_JSON: JSON.stringify(r),
     QUALIFICATION_INSTALLATION_SHA256: digest(canonical(r)),
   });
   assert.deepEqual(readInstallation(env(record)), record);
+  for (const profile of [undefined, "", "legacy", "unknown"])
+    assert.throws(
+      () => readInstallation({ ...env(record), QUALIFICATION_TRANSPORT_PROFILE: profile }),
+      /requires candidate-transport-v2/,
+    );
   for (const change of [
     (r) => (r.id = "d".repeat(64)),
     (r) => (r.candidateSha = ""),

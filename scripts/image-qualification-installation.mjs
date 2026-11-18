@@ -46,6 +46,8 @@ const keys = (v, expected) => equal(Object.keys(v ?? {}).sort(), expected.sort()
 export function readInstallation(env = process.env) {
   const raw = env.QUALIFICATION_INSTALLATION_JSON;
   if (!raw && !env.QUALIFICATION_INSTALLATION_SHA256) return undefined;
+  if (env.QUALIFICATION_TRANSPORT_PROFILE !== "candidate-transport-v2")
+    fail("retained installation requires candidate-transport-v2");
   if (!raw || raw.length > 16_384) fail("protected descriptor missing or oversized");
   const record = JSON.parse(raw);
   if (

@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { installationId } from "./image-qualification-installation.mjs";
 import { serveQualificationFixture } from "./image-qualification-http-fixture.mjs";
+import controllerWorker from "./image-qualification-controller-worker.mjs";
 
 import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
@@ -116,16 +117,28 @@ async function installAPI(file) {
           controller.metadata.bindings.find((b) => b.name === "QUALIFICATION_TRANSPORT_IDENTITY")
             .text,
         );
-        return json({
-          controllerVersion: workerVersion,
-          identity: {
+        const env = Object.fromEntries(
+          controller.metadata.bindings.map((b) => [
+            b.name,
+            b.type === "version_metadata"
+              ? state.omitControllerRuntimeVersion
+                ? undefined
+                : { id: workerVersion }
+              : b.name === "CONTROLLER_TOKEN"
+                ? process.env.QUALIFICATION_CONTROLLER_TOKEN
+                : b.text,
+          ]),
+        );
+        env.AUTHORITY = {
+          bindingIdentity: async (challenge) => ({
             protocol: 1,
             role: "controller",
-            challenge: JSON.parse(init.body).challenge,
+            challenge,
             props: { deploymentHash: identity.deploymentHash },
             authorityVersion: workerVersion,
-          },
-        });
+          }),
+        };
+        return await controllerWorker.fetch(new Request(input, init), env);
       }
       if (route === "/transport-open") {
         state.probe = { protocol: 1, ...JSON.parse(init.body), state: "pending" };
@@ -705,7 +718,7 @@ function fixture(t, mode = "retained") {
         ...(command !== "admit"
           ? {
               CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
-              QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
+              QUALIFICATION_CONTROLLER_TOKEN: "f".repeat(64),
             }
           : {}),
         ...(["deploy", "deploy-and-arm"].includes(command) &&
@@ -1569,9 +1582,10 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       observedAt: new Date(now - 120_000).toISOString(),
     };
   }
-  function reusable(t, setupFault = {}) {
+  function reusable(t, setupFault = {}, profile = "candidate-transport-v2") {
     const f = fixture(t, "first-walk");
-    f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+    if (profile === null) delete f.env.QUALIFICATION_TRANSPORT_PROFILE;
+    else f.env.QUALIFICATION_TRANSPORT_PROFILE = profile;
     const installation = {
       profile: "qualification-installation/v1",
       accountId: "0".repeat(32),
@@ -1614,7 +1628,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     set(installation);
     f.update({ httpInstallation: true, ...setupFault });
     const installed = f.invoke("install");
-    if (Object.keys(setupFault).length) {
+    if (Object.keys(setupFault).length || profile !== "candidate-transport-v2") {
       assert.equal(installed.status, 1, installed.stderr);
       return f;
     }
@@ -1636,11 +1650,43 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     f.update({ events: [], candidateUploads: 0, activateAt: start });
     return f;
   }
-  for (const probeState of ["empty", "pending", "verified", "cancelled", "malformed"])
+  for (const profile of [null, "", "unknown"])
+    test(`HTTP retained installation rejects ${String(profile)} transport before mutation`, (t) => {
+      const f = reusable(t, {}, profile);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
+  for (const profile of [null, "", "unknown"])
+    test(`HTTP retained binding update rejects ${String(profile)} transport before mutation`, (t) => {
+      const f = reusable(t);
+      assert.equal(f.invoke("admit").status, 0);
+      if (profile === null) delete f.env.QUALIFICATION_TRANSPORT_PROFILE;
+      else f.env.QUALIFICATION_TRANSPORT_PROFILE = profile;
+      f.update({ events: [] });
+      const result = f.invoke("deploy");
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /requires candidate-transport-v2/);
+      assert.ok(
+        !f.state().events.some((e) => /^(PUT|PATCH|DELETE|POST) api.cloudflare.com/.test(e)),
+      );
+    });
+  for (const probeState of [
+    "empty",
+    "pending",
+    "verified",
+    "cancelled",
+    "malformed",
+    "missing-controller-version",
+  ])
     test(`HTTP installed idle observation and fresh process recovery classify ${probeState} custody`, (t) => {
       const f = reusable(t);
-      const unresolved = ["pending", "malformed"].includes(probeState);
-      if (probeState !== "empty")
+      const unresolved = ["pending", "malformed", "missing-controller-version"].includes(
+        probeState,
+      );
+      if (probeState === "missing-controller-version")
+        f.update({ omitControllerRuntimeVersion: true });
+      else if (probeState !== "empty")
         f.update({
           probe:
             probeState === "malformed"
@@ -1671,13 +1717,17 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       const target = directory+'/idle-custody.json';
       const recovery = process.env.IDLE_TEST_RECOVER === 'yes';
       const state = recovery ? JSON.parse(fs.readFileSync(target)) : idleInitialState(plan);
-      try { await idleController(cf,plan,state,{mode:recovery?'recover':'run',token:'f'.repeat(64),save:async next=>fs.writeFileSync(target,JSON.stringify(next),{mode:0o600})}); }
+      try { await idleController(cf,plan,state,{mode:recovery?'recover':'run',token:process.env.QUALIFICATION_CONTROLLER_TOKEN,save:async next=>fs.writeFileSync(target,JSON.stringify(next),{mode:0o600})}); }
       catch (error) { console.error(error.message); process.exitCode=1; }
     `,
       );
       const observe = (recover) =>
         spawnSync(process.execPath, ["--import", import.meta.url, script], {
-          env: { ...f.env, IDLE_TEST_RECOVER: recover ? "yes" : "no" },
+          env: {
+            ...f.env,
+            QUALIFICATION_CONTROLLER_TOKEN: "f".repeat(64),
+            IDLE_TEST_RECOVER: recover ? "yes" : "no",
+          },
           encoding: "utf8",
           timeout: 30000,
         });
@@ -1685,7 +1735,7 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(original.status, unresolved ? 1 : 0, original.stderr);
       const saved = () => JSON.parse(fs.readFileSync(path.join(f.directory, "idle-custody.json")));
       assert.equal(saved().settled, !unresolved);
-      f.update({ probe: null, events: [] });
+      f.update({ probe: null, events: [], omitControllerRuntimeVersion: false });
       const recovered = observe(true);
       assert.equal(recovered.status, 0, recovered.stderr);
       assert.equal(saved().installationRetained, true);

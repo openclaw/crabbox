@@ -150,6 +150,10 @@ authenticated relay/controller and candidate namespace once. The protected
 `CRABBOX_IMAGE_QUALIFICATION_INSTALLATION_JSON` descriptor and matching SHA-256
 bind account, accepted source, names, executable modules and exact namespace.
 They are trusted environment configuration, never candidate or PR inputs.
+Retained installation admission requires `candidate-transport-v2`; empty or unset
+transport remains supported only for disposable legacy operation. Installed
+controllers bind version metadata so authenticated identity readback proves the
+executing physical version after installation and subsequent binding updates.
 
 Experiments retain these resources. Preparation verifies canonical idle state,
 updates only run bindings on existing names, and verifies the resulting physical
