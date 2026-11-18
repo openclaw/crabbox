@@ -2798,6 +2798,13 @@ export async function discoverWithOwnedController(
       ]);
       cf.controllerDeadline = forwardEnd;
       cf.controllerObservationDeadline = forwardEnd;
+      // Canonical discovery temporarily installs its own observation signal.
+      // Keep provisioning cancellation in that signal and in runtime requests.
+      cf.recoverySignal = (action) =>
+        AbortSignal.any([
+          cf.discoverySignal,
+          ...(originalCF.recoverySignal ? [originalCF.recoverySignal(action)] : []),
+        ]);
       let cleaning = false;
       const request = originalCF.request;
       cf.request = async (pathname, init = {}, options = {}) => {
@@ -2859,6 +2866,9 @@ export async function discoverWithOwnedController(
         await save(receipt);
         await verifyAuthority(cf);
         await requireAbsent(cf, controllerName);
+        // A previous exact caller may have been retired by transport recovery.
+        // This new upload is bound to its own acknowledgement below.
+        cf.controllerVersion = undefined;
         receipt.stage = "upload";
         receipt.settlement = "required";
         await save(receipt);
@@ -2902,6 +2912,7 @@ export async function discoverWithOwnedController(
         const run = probeOnly ? null : discoveredRun(discovered);
         if (idleOnly && run !== null)
           throw new Error("idle discovery found an active authority registry run");
+        cf.discoverySignal.throwIfAborted();
         receipt.discovery = probeOnly ? "probe-observed" : run === null ? "idle" : "active";
         retainForFinalization = !idleOnly && !probeOnly;
       } catch (error) {
@@ -2956,7 +2967,10 @@ export async function discoverWithOwnedController(
               : `probe cleanup: ${message}`;
           }
         } else if (retainForFinalization) {
-          originalCF.controllerVersion = version;
+          // Transport recovery may have replaced this caller under its exact
+          // canonical owner; controllerCall reverified that replacement.
+          originalCF.controllerVersion = cf.controllerVersion;
+          receipt.retainedVersion = cf.controllerVersion;
           receipt.settlement = "retained-for-original-finalizer";
         }
         receipt.stage = "complete";

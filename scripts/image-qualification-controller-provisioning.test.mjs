@@ -11,7 +11,7 @@ import { fixtureAdmission, version } from "./fixtures/qualification-isolation.mj
 const marker = "synthetic-private-body-and-token",
   immediate = async () => {};
 const foreign = "22222222-2222-4222-8222-222222222222";
-async function fixture(t, { reply, pause = immediate } = {}) {
+async function fixture(t, { reply, pause = immediate, maxUploads = 1 } = {}) {
   const { admission, bindings } = fixtureAdmission();
   const cf = Object.assign(new Cloudflare(admission.accountId, marker), { admission });
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "controller-provisioning-")));
@@ -51,13 +51,14 @@ async function fixture(t, { reply, pause = immediate } = {}) {
       if (!route) {
         assert.equal(req.method, "POST");
         state.rpc++;
+        if (reply && (await reply({ req, res, route: url.pathname, state, send }))) return;
         return sendRuntime();
       }
       const own = `/workers/scripts/${controllerName}`;
       if (req.method === "PUT") {
         assert.equal(route, own);
         state.puts++;
-        assert.equal(state.puts, 1);
+        assert(state.puts <= maxUploads);
         const chunks = [];
         for await (const chunk of req) chunks.push(chunk);
         const form = await new Request("http://fixture.invalid", {
@@ -83,7 +84,7 @@ async function fixture(t, { reply, pause = immediate } = {}) {
         state.exposure = JSON.parse(b);
       }
       if (reply && (await reply({ req, res, route, state, send }))) return;
-      if (req.method === "PUT") return send({ deployment_id: version, id: controllerName });
+      if (req.method === "PUT") return send({ deployment_id: state.version, id: controllerName });
       if (req.method === "DELETE") {
         state.present = false;
         return send({});
@@ -134,7 +135,10 @@ async function fixture(t, { reply, pause = immediate } = {}) {
         state.rpcBody = body;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
-          JSON.stringify(url.pathname === "/transport-discover" ? { probe: null } : { run: null }),
+          JSON.stringify(
+            state.rpcReply ??
+              (url.pathname === "/transport-discover" ? { probe: null } : { run: null }),
+          ),
         );
       });
     }
@@ -530,4 +534,82 @@ test("HTTP: oversized source body fails closed and cannot authorize deletion", a
   assert.equal(f.state.deletes, 0);
   assert.equal(f.receipt().settlement, "unresolved");
   assert(!JSON.stringify(f.receipt()).includes(marker));
+});
+
+for (const phase of ["management", "runtime"])
+  test(`HTTP: cancellation during canonical discovery ${phase} retains cleanup reserve`, async (t) => {
+    const stop = new AbortController();
+    let f,
+      interrupted = false;
+    f = await fixture(t, {
+      reply: async ({ route, res, state }) => {
+        const target =
+          phase === "runtime" ? "/discover" : `/workers/scripts/${controllerName}/content/v2`;
+        if (
+          !interrupted &&
+          state.present &&
+          route === target &&
+          f.receipt().stage === "discovery"
+        ) {
+          interrupted = true;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write("{");
+          setTimeout(() => {
+            if (phase === "runtime") process.emit("SIGTERM");
+            else stop.abort();
+          }, 10);
+          return true;
+        }
+      },
+    });
+    await assert.rejects(f.invoke({ signal: stop.signal, idleOnly: false }));
+    assert(interrupted);
+    assert.equal(f.state.puts, 1);
+    assert.equal(f.state.deletes, 1);
+    assert.equal(f.state.present, false);
+    assert.equal(f.receipt().failedStage, "discovery");
+    assert.equal(f.receipt().settlement, "deleted-and-absent");
+    assert.equal(f.receipt().outcome, "failed");
+  });
+
+test("HTTP: recursive transport recovery retains the replacement version for original finalization", async (t) => {
+  let probes = 0;
+  const f = await fixture(t, {
+    maxUploads: 2,
+    reply: async ({ route, req, state }) => {
+      if (req.method === "PUT" && state.puts === 2) state.version = foreign;
+      if (route === "/transport-discover")
+        state.rpcReply = {
+          probe:
+            ++probes === 1
+              ? {
+                  protocol: 1,
+                  state: "pending",
+                  observedAt: new Date().toISOString(),
+                  identity: { deploymentHash: "e".repeat(64) },
+                }
+              : null,
+        };
+      if (route === "/discover") state.rpcReply = { run: null };
+    },
+  });
+  // Each original provisioning identity uploads once, including the canonical
+  // owner's replacement. The HTTP fixture otherwise rejects repeated uploads.
+  await f.invoke({ v2: true, idleOnly: false });
+  assert.equal(f.state.puts, 2);
+  assert.equal(f.state.deletes, 1);
+  assert.equal(f.cf.controllerVersion, foreign);
+  const receipts = fs
+    .readdirSync(f.dir)
+    .map((d) => JSON.parse(fs.readFileSync(path.join(f.dir, d, "provisioning.json"))));
+  assert.equal(receipts.length, 2);
+  assert(
+    receipts.every(
+      (r) => r.retainedVersion === foreign && r.settlement === "retained-for-original-finalizer",
+    ),
+  );
+  f.cf.discoverySignal = new AbortController().signal;
+  assert.equal(await f.cf.verifyController(), foreign);
+  await f.cf.deleteScript(controllerName);
+  assert.equal(f.state.present, false);
 });

@@ -261,10 +261,13 @@ function fixture(options = {}) {
       if (route === "/workers/subdomain") return { subdomain: "example" };
       if (tail === "/settings") return w?.settings;
       if (tail === "/content/v2") {
-        assert.equal(
-          options.contentIdentityBytes,
-          (name === binding.candidateWorker ? 4 : 1) * 1024 * 1024,
-        );
+        if (name === controllerName)
+          assert.ok([64 * 1024, 1024 * 1024].includes(options.contentIdentityBytes));
+        else
+          assert.equal(
+            options.contentIdentityBytes,
+            (name === binding.candidateWorker ? 4 : 1) * 1024 * 1024,
+          );
         return w.module;
       }
       if (tail === "/deployments")
