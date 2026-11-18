@@ -836,7 +836,18 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("WantedBy=halt.target reboot.target shutdown.target");
     expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
-      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+    );
+    const upAt = got.indexOf("tailscale up ");
+    const joinedAt = got.indexOf('test -n "$ts_ip"');
+    const setAt = got.indexOf("tailscale set --exit-node=");
+    expect(upAt).toBeGreaterThanOrEqual(0);
+    expect(joinedAt).toBeGreaterThan(upAt);
+    expect(setAt).toBeGreaterThan(joinedAt);
+    const upLine = got.slice(upAt, got.indexOf("\n", upAt));
+    expect(upLine).not.toContain("--exit-node");
+    expect(got).toContain(
+      "tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
     );
     expect(got).not.toContain('--auth-key="$TS_AUTHKEY"');
     expect(got).toContain(

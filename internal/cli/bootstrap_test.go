@@ -564,7 +564,8 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 		"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main",
 		"retry apt-get install -y --no-install-recommends tailscale",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
-		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+		"tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
 		"tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version",
 		"jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id",
@@ -580,6 +581,19 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
 		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
+	}
+	upAt := strings.Index(got, "tailscale up ")
+	joinedAt := strings.Index(got, `test -n "$ts_ip"`)
+	setAt := strings.Index(got, "tailscale set --exit-node=")
+	if upAt < 0 || joinedAt < upAt || setAt < joinedAt {
+		t.Fatal("cloudInit(tailscale) must select the exit node only after the node has an address")
+	}
+	upLine := got[upAt:]
+	if end := strings.Index(upLine, "\n"); end >= 0 {
+		upLine = upLine[:end]
+	}
+	if strings.Contains(upLine, "--exit-node") {
+		t.Fatal("cloudInit(tailscale) must not pass the exit node to tailscale up")
 	}
 	if !strings.Contains(got, "systemctl disable crabbox-tailscale-logout.service") {
 		t.Fatal("cloudInit(tailscale) must remove the legacy reboot logout unit")

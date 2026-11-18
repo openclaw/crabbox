@@ -178,10 +178,6 @@ if [ -z "${ts_ip}" ]; then
   if [ "${TS_HAS_AUTH}" = "true" ]; then set -- "$@" --auth-key="file:/dev/stdin"; fi
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
-  if [ -n "${TS_EXIT_NODE}" ]; then
-    set -- "$@" --exit-node="${TS_EXIT_NODE}"
-    if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
-  fi
   if [ "${TS_HAS_AUTH}" = "true" ]; then
     printf '%s' "${TS_AUTH_VALUE}" | "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
   else
@@ -192,6 +188,12 @@ if [ -z "${ts_ip}" ]; then
     if [ -n "${ts_ip}" ]; then break; fi
     sleep 5
   done
+  # tailscale up rejects a MagicDNS name while this node is still starting.
+  if [ -n "${ts_ip}" ] && [ -n "${TS_EXIT_NODE}" ]; then
+    set -- --exit-node="${TS_EXIT_NODE}"
+    if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
+    "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"
+  fi
 fi
 unset TS_AUTH_VALUE
 test -n "${ts_ip}"

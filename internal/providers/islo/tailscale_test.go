@@ -124,6 +124,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`--login-server="${TS_LOGIN_SERVER}"`,
 		`--exit-node="${TS_EXIT_NODE}"`,
 		"--exit-node-allow-lan-access",
+		`"${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"`,
 		`"${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"`,
 	} {
 		if !strings.Contains(isloTailscaleBringUp, want) {
@@ -132,6 +133,14 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, `--authkey="${TS_AUTHKEY}"`) {
 		t.Fatal("bring-up script must not expose the auth key in tailscale argv")
+	}
+	upAt := strings.LastIndex(isloTailscaleBringUp, `up "$@"`)
+	setAt := strings.Index(isloTailscaleBringUp, `tailscale" --socket="${TS_SOCKET}" set "$@"`)
+	if upAt < 0 || setAt < upAt {
+		t.Fatal("bring-up script must select the exit node with tailscale set after tailscale up")
+	}
+	if strings.Contains(isloTailscaleBringUp, `set -- "$@" --exit-node=`) {
+		t.Fatal("bring-up script must not pass the exit node to tailscale up")
 	}
 	if strings.Contains(isloTailscaleBringUp, "pkill") {
 		t.Fatal("bring-up script must target only the daemon for this lease")
