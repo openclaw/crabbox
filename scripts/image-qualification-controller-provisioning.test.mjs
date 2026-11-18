@@ -170,7 +170,10 @@ async function fixture(t, { reply, pause = immediate, maxUploads = 1 } = {}) {
       ...options,
     });
   const receipt = () => {
-    const dirs = fs.readdirSync(dir);
+    const dirs = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
     assert.equal(dirs.length, 1);
     return JSON.parse(fs.readFileSync(path.join(dir, dirs[0], "provisioning.json")));
   };
