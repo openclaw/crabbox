@@ -83,6 +83,13 @@ Flags:
 
 The text output prints one line per lease with ID, slug, provider, state, server type, host, owner, org, idle timeout, and expiry. Enrolled leases append their lifetime mode, canary marker, effective stop and confirmed-stop deletion deadlines, retention, status, readiness and warnings. JSON retains the complete `lifetimePolicy`.
 
+Blocked or failed cleanup appends a summary, for example
+`cleanup=blocked since=2026-10-01T02:00:00Z error=resource identity changed`.
+Deferred cleanup can add this diagnostic to an active lease without changing its
+state. JSON includes `cleanupBlockedAt` and `deferredCleanupBlocked` when present.
+Inspect the named resource, delete or restore it, then run `crabbox stop` again;
+a continued refusal returns to blocked immediately.
+
 ## extend-lifetime
 
 Extend an enrolled lease's compute deadline before stopping or deletion starts.
@@ -132,7 +139,7 @@ records and verification.
 
 ## lease-audit
 
-Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS and Azure leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts and errors recorded by the broker's expiry sweep.
+Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS and Azure leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts, errors, and blocked timestamps recorded by the broker's cleanup schedulers.
 
 Flags:
 

@@ -652,6 +652,10 @@ export interface LeaseRecord {
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
+  cleanupRefusedSince?: string;
+  cleanupBlockedAt?: string;
+  // Diagnostic only; never grants deletion authority.
+  deferredCleanupBlocked?: { name: string; error: string; blockedAt: string; retryingAt?: string };
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
   cleanupCompletedAt?: string;

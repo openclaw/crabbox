@@ -160,6 +160,16 @@ previously observed resources. Any remaining resource still requires the full
 identity and ownership checks. Failed, ambiguous, or empty responses retain the
 claim for retry.
 
+Persistent verified deletion refusals (including a re-created same-name resource)
+become `cleanupStatus=blocked` after the coordinator's two-hour refusal window.
+Ownership, immutable identity, scope, attachment and data-disk checks remain
+mandatory. Inspect the resource, delete or restore it, then run `crabbox stop`
+again; a continued refusal blocks immediately without restarting the window.
+Deferred candidate cleanup exposes `deferredCleanupBlocked` without failing a
+healthy active lease. Canceled durable provisioning parks with its cleanup
+ownership intact. HTTP failures, timeouts and unavailable authentication or
+inventory keep retrying. See [refused provider cleanup](../features/lifecycle-cleanup.md#refused-provider-cleanup).
+
 ## Backend selection
 
 `azure.backend` (CLI `--azure-backend`, env `CRABBOX_AZURE_BACKEND`) selects the

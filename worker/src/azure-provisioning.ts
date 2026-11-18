@@ -32,6 +32,7 @@ import { azureWindowsBootstrapPowerShell } from "./bootstrap";
 import { sshPorts, type LeaseConfig } from "./config";
 import type { CoordinatorStorageView } from "./coordinator-runtime";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
+import { ProviderCleanupRefusedError } from "./provider-provisioning";
 import type {
   FrozenProvisioningPlan,
   ProviderResumableProvisioning,
@@ -1117,28 +1118,28 @@ function verifyResource(
   expected?: ResourceObservation,
 ): void {
   if (!same(resource.id, path) || !same(resource.location, candidate.region))
-    throw new AzureContinuationError("resource_scope_changed");
+    throw new ProviderCleanupRefusedError("resource_scope_changed");
   if (
     kind !== "disk" &&
     !providerLabelsOwnedByLease(azureLabelsFromTags(resource.tags ?? {}), lease, "azure")
   )
-    throw new AzureContinuationError("resource_ownership_changed");
+    throw new ProviderCleanupRefusedError("resource_ownership_changed");
   if (
     kind !== "disk" &&
     Object.entries(candidate.tags).some(([key, value]) => resource.tags?.[key] !== value)
   )
-    throw new AzureContinuationError("resource_intent_changed");
+    throw new ProviderCleanupRefusedError("resource_intent_changed");
   if (
     kind === "vm" &&
     asObject(resource.properties?.["hardwareProfile"])["vmSize"] !== candidate.serverType
   )
-    throw new AzureContinuationError("vm_size_changed");
+    throw new ProviderCleanupRefusedError("vm_size_changed");
   if (kind === "vm") {
     const image = asObject(asObject(resource.properties?.["storageProfile"])["imageReference"]);
     if (
       Object.entries(candidate.image).some(([key, value]) => !same(String(image[key] ?? ""), value))
     )
-      throw new AzureContinuationError("vm_image_changed");
+      throw new ProviderCleanupRefusedError("vm_image_changed");
   }
   if (kind === "nic") {
     const scope = path.split("/providers/")[0]!;
@@ -1152,7 +1153,7 @@ function verifyResource(
       !Array.isArray(configurations) ||
       configurations.length !== 1
     )
-      throw new AzureContinuationError("nic_configuration_changed");
+      throw new ProviderCleanupRefusedError("nic_configuration_changed");
     const subnet = asObject(asObject(asObject(configurations[0])["properties"])["subnet"])["id"];
     if (
       !same(
@@ -1160,7 +1161,7 @@ function verifyResource(
         `${scope}/providers/Microsoft.Network/virtualNetworks/${candidate.vnet}/subnets/${candidate.subnet}`,
       )
     )
-      throw new AzureContinuationError("nic_subnet_changed");
+      throw new ProviderCleanupRefusedError("nic_subnet_changed");
   }
   if (
     kind === "disk" &&
@@ -1169,14 +1170,14 @@ function verifyResource(
     ) &&
     !providerLabelsOwnedByLease(azureLabelsFromTags(resource.tags ?? {}), lease, "azure")
   )
-    throw new AzureContinuationError("disk_ownership_changed");
+    throw new ProviderCleanupRefusedError("disk_ownership_changed");
   if (kind !== "extension") {
     const identity = observation(resource, kind);
     if (
       expected &&
       (!same(expected.id, identity.id) || expected.immutableID !== identity.immutableID)
     )
-      throw new AzureContinuationError("immutable_identity_changed");
+      throw new ProviderCleanupRefusedError("immutable_identity_changed");
   }
 }
 
@@ -1206,7 +1207,8 @@ export function inspectAzureProvisioningResources(
     ["pip", pip, pipID],
     ["disk", disk, diskID],
   ] as const) {
-    if (!resource && expected[kind]) throw new AzureContinuationError("known_resource_missing");
+    if (!resource && expected[kind])
+      throw new ProviderCleanupRefusedError("known_resource_missing");
     if (resource)
       verifyResource(resource as ARMResource, path, kind, candidate, lease, expected[kind]);
   }
@@ -1221,7 +1223,7 @@ export function inspectAzureProvisioningResources(
       azureVMHasCascadeDelete(vm) ||
       !same(vm.properties?.storageProfile?.osDisk?.managedDisk?.id, diskID))
   )
-    throw new AzureContinuationError("vm_topology_changed");
+    throw new ProviderCleanupRefusedError("vm_topology_changed");
   if (
     nic &&
     (azureNICHasCascadeDelete(nic) ||
@@ -1233,11 +1235,11 @@ export function inspectAzureProvisioningResources(
         )) ||
       (nic.properties?.virtualMachine && (!same(nic.properties.virtualMachine.id, vmID) || !vm)))
   )
-    throw new AzureContinuationError("nic_topology_changed");
+    throw new ProviderCleanupRefusedError("nic_topology_changed");
   if (pip && !azurePublicIPAttachmentMatchesNIC(pip, nic, pipID, nicID, false))
-    throw new AzureContinuationError("pip_topology_changed");
+    throw new ProviderCleanupRefusedError("pip_topology_changed");
   if (disk && !azureDiskAttachmentsMatchVM(disk, vmID, Boolean(vm)))
-    throw new AzureContinuationError("disk_topology_changed");
+    throw new ProviderCleanupRefusedError("disk_topology_changed");
 }
 
 function inventoryIdentity(inventory: AzureInventory): string {

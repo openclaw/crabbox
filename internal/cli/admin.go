@@ -30,8 +30,8 @@ func (a App) adminLeases(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(leases))
 	}
 	for _, lease := range leases {
-		fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-10s %-14s %-24s owner=%s org=%s idle=%s expires=%s%s\n",
-			lease.ID, blank(lease.Slug, "-"), lease.Provider, lease.State, lease.ServerType, lease.Host, lease.Owner, lease.Org, formatSecondsDuration(lease.IdleTimeoutSeconds), blank(lease.ExpiresAt, "-"), lifetimePolicySummary(lease.LifetimePolicy))
+		fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-10s %-14s %-24s owner=%s org=%s idle=%s expires=%s%s%s\n",
+			lease.ID, blank(lease.Slug, "-"), lease.Provider, lease.State, lease.ServerType, lease.Host, lease.Owner, lease.Org, formatSecondsDuration(lease.IdleTimeoutSeconds), blank(lease.ExpiresAt, "-"), lifetimePolicySummary(lease.LifetimePolicy), leaseCleanupSummary(lease))
 	}
 	return nil
 }
@@ -76,7 +76,36 @@ func (a App) adminLeaseAudit(ctx context.Context, args []string) error {
 	return nil
 }
 
+func cleanupBlockedSummary(at, message string, deferred *CoordinatorDeferredCleanupBlocked) string {
+	if at == "" && deferred != nil && deferred.RetryingAt == "" {
+		at, message = deferred.BlockedAt, deferred.Error
+	}
+	if at == "" {
+		return ""
+	}
+	return fmt.Sprintf("blocked since=%s error=%s", at, message)
+}
+
+func leaseCleanupSummary(lease CoordinatorLease) string {
+	if lease.CleanupStartedAt != "" || lease.CleanupStatus == "pending" {
+		return ""
+	}
+	if summary := cleanupBlockedSummary(lease.CleanupBlockedAt, lease.CleanupError, lease.DeferredCleanupBlocked); summary != "" {
+		return " cleanup=" + summary
+	}
+	if lease.CleanupStatus == "blocked" {
+		return " cleanup=blocked error=" + lease.CleanupError
+	}
+	if lease.CleanupStatus == "failed" || lease.CleanupError != "" {
+		return " cleanup=failed error=" + lease.CleanupError
+	}
+	return ""
+}
+
 func leaseAuditCleanupSummary(audit CoordinatorLeaseCloudAudit) string {
+	if summary := cleanupBlockedSummary(audit.CleanupBlockedAt, audit.CleanupError, audit.DeferredCleanupBlocked); summary != "" {
+		return summary
+	}
 	if audit.CleanupAttempts == 0 && audit.CleanupError == "" {
 		return "-"
 	}

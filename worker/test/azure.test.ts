@@ -28,6 +28,7 @@ import type { LeaseConfig } from "../src/config";
 import { sha256Hex } from "../src/encoding";
 import {
   ProviderProvisioningCleanupError,
+  ProviderCleanupRefusedError,
   providerProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
@@ -801,9 +802,13 @@ describe("Azure cleanup inspection", () => {
         return new Response(null, { status: outcome === "204" ? 204 : 200 });
       };
 
-      await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
-        /synthetic|http 404|resource response is empty/,
+      const failure = await f.client.deleteOwnedServer(f.lease).catch((error: unknown) => error);
+      expect(failure).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(/synthetic|http 404|resource response is empty/),
+        }),
       );
+      expect(failure).not.toBeInstanceOf(ProviderCleanupRefusedError);
       expect(f.records).toEqual(before);
     },
   );
@@ -2804,6 +2809,7 @@ describe("azure provider", () => {
       );
       const expectedFailure = expect.objectContaining({ message: expect.stringContaining(error) });
       expect(failure).toEqual(error ? expectedFailure : undefined);
+      expect(failure instanceof ProviderCleanupRefusedError).toBe(Boolean(error));
       expect(deletes).toEqual(error ? [] : [vmID, nicID, pipID, diskID]);
       expect(patches).toEqual([]);
       expect(resources.size).toBe(error ? 4 : 0);

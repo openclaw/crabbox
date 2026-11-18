@@ -12,6 +12,7 @@ export type ProvisioningPhase =
   | "settling"
   | "cleanup"
   | "blocked"
+  | "cleanup-blocked"
   | "retained"
   | "terminal";
 
@@ -40,8 +41,11 @@ export interface ProvisioningStep {
   delivery?: number;
   coordinationKey?: string;
   publication?: ProvisioningPublication;
-  // Provider diagnostics must be static codes, never remote response text.
+  // Blocked reasons are static codes, never remote response text.
   blockedReason?: string;
+  blockedSince?: number;
+  // Sanitized cleanup refusal detail for operator diagnostics.
+  blockedDetail?: string;
 }
 
 export interface ProviderResumableProvisioning {
@@ -84,6 +88,12 @@ export interface ProviderProvisioningCleanupClaim {
   serverID?: number;
   providerResourceID?: string;
   awsOriginalRootDisk?: AWSRootDiskIdentity;
+}
+
+// The provider verified current resources and refuses to delete them; retrying
+// cannot succeed unless external state changes.
+export class ProviderCleanupRefusedError extends Error {
+  override name = "ProviderCleanupRefusedError";
 }
 
 // Unlike retryable cleanup failure, this requires identity or scope resolution before

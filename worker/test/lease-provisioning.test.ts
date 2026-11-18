@@ -12,6 +12,7 @@ import {
   type LeaseProvisioningOperation,
 } from "../src/lease-provisioning";
 import { orgKeyForLabel } from "../src/org-identity";
+import { ProviderCleanupRefusedError } from "../src/provider-provisioning";
 import {
   openProvisioningMaterial,
   provisioningMaterialKey,
@@ -808,6 +809,15 @@ describe("durable Azure admission and reconstruction", () => {
       for (let n = 0; n < 10; n++) await step(storage, azure);
       expect(azure.mutations.filter((entry) => entry.method === "DELETE")).toHaveLength(1);
       expect((await publicLease(storage, azure)).cleanupStatus).toBe("failed");
+      const refused = (await storage.get<LeaseProvisioningOperation>(
+        provisioningOperationKey(id),
+      ))!;
+      expect(refused.step.blockedReason).toBe("cleanup_refused");
+      vi.setSystemTime(refused.step.blockedSince! + 2 * 60 * 60_000);
+      await step(storage, azure);
+      expect((await publicLease(storage, azure)).cleanupStatus).toBe("blocked");
+      expect((await storage.list({ prefix: "provisioning-due:" })).size).toBe(0);
+      expect(azure.mutations.filter((entry) => entry.method === "DELETE")).toHaveLength(1);
     },
   );
 
@@ -1883,4 +1893,139 @@ describe("durable lease admission deadline", () => {
       await pending;
     }
   });
+});
+
+describe("bounded durable cleanup refusal", () => {
+  it.each([
+    "cleanup_refused",
+    "identity_resolution_required",
+    "inventory_unavailable",
+    "authentication_unavailable",
+    "unknown",
+  ])("handles %s without spinning or losing its owner", async (reason) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-10-01T00:00:00Z");
+    vi.setSystemTime(start);
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    const current = fleet(storage, azure);
+    await current.coordinator.fetch(request("POST", "/v1/leases", input()));
+    await current.coordinator.fetch(request("POST", `/v1/leases/${id}/release`, { delete: true }));
+    const capability = current.provider.resumableProvisioning();
+    const advance = vi
+      .spyOn(capability, "advance")
+      .mockImplementation(async ({ step: previous }) => {
+        if (reason === "cleanup_refused")
+          throw new ProviderCleanupRefusedError(`resource changed ${env.AZURE_CLIENT_SECRET}`);
+        if (reason === "unknown") throw new Error("temporary unknown failure");
+        return {
+          phase: "blocked",
+          attempt: previous.attempt,
+          state: previous.state,
+          blockedReason: reason,
+          nextWake: Date.now() + 15_000,
+        };
+      });
+    current.provider.resumableProvisioning = () => capability;
+    await current.runtime.tick!();
+    const first = (await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)))!;
+    expect(first.step.phase).toBe("blocked");
+    vi.setSystemTime(start + 2 * 60 * 60_000);
+    await current.runtime.tick!();
+    const operation = (await storage.get<LeaseProvisioningOperation>(
+      provisioningOperationKey(id),
+    ))!;
+    const permanent = reason === "cleanup_refused" || reason === "identity_resolution_required";
+    expect(operation.step.phase).toBe(permanent ? "cleanup-blocked" : "blocked");
+    expect(Boolean(await storage.get(provisioningDueKey(operation)))).toBe(!permanent);
+    expect(operation.step.blockedSince).toBe(permanent ? start : undefined);
+    expect((await publicLease(storage, azure)).cleanupStatus).toBe(
+      permanent ? "blocked" : "failed",
+    );
+    if (!permanent) return;
+    const lease = await publicLease(storage, azure);
+    expect(lease.cleanupStatus).toBe("blocked");
+    expect(lease.cleanupError).toContain("automatic retries stopped");
+    expect(lease.cleanupError).toContain(
+      reason === "cleanup_refused" ? "then run crabbox stop again" : "crabbox stop cannot clear",
+    );
+    expect(lease.cleanupError).not.toContain(env.AZURE_CLIENT_SECRET!);
+    await current.runtime.tick!();
+    expect(advance).toHaveBeenCalledTimes(2);
+    const stop = await current.coordinator.fetch(
+      request("POST", `/v1/leases/${id}/release`, { delete: true }),
+    );
+    expect(stop.status).toBe(200);
+    expect(
+      (await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)))?.step.phase,
+    ).toBe("blocked");
+    await current.runtime.tick!();
+    expect(advance).toHaveBeenCalledTimes(3);
+    expect(
+      (await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)))?.step.phase,
+    ).toBe("cleanup-blocked");
+    expect((await storage.list({ prefix: "provisioning-due:" })).size).toBe(0);
+    advance.mockImplementation(async ({ step: previous }) => ({
+      phase: "terminal",
+      attempt: previous.attempt,
+      state: previous.state,
+      nextWake: Date.now(),
+    }));
+    await current.coordinator.fetch(request("POST", `/v1/leases/${id}/release`, { delete: true }));
+    await current.runtime.tick!();
+    expect((await publicLease(storage, azure)).cleanupStatus).toBe("complete");
+    expect((await publicLease(storage, azure)).cleanupBlockedAt).toBeUndefined();
+  });
+});
+
+it("keeps the durable refusal window across transient failures until a capability step succeeds", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const start = Date.parse("2026-10-01T00:00:00Z");
+  vi.setSystemTime(start);
+  const storage = new ProvisioningTestStorage();
+  const azure = new AzureFixture();
+  const current = fleet(storage, azure);
+  await current.coordinator.fetch(request("POST", "/v1/leases", input()));
+  await current.coordinator.fetch(request("POST", `/v1/leases/${id}/release`, { delete: true }));
+  const capability = current.provider.resumableProvisioning();
+  let outcome: "refused" | "transient" | "progress" = "refused";
+  vi.spyOn(capability, "advance").mockImplementation(async ({ step: previous }) => {
+    if (outcome === "refused") throw new ProviderCleanupRefusedError("identity changed");
+    if (outcome === "transient") throw new Error("HTTP 503");
+    return {
+      phase: "cleanup",
+      attempt: previous.attempt,
+      state: previous.state,
+      nextWake: Date.now() + 15_000,
+    };
+  });
+  current.provider.resumableProvisioning = () => capability;
+  const operation = () => storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id));
+  await current.runtime.tick!();
+  expect((await operation())?.step.blockedSince).toBe(start);
+  vi.setSystemTime(start + 60 * 60_000);
+  outcome = "transient";
+  await current.runtime.tick!();
+  expect((await operation())?.step).toMatchObject({
+    phase: "blocked",
+    blockedReason: "continuation_unavailable",
+    blockedSince: start,
+  });
+  vi.setSystemTime(start + 90 * 60_000);
+  outcome = "progress";
+  await current.runtime.tick!();
+  expect((await operation())?.step.blockedSince).toBeUndefined();
+  expect((await operation())?.step.blockedDetail).toBeUndefined();
+  vi.setSystemTime(start + 3 * 60 * 60_000);
+  outcome = "refused";
+  await current.runtime.tick!();
+  expect((await operation())?.step).toMatchObject({ phase: "blocked", blockedSince: Date.now() });
+  vi.setSystemTime(start + 3 * 60 * 60_000 + 60 * 60_000);
+  outcome = "transient";
+  await current.runtime.tick!();
+  vi.setSystemTime(start + 5 * 60 * 60_000);
+  outcome = "refused";
+  await current.runtime.tick!();
+  expect((await operation())?.step.phase).toBe("cleanup-blocked");
+  expect((await publicLease(storage, azure)).cleanupStatus).toBe("blocked");
 });

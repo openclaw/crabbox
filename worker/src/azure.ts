@@ -28,6 +28,7 @@ import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labe
 import {
   ProviderProvisioningCleanupError,
   ProviderResourceUnresolvedError,
+  ProviderCleanupRefusedError,
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { ProvisioningAttemptHistory, ProvisioningAttemptsError } from "./provisioning-attempts";
@@ -1314,7 +1315,7 @@ export class AzureClient {
       );
     }
     if (lease.providerScope !== this.providerScope()) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure lease ${lease.id}: stored provider scope does not match the cleanup client`,
       );
     }
@@ -1541,7 +1542,7 @@ export class AzureClient {
             !resources.pip ||
             (!resources.disk && !resources.ephemeralOSDisk)
           ) {
-            throw new Error(
+            throw new ProviderCleanupRefusedError(
               `refusing to delete Azure resources for ${lease.cloudID}: legacy cleanup claim cannot prove the complete original resource set`,
             );
           }
@@ -1926,7 +1927,7 @@ export class AzureClient {
         )
       )
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: observed resource identity changed`,
       );
     }
@@ -1938,18 +1939,18 @@ export class AzureClient {
         azureEffectiveCleanupProgress(options.claim),
       )
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: observed resource labels changed`,
       );
     }
     const vmDiskID = vm?.properties?.storageProfile?.osDisk?.managedDisk?.id;
     if (vm && azureVMHasDataDisks(vm)) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: VM has unexpected data disks`,
       );
     }
     if (vm && azureVMHasCascadeDelete(vm)) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: VM has cascading delete options`,
       );
     }
@@ -1966,17 +1967,19 @@ export class AzureClient {
       (!azureResourceIDEqual(nicVirtualMachine.id, expectedVMID) ||
         (!vm && !staleCanonicalNICAttachmentAllowed))
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: NIC is attached to an unexpected VM`,
       );
     }
     if (vm && !azureVMReferencesOnlyNIC(vm, expectedNICID)) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: VM references an unexpected NIC`,
       );
     }
     if (vm && !nic) {
-      throw new Error(`refusing to delete Azure resources for ${name}: canonical NIC is missing`);
+      throw new ProviderCleanupRefusedError(
+        `refusing to delete Azure resources for ${name}: canonical NIC is missing`,
+      );
     }
     if (
       vm &&
@@ -1984,17 +1987,17 @@ export class AzureClient {
         azureResourceIDEqual(item.id, expectedNICID),
       )
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: VM does not own ${name}-nic`,
       );
     }
     if (nic && azureNICHasDisqualifyingServiceAssociation(nic)) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: NIC has an unexpected service association`,
       );
     }
     if (nic && azureNICHasCascadeDelete(nic)) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: NIC has cascading delete options`,
       );
     }
@@ -2009,7 +2012,7 @@ export class AzureClient {
       nic &&
       !azureNICReferencesOnlyPIP(nic, expectedPIPID, Boolean(pip) || missingCanonicalPIPAllowed)
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: NIC references an unexpected public IP`,
       );
     }
@@ -2020,7 +2023,7 @@ export class AzureClient {
         azureResourceIDEqual(config.properties?.publicIPAddress?.id, expectedPIPID),
       )
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: NIC does not own ${name}-pip`,
       );
     }
@@ -2039,18 +2042,18 @@ export class AzureClient {
           ),
       )
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: public IP is attached to an unexpected configuration`,
       );
     }
     if (options.prepareClaim && vmDiskID) {
       if (!azureResourceIDEqual(vmDiskID, expectedDiskID)) {
-        throw new Error(
+        throw new ProviderCleanupRefusedError(
           `refusing to delete Azure resources for ${name}: VM does not own ${name}-osdisk`,
         );
       }
       if (!initialDisk) {
-        throw new Error(
+        throw new ProviderCleanupRefusedError(
           `refusing to delete Azure resources for ${name}: managed OS disk identity is not yet available`,
         );
       }
@@ -2066,14 +2069,14 @@ export class AzureClient {
         "azure",
       );
       if (vm && !azureResourceIDEqual(vmDiskID, expectedDiskID)) {
-        throw new Error(
+        throw new ProviderCleanupRefusedError(
           `refusing to delete Azure resources for ${name}: VM does not own ${name}-osdisk`,
         );
       }
       if (!diskOwnedByLease) {
         const diskLabels = azureLabelsFromTags(disk.tags ?? {});
         if (azureHasOwnershipClaims(diskLabels)) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: ownership does not match lease ${lease.id}`,
           );
         }
@@ -2083,7 +2086,7 @@ export class AzureClient {
           !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
           !azureDiskAttachmentsMatchVM(disk, this.resourceID(vmResourcePath), true)
         ) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: ownership does not match lease ${lease.id}`,
           );
         }
@@ -2101,7 +2104,7 @@ export class AzureClient {
           this.requireDiskUniqueID(taggedDisk, lease.id) !== uniqueID ||
           !azureDiskAttachmentsMatchVM(taggedDisk, this.resourceID(vmResourcePath), true)
         ) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: live association changed while binding lease ${lease.id}`,
           );
         }
@@ -2118,7 +2121,7 @@ export class AzureClient {
             !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
             !azureDiskAttachmentsMatchVM(disk, this.resourceID(vmResourcePath), true)
           ) {
-            throw new Error(
+            throw new ProviderCleanupRefusedError(
               `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
             );
           }
@@ -2126,7 +2129,7 @@ export class AzureClient {
           !diskOwnedByLease ||
           !azureDiskAttachmentsMatchVM(disk, this.resourceID(vmResourcePath), false)
         ) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
           );
         }
@@ -2137,12 +2140,12 @@ export class AzureClient {
           !azureResourceIDEqual(claimedDisk.resourceID, expectedDiskID) ||
           claimedDisk.uniqueID !== uniqueID
         ) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: immutable identity does not match lease ${lease.id}`,
           );
         }
         if (!azureDiskAttachmentsMatchVM(disk, this.resourceID(vmResourcePath), Boolean(vm))) {
-          throw new Error(
+          throw new ProviderCleanupRefusedError(
             `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
           );
         }
@@ -2150,7 +2153,7 @@ export class AzureClient {
     }
 
     if (initialClaimSetIncomplete) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: canonical companion set is incomplete`,
       );
     }
@@ -2158,7 +2161,7 @@ export class AzureClient {
       options.prepareClaim &&
       currentResources.some((resource) => !azureReconciliationMemberHasStableIdentity(resource))
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure resources for ${name}: stable resource identity is incomplete`,
       );
     }
@@ -2288,7 +2291,9 @@ export class AzureClient {
         throw new Error("invalid deletion progress");
       }
     } catch {
-      throw new Error(`refusing to delete Azure lease ${lease.id}: durable cleanup claim mismatch`);
+      throw new ProviderCleanupRefusedError(
+        `refusing to delete Azure lease ${lease.id}: durable cleanup claim mismatch`,
+      );
     }
     const preparingValid = claim.preparing
       ? claim.version === 2 &&
@@ -2318,14 +2323,16 @@ export class AzureClient {
         (!azureResourceIDEqual(claim.disk.resourceID, expectedDiskID) ||
           !claim.disk.uniqueID.trim()))
     ) {
-      throw new Error(`refusing to delete Azure lease ${lease.id}: durable cleanup claim mismatch`);
+      throw new ProviderCleanupRefusedError(
+        `refusing to delete Azure lease ${lease.id}: durable cleanup claim mismatch`,
+      );
     }
   }
 
   private requireDiskUniqueID(disk: AzureDisk, leaseID: string): string {
     const uniqueID = disk.properties?.uniqueId?.trim();
     if (!uniqueID) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure disk ${disk.name ?? "unknown"}: immutable identity is missing for lease ${leaseID}`,
       );
     }
@@ -2408,7 +2415,7 @@ export class AzureClient {
   ): void {
     this.requireResourceIdentity(kind, resource, path, lease.id);
     if (!providerLabelsOwnedByLease(azureLabelsFromTags(resource.tags ?? {}), lease, "azure")) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure ${kind} ${azureResourceName(path)}: ownership does not match lease ${lease.id}`,
       );
     }
@@ -2424,7 +2431,7 @@ export class AzureClient {
       resource.name !== azureResourceName(path) ||
       !azureResourceIDEqual(resource.id, this.resourceID(path))
     ) {
-      throw new Error(
+      throw new ProviderCleanupRefusedError(
         `refusing to delete Azure ${kind} ${azureResourceName(path)}: identity does not match lease ${leaseID}`,
       );
     }
