@@ -1389,11 +1389,12 @@ for (const outcome of ["404", "503", "malformed", "lost", "dns"]) {
     assert.equal(records.at(-1).outcome, "failed");
     const read = records.findLast((v) => v.kind === "management-read");
     if (["404", "503"].includes(outcome)) assert.equal(read.status, Number(outcome));
+    if (outcome === "malformed") assert.equal(read.status, 200);
     if (["lost", "dns"].includes(outcome)) assert.equal(read.status, null);
-    assert.equal(
-      read.code,
-      outcome === "dns" ? "ENOTFOUND" : outcome === "malformed" ? undefined : null,
-    );
+    // Bounded management JSON now rejects malformed bodies in the transport,
+    // rather than acknowledging them for a later schema check.
+    assert.equal(read.outcome, "failed");
+    assert.equal(read.code, outcome === "dns" ? "ENOTFOUND" : null);
     assert.equal(requests, 1);
     assert.equal(f.state.phase, "reseal-candidate");
     noResealReplay(f, originalPlan, intent);

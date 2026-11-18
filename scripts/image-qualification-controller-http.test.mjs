@@ -319,9 +319,16 @@ test("existing cleanup fencing actions remain available without accepting arbitr
 });
 
 test("idle and issuer source contracts pin the exact controller transport dependency", () => {
-  const expected = createHash("sha256")
-    .update(fs.readFileSync(new URL("./image-qualification-controller-http.mjs", import.meta.url)))
-    .digest("hex");
-  for (const sources of [idleSourceIdentity(), replacementSources()])
-    assert.equal(sources["image-qualification-controller-http.mjs"], expected);
+  for (const name of [
+    "image-qualification-controller-http.mjs",
+    "image-qualification-control.mjs",
+    "image-qualification-binding-probe.mjs",
+    "image-qualification-idle-controller.mjs",
+  ]) {
+    const expected = createHash("sha256")
+      .update(fs.readFileSync(new URL(`./${name}`, import.meta.url)))
+      .digest("hex");
+    for (const sources of [idleSourceIdentity(), replacementSources()])
+      assert.equal(sources[name], expected);
+  }
 });

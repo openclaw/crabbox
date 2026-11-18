@@ -336,6 +336,7 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       fs.mkdirSync(path.join(directory, "scripts"), { recursive: true });
       for (const file of [
         "image-qualification-control.mjs",
+        "image-qualification-binding-probe.mjs",
         "image-qualification-controller-http.mjs",
         "image-qualification-isolation.mjs",
         "image-qualification-transport.mjs",

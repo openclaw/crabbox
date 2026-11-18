@@ -13,7 +13,11 @@ import {
   readAdmission,
   verifyAuthority,
 } from "./image-qualification-isolation.mjs";
-import { readProbeResponse } from "./image-qualification-binding-probe.mjs";
+import {
+  readProbeResponse,
+  managementFailure,
+  recordManagementFailure,
+} from "./image-qualification-binding-probe.mjs";
 import { readPrivateJSON, withQualificationJournal } from "./image-qualification-journal.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -227,15 +231,25 @@ export async function idleController(
   api.request = async (route, init = {}, options = {}) => {
     const timeout = limit();
     await persist(state.phase, {}, false);
-    return cf.request(
-      route,
-      {
-        ...init,
-        redirect: "error",
-        signal: cleaning || !signal ? timeout : AbortSignal.any([timeout, signal]),
-      },
-      { boundedBytes: 1024 * 1024, ...options },
-    );
+    try {
+      return await cf.request(
+        route,
+        {
+          ...init,
+          redirect: "error",
+          signal: cleaning || !signal ? timeout : AbortSignal.any([timeout, signal]),
+        },
+        { boundedBytes: 1024 * 1024, ...options },
+      );
+    } catch (error) {
+      const failure = recordManagementFailure(
+        error,
+        route,
+        timeout.aborted ? "cancelled" : "request-failed",
+      );
+      await persist(state.phase, { requestFailure: managementFailure(failure) }, false);
+      throw failure;
+    }
   };
   api.list = async (route) => {
     const all = [];
@@ -401,18 +415,25 @@ export async function idleController(
       fail("credential identity/lifetime changed");
   };
   let failed = false;
+  let failure;
+  let stage = "authority-before";
   try {
     // A recovery invocation can only inspect/delete its exact journaled caller.
     if (mode === "run") {
       await authority();
+      stage = "inventory-before";
       const before = await inventory();
       if (
         before.scripts.includes(controllerName) ||
         digest(canonical(before)) !== plan.originalInventorySha256 ||
         (await api.request(`${script}/settings`, {}, { allow404: true })) !== undefined
-      )
+      ) {
+        failure = { stage, reason: "inventory-mismatch" };
         fail("original absence/inventory changed");
+      }
+      stage = "credential-before";
       await credential();
+      stage = "create";
       await persist("create-intent", { createAt: new Date(now()).toISOString() });
       const form = new FormData();
       form.set(
@@ -458,6 +479,7 @@ export async function idleController(
       }
       const subdomain = (await api.request("/workers/subdomain"))?.subdomain;
       if (!/^[a-z0-9-]+$/.test(subdomain ?? "")) fail("account subdomain missing");
+      stage = "identity";
       await persist("identity-pending", {
         url: `https://${controllerName}.${subdomain}.workers.dev`,
         challenge: randomBytes(32).toString("hex"),
@@ -479,6 +501,7 @@ export async function idleController(
         fail("actual runtime binding identity mismatch");
       await fence();
       await persist("identity-verified", { identityDigest: digest(canonical(reply)) });
+      stage = "discovery";
       await persist("discovery-pending");
       await fence();
       const discovered = await call("discover", {});
@@ -488,12 +511,17 @@ export async function idleController(
       });
       if (state.discovery !== "idle") fail("authority registry is active or unknown");
     }
-  } catch {
+  } catch (error) {
     failed = true;
+    failure ??= { stage, ...(managementFailure(error) ?? { reason: "verification-failed" }) };
   } finally {
     cleaning = true;
     // Preserve intent facts; never infer not-created from a missing/corrupt receipt.
-    await persist("settlement-pending", { settled: false, failed: state.failed || failed });
+    await persist("settlement-pending", {
+      settled: false,
+      failed: state.failed || failed,
+      ...(!state.failure && failure ? { failure } : {}),
+    });
     await credential();
     await authority();
     if (state.createAt) {
