@@ -477,7 +477,7 @@ index 0000000000000000000000000000000000000000..4211b953450731cbe4bbdfbe63573c76
 +  return ids;
 +}
 diff --git a/worker/src/aws-qualification-authority.ts b/worker/src/aws-qualification-authority.ts
-index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a7dba52ed 100644
+index ad26506d6077acc49a4da6f4b1397d7cea6d21be..1c20cbc877af390b3b67e46216600e698728cd84 100644
 --- a/worker/src/aws-qualification-authority.ts
 +++ b/worker/src/aws-qualification-authority.ts
 @@ -1,15 +1,33 @@
@@ -573,7 +573,12 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    "DeleteKeyPair",
    "DeleteSnapshot",
    "DeregisterImage",
-@@ -123,10 +158,14 @@ const preservedTagKeys = new Set([
+@@ -119,14 +154,19 @@ const preservedTagKeys = new Set([
+   "owner",
+   "provider",
+   "server_type",
++  "slug",
+   "target",
  ]);
  
  interface AWSQualificationAuthorityEnv {
@@ -588,7 +593,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
    CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
-@@ -134,28 +173,34 @@ interface AWSQualificationAuthorityEnv {
+@@ -134,28 +174,34 @@ interface AWSQualificationAuthorityEnv {
    CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
    CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
    CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
@@ -623,7 +628,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    retainedRootDeviceName?: string;
    finalizationSource?: "automatic" | "controller";
    finalizingAt?: string;
-@@ -204,6 +249,7 @@ interface AuthoritySigner {
+@@ -204,6 +250,7 @@ interface AuthoritySigner {
      action: string,
      region: string,
      parameters: Record<string, unknown>,
@@ -631,7 +636,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    ): Promise<Response>;
  }
  
-@@ -211,10 +257,46 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
+@@ -211,10 +258,46 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationRunIdentity
  > {
@@ -678,7 +683,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
  }
  
  export default AWSQualificationTransport;
-@@ -223,10 +305,42 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -223,10 +306,42 @@ export class AWSQualificationController extends WorkerEntrypoint<
    AWSQualificationAuthorityEnv,
    AWSQualificationControllerProps
  > {
@@ -721,7 +726,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    async beginFinalization(runId: string): Promise<void> {
      const run = qualificationRun(this.env, runId);
      await run.beginFinalization(this.ctx.props);
-@@ -246,16 +360,40 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -246,16 +361,40 @@ export class AWSQualificationController extends WorkerEntrypoint<
    }
  
    async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
@@ -766,7 +771,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    async retire(runId: string): Promise<void> {
      const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
      if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
-@@ -264,7 +402,162 @@ export class AWSQualificationController extends WorkerEntrypoint<
+@@ -264,7 +403,162 @@ export class AWSQualificationController extends WorkerEntrypoint<
  }
  
  export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
@@ -929,7 +934,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      validateRunIdentity(identity);
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      if (
-@@ -279,6 +572,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -279,6 +573,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
    async discover(
      controller: AWSQualificationControllerProps,
    ): Promise<AWSQualificationRegistryRecord | undefined> {
@@ -937,7 +942,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      if (active) validateController(controller, active.deploymentHash);
      else validateControllerShape(controller);
-@@ -289,8 +583,18 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -289,8 +584,18 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
      controller: AWSQualificationControllerProps,
      identity: AWSQualificationRunIdentity,
    ): Promise<AWSQualificationRegistryRecord> {
@@ -956,7 +961,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      validateRunWindow(identity);
      const retirements = await this.retirements();
      if (retirements.some((retirement) => retirement.runId === identity.runId)) {
-@@ -298,6 +602,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
+@@ -298,6 +603,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
      }
      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
      // Retirement and registry reads may outlive the admission window.
@@ -964,7 +969,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      validateRunWindow(identity);
      if (active) {
        if (canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))) {
-@@ -417,10 +722,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -417,10 +723,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
    ): Promise<void> {
      return await this.serialized(async () => {
@@ -977,7 +982,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        validateRunWindow(identity);
        const expiresAt = Date.parse(identity.expiresAt);
        const now = Date.now();
-@@ -446,7 +753,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -446,7 +754,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          return;
        }
        const policyHash = await qualificationPolicyHash(policy);
@@ -987,7 +992,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        validateRunWindow(identity);
        await this.ctx.storage.put({
          [stateKey]: {
-@@ -463,10 +772,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -463,10 +773,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          [ledgerKey]: emptyLedger(),
        });
        await this.ctx.storage.setAlarm(
@@ -1005,7 +1010,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        validateRunWindow(identity);
      });
    }
-@@ -475,7 +790,207 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -475,7 +791,207 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
      request: AWSQualificationRequest,
    ): Promise<AWSQualificationResponse> {
@@ -1214,7 +1219,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    }
  
    async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
-@@ -492,6 +1007,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -492,6 +1008,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      return await this.serialized(async () => {
        const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
        if (!run) throw new Error("AWS qualification run is not enrolled");
@@ -1222,7 +1227,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        validateController(controller, run.identity.deploymentHash);
        const operations = [
          ...(await this.ctx.storage.list<AWSQualificationOperationEvidence>({
-@@ -505,6 +1021,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -505,6 +1022,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
        return {
          version: awsQualificationAttestationVersion,
@@ -1240,7 +1245,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
          runId: run.identity.runId,
          candidateSha: run.identity.candidateSha,
          candidateWorker: run.identity.candidateWorker,
-@@ -518,6 +1045,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -518,6 +1046,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          finalized: Boolean(run.finalizedAt),
          ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
          operations,
@@ -1255,7 +1260,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
          ...(finalReceipt ? { finalReceipt } : {}),
        };
      });
-@@ -530,8 +1065,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -530,8 +1066,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    private async executeSerialized(
      identity: AWSQualificationRunIdentity,
      request: AWSQualificationRequest,
@@ -1267,7 +1272,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      const policy = run.policy;
      const normalizedRequest = validateRequestShape(request, policy.region);
      const requestHash = await sha256Hex(
-@@ -606,6 +1144,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -606,6 +1145,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
  
      const ledger = await this.ledger();
@@ -1281,7 +1286,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      try {
        if (!priorIntent) {
-@@ -646,6 +1191,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -646,6 +1192,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        if (normalizedRequest.service !== "sts") {
          await this.ensureAccount(policy);
        }
@@ -1299,7 +1304,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      } catch (error) {
        await this.ctx.storage.put(evidenceKey, {
          ...evidence,
-@@ -670,6 +1226,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -670,6 +1227,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        });
      }
  
@@ -1317,7 +1322,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      if (authorized.mutating) {
        await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
      }
-@@ -682,6 +1249,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -682,6 +1250,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        normalizedRequest.action,
        policy.region,
        authorized.parameters,
@@ -1325,7 +1330,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      );
      const result = await boundedResponse(response);
      await this.finishSignerDispatch(run, evidenceKey, evidence, result);
-@@ -725,6 +1293,219 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -725,6 +1294,219 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      return result;
    }
  
@@ -1545,7 +1550,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    private async recordImportedKey(
      run: AWSQualificationRunState,
      request: AWSQualificationRequest,
-@@ -911,6 +1692,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -911,6 +1693,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    }
  
    private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
@@ -1603,7 +1608,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
      const result = await boundedResponse(response);
      if (result.status < 200 || result.status >= 300) {
-@@ -922,6 +1754,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -922,6 +1755,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      if (asString(identity["Account"]) !== policy.accountId) {
        throw new Error("AWS qualification authority is authenticated to the wrong account");
      }
@@ -1620,7 +1625,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    }
  
    private async verifyRetainedImage(
-@@ -1084,7 +1926,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1084,7 +1927,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      run: AWSQualificationRunState,
      intentKey: string,
    ): Promise<void> {
@@ -1629,7 +1634,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
        this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
      }
-@@ -1097,10 +1939,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1097,10 +1940,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    private assertCandidateDispatchWindow(run: AWSQualificationRunState, action: string): void {
      const now = Date.now();
      const expiresAt = Date.parse(run.identity.expiresAt);
@@ -1650,7 +1655,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        !retainedCleanupReads.has(action) &&
        !["TerminateInstances", "DeleteKeyPair"].includes(action)
      ) {
-@@ -1112,10 +1962,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1112,10 +1963,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      identity: AWSQualificationRunIdentity,
      action: string,
    ): Promise<AWSQualificationRunState> {
@@ -1663,7 +1668,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      // Only automatic cleanup grants rollback reads. A controller fence is terminal,
      // including requests admitted by the registry before reaching this serialized owner.
      const rollbackRead =
-@@ -1136,6 +1988,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1136,6 +1989,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
        throw new Error("AWS qualification authority deployment changed after enrollment");
      }
@@ -1678,7 +1683,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      return run;
    }
  
-@@ -1150,6 +2010,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1150,6 +2011,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      const failures: string[] = [];
      await this.beginFinalReceipt(ledger);
      try {
@@ -1686,7 +1691,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        await this.ensureAccount(policy);
        await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
      } catch (error) {
-@@ -1168,6 +2029,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1168,6 +2030,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "pre-cleanup",
      );
      await this.ctx.storage.put(ledgerKey, recoveredLedger);
@@ -1725,7 +1730,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      for (const imageId of ownedWithRetired(
        recoveredLedger.imageIds,
        recoveredLedger.retiredImageIds,
-@@ -1242,7 +2135,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1242,7 +2136,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      controller?: AWSQualificationControllerProps,
    ): Promise<AWSQualificationRunState | undefined> {
      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
@@ -1739,7 +1744,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      if (controller) validateController(controller, run.identity.deploymentHash);
      if (!run.finalizingAt && !run.finalizedAt) {
        run.finalizingAt = new Date().toISOString();
-@@ -1443,6 +2341,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1443,6 +2342,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
    private async recordVerificationEvidence(
      action: string,
      outcome: "accepted" | "absent" | "present" | "rejected" | "error",
@@ -1747,7 +1752,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    ): Promise<void> {
      const receipt = await this.requireFinalReceipt();
      const sequence = receipt.verificationTotal + 1;
-@@ -1453,6 +2352,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1453,6 +2353,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          action,
          at: new Date().toISOString(),
          outcome,
@@ -1755,7 +1760,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        },
        maxVerificationEvidence,
      );
-@@ -1491,12 +2391,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1491,12 +2392,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        const result = await boundedResponse(response);
        if (
          result.status >= 300 &&
@@ -1780,7 +1785,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        } else {
          await this.finishCleanupEvidence(
            evidenceSequence,
-@@ -1512,6 +2420,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1512,6 +2421,54 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
    }
  
@@ -1835,7 +1840,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    private async inventoryRunResources(
      run: AWSQualificationRunState,
      ledger: AWSQualificationLedger,
-@@ -1547,6 +2503,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1547,6 +2504,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        for (const result of [instances, images, snapshots, volumes, keys]) {
          if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
        }
@@ -1854,7 +1859,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
          .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
          .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
-@@ -1581,6 +2549,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1581,6 +2550,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
          ledger.instanceIds.length > maxActiveInstances ||
          ledger.imageIds.length > maxActiveImages ||
          ledger.snapshotIds.length > maxActiveSnapshots ||
@@ -1862,7 +1867,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
          ledger.keyPairIds.length > 1
        ) {
          failures.push("run-tag inventory exceeds qualification resource bounds");
-@@ -1662,7 +2631,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1662,7 +2632,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
        for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
          const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -1871,7 +1876,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        }
      }
      await this.ctx.storage.put(ledgerKey, ledger);
-@@ -1780,6 +2749,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1780,6 +2750,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      );
    }
  
@@ -1914,7 +1919,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    private async retireUnresolvedIntents(): Promise<void> {
      const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
      await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
-@@ -1808,14 +2813,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1808,14 +2814,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "reservationSet",
        failures,
      );
@@ -1930,7 +1935,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      await this.verifyAbsent(
        policy,
        "DescribeSnapshots",
-@@ -1832,7 +2830,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1832,7 +2831,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
        "volumeSet",
        failures,
      );
@@ -1939,7 +1944,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      try {
        const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
          "GroupId.1": policy.securityGroupId,
-@@ -1862,51 +2860,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
+@@ -1862,51 +2861,46 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
      }
    }
  
@@ -2023,7 +2028,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      }
    }
  
-@@ -1986,6 +2979,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1986,6 +2980,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
      action: string,
      region: string,
      parameters: Record<string, unknown>,
@@ -2031,7 +2036,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    ): Promise<Response> {
      const credentials = authorityCredentials(this.env);
      const client = new AwsClient({ ...credentials, service, region, retries: 0 });
-@@ -1999,6 +2993,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
+@@ -1999,6 +2994,7 @@ class DirectAuthoritySigner implements AuthoritySigner {
        }
        return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
          method: "POST",
@@ -2039,7 +2044,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
          headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
          body: body.toString(),
        });
-@@ -2199,16 +3194,6 @@ function authorizeEC2(
+@@ -2199,16 +3195,6 @@ function authorizeEC2(
          ...qualificationTags(input, "snapshot", identity, request.opId, 2),
        };
      }
@@ -2056,7 +2061,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      default:
        throw new Error("AWS qualification EC2 action is not implemented");
    }
-@@ -2236,9 +3221,11 @@ function authorizedRunInstances(
+@@ -2236,9 +3222,11 @@ function authorizedRunInstances(
    }
    const imageId = input["ImageId"] ?? "";
    if (
@@ -2071,7 +2076,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    ) {
      throw new Error("AWS qualification image is outside the run ledger");
    }
-@@ -2262,7 +3249,7 @@ function authorizedRunInstances(
+@@ -2262,7 +3250,7 @@ function authorizedRunInstances(
    );
    const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
    if (
@@ -2080,7 +2085,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        ? rootGB !== awsQualificationRetainedRootGB
        : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
    ) {
-@@ -2283,11 +3270,14 @@ function authorizedRunInstances(
+@@ -2283,11 +3271,14 @@ function authorizedRunInstances(
      MaxCount: "1",
      MinCount: "1",
      UserData: userData,
@@ -2096,7 +2101,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      "MetadataOptions.HttpEndpoint": "enabled",
      "MetadataOptions.HttpPutResponseHopLimit": "1",
      "MetadataOptions.HttpTokens": "required",
-@@ -2377,21 +3367,6 @@ function qualificationTags(
+@@ -2377,21 +3368,6 @@ function qualificationTags(
    return output;
  }
  
@@ -2118,7 +2123,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
  function injectAuthorityTags(
    tags: Map<string, string>,
    identity: AWSQualificationRunIdentity,
-@@ -2445,7 +3420,7 @@ function updateLedgerFromResponse(
+@@ -2445,7 +3421,7 @@ function updateLedgerFromResponse(
          }
          for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
            const volumeId = asString(record(mapping["ebs"])["volumeId"]);
@@ -2127,7 +2132,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
          }
        }
      }
-@@ -2526,6 +3501,62 @@ function updateLedgerFromResponse(
+@@ -2526,6 +3502,62 @@ function updateLedgerFromResponse(
    }
  }
  
@@ -2190,7 +2195,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
  function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
      throw new Error("AWS qualification run id is malformed");
-@@ -2545,6 +3576,20 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2545,6 +3577,20 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    if (!Number.isFinite(Date.parse(identity.expiresAt))) {
      throw new Error("AWS qualification expiry is malformed");
    }
@@ -2211,7 +2216,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    if (identity.retainedImage !== undefined) {
      const retained = identity.retainedImage;
      if (
-@@ -2560,14 +3605,26 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+@@ -2560,14 +3606,26 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
    }
  }
  
@@ -2240,7 +2245,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      throw new Error("AWS qualification retained work window expired");
    }
  }
-@@ -2633,9 +3690,17 @@ function registryIdentity(
+@@ -2633,9 +3691,17 @@ function registryIdentity(
    value: AWSQualificationRunIdentity | AWSQualificationRegistryRecord,
  ): Pick<
    AWSQualificationRegistryRecord,
@@ -2259,7 +2264,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
      runId: value.runId,
      candidateSha: value.candidateSha,
      candidateWorker: value.candidateWorker,
-@@ -2671,11 +3736,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
+@@ -2671,11 +3737,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
  function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
    const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
    const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
@@ -2278,7 +2283,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
    if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
      throw new Error("AWS qualification base AMI is malformed");
    if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
-@@ -2687,7 +3759,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
+@@ -2687,7 +3760,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
    if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
      throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
    }
@@ -2299,7 +2304,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
  }
  
  function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
-@@ -2860,16 +3944,6 @@ function boundedText(value: string | undefined, maximum: number): string {
+@@ -2860,16 +3945,6 @@ function boundedText(value: string | undefined, maximum: number): string {
    return text;
  }
  
@@ -2316,7 +2321,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
  function ownedWithRetired(active: string[], retired: string[]): string[] {
    return [...new Set([...active, ...retired])];
  }
-@@ -3053,7 +4127,7 @@ function assertLifecycleCapacity(
+@@ -3053,7 +4128,7 @@ function assertLifecycleCapacity(
      if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
        throw new Error("AWS qualification allows one active instance");
      }
@@ -2325,7 +2330,7 @@ index ad26506d6077acc49a4da6f4b1397d7cea6d21be..67b66d70a2d773c8d974780ff9ea2d1a
        throw new Error("AWS qualification launch budget is exhausted");
      }
    }
-@@ -3252,3 +4326,153 @@ function isRetryableReconciliationError(error: unknown): boolean {
+@@ -3252,3 +4327,153 @@ function isRetryableReconciliationError(error: unknown): boolean {
  function sleep(ms: number): Promise<void> {
    return new Promise((resolve) => setTimeout(resolve, ms));
  }
@@ -3269,7 +3274,7 @@ index 0000000000000000000000000000000000000000..aa5bf96dbe726667b7a393c2aeb6cdda
 +  });
 +});
 diff --git a/worker/test/aws-qualification-authority.test.ts b/worker/test/aws-qualification-authority.test.ts
-index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc2777ee7c 100644
+index 0cc641893c499a52165db94d87bde1f0e6b22d9c..aa24aeb09a5eec3909507de9928040d6a4653a58 100644
 --- a/worker/test/aws-qualification-authority.test.ts
 +++ b/worker/test/aws-qualification-authority.test.ts
 @@ -1,7 +1,10 @@
@@ -3283,7 +3288,12 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
  import { EC2SpotClient } from "../src/aws";
  import {
    AWSQualificationController,
-@@ -22,6 +25,7 @@ import type { CoordinatorCheckpointRecord, Env } from "../src/types";
+@@ -18,10 +21,11 @@ import type {
+ } from "../src/aws-qualification-contract";
+ import { leaseConfig } from "../src/config";
+ import { AWSProvider } from "../src/fleet";
+-import type { CoordinatorCheckpointRecord, Env } from "../src/types";
++import type { CoordinatorCheckpointRecord, Env, LeaseRecord } from "../src/types";
  
  const controller: AWSQualificationControllerProps = { deploymentHash: "d".repeat(64) };
  const identity: AWSQualificationRunIdentity = {
@@ -3365,7 +3375,159 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
      }
      await fixture.run.execute(
        retained,
-@@ -1611,23 +1637,23 @@ describe("AWS qualification authority", () => {
+@@ -1451,6 +1477,151 @@ describe("AWS qualification authority", () => {
+     ).rejects.toThrow("launch budget");
+   });
+ 
++  it.each(["matching", "missing", "changed"])(
++    "checks creation-time ownership through capture and source release with %s slug readback",
++    async (slugReadback) => {
++      useImmediateTimeouts();
++      const fixture = authorityFixture();
++      await fixture.run.enroll(controller, identity);
++      const env = {
++        CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
++          execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
++        },
++      } as Env;
++      const client = new EC2SpotClient(env, "us-east-1") as unknown as {
++        ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
++        createServer(
++          config: ReturnType<typeof leaseConfig>,
++          leaseID: string,
++          slug: string,
++          owner: string,
++          imageID: string,
++          securityGroupID: string,
++        ): Promise<{ cloudID: string }>;
++        createImage: EC2SpotClient["createImage"];
++      };
++      const provider = new AWSProvider(env, "us-east-1", fixture.storage);
++      const leaseID = "cbx_abcdef123456";
++      const slug = "qualification-source";
++      const config = {
++        ...leaseConfig({
++          provider: "aws",
++          target: "linux",
++          serverType: "t3.small",
++          serverTypeExplicit: true,
++          capacity: { market: "on-demand" },
++          providerKey: `crabbox-${leaseID}`,
++          sshPublicKey: "ssh-ed25519 AAAAqualification",
++        }),
++        awsProfile: "",
++        awsRootGB: 20,
++        awsSubnetID: "subnet-fixed",
++      };
++      await client.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
++      const source = await client.createServer(
++        config,
++        leaseID,
++        slug,
++        "maintainer",
++        "ami-base",
++        "sg-fixed",
++      );
++      const lease: LeaseRecord = {
++        ...config,
++        id: leaseID,
++        slug,
++        provider: "aws",
++        target: "linux",
++        cloudID: source.cloudID,
++        region: "us-east-1",
++        owner: "maintainer",
++        org: "example-org",
++        serverID: 0,
++        serverName: slug,
++        host: "203.0.113.10",
++        estimatedHourlyUSD: 0.1,
++        maxEstimatedUSD: 1,
++        state: "active",
++        createdAt: new Date().toISOString(),
++        updatedAt: new Date().toISOString(),
++        expiresAt: identity.expiresAt,
++      };
++      const capture = await client.createImage(source.cloudID, "qualification-image", true);
++      expect(capture.id).toBe("ami-created");
++      // This readback reflects only tags actually submitted at creation, never a
++      // reconstructed lease fixture that could hide a dropped ownership tag.
++      if (slugReadback === "missing") fixture.signer.instanceTags.delete("slug");
++      if (slugReadback === "changed") fixture.signer.instanceTags.set("slug", "another-source");
++      const outcome = await provider.releaseLease(lease).then(
++        () => "released",
++        (error: Error) => error.message,
++      );
++      expect(outcome).toBe(
++        slugReadback === "matching"
++          ? "released"
++          : `AWS recovery resource i-owned ownership does not match lease ${leaseID}`,
++      );
++      expect(fixture.signer.calls.filter((c) => c.action === "TerminateInstances")).toHaveLength(
++        slugReadback === "matching" ? 1 : 0,
++      );
++      expect(
++        fixture.signer.calls.some((c) => ["CreateTags", "DeleteTags"].includes(c.action)),
++      ).toBe(false);
++      await fixture.run.finalize(controller);
++      expect((await fixture.run.attest(controller)).finalized).toBe(true);
++    },
++  );
++
++  it("preserves slug at creation without accepting caller-supplied qualification tags", async () => {
++    useImmediateTimeouts();
++    const fixture = authorityFixture();
++    await fixture.run.enroll(controller, identity);
++    await importKey(fixture);
++    const parameters = runInstancesParams();
++    const tags = {
++      slug: "qualification-source",
++      crabbox_qualification_owner: "foreign-owner",
++      crabbox_qualification_run: "foreign-run",
++      crabbox_qualification_sha: "f".repeat(40),
++      crabbox_qualification_expiry: "2099-01-01T00:00:00.000Z",
++      crabbox_qualification_op: "foreign-op",
++    };
++    for (const [specification, resource] of [
++      [1, "instance"],
++      [2, "volume"],
++    ] as const) {
++      parameters[`TagSpecification.${specification}.ResourceType`] = resource;
++      Object.entries(tags).forEach(([key, value], index) => {
++        parameters[`TagSpecification.${specification}.Tag.${index + 1}.Key`] = key;
++        parameters[`TagSpecification.${specification}.Tag.${index + 1}.Value`] = value;
++      });
++    }
++    const launch = request("RunInstances", parameters, "ec2");
++    await fixture.run.execute(identity, launch);
++    const forwarded = fixture.signer.calls.find((c) => c.action === "RunInstances")!.parameters;
++    for (const specification of [1, 2]) {
++      const actual = new Map<string, unknown>();
++      for (let index = 1; index <= 64; index += 1) {
++        const key = forwarded[`TagSpecification.${specification}.Tag.${index}.Key`];
++        if (key)
++          actual.set(
++            String(key),
++            forwarded[`TagSpecification.${specification}.Tag.${index}.Value`],
++          );
++      }
++      expect(Object.fromEntries(actual)).toMatchObject({
++        slug: "qualification-source",
++        crabbox_qualification_owner: identity.owner,
++        crabbox_qualification_run: identity.runId,
++        crabbox_qualification_sha: identity.candidateSha,
++        crabbox_qualification_expiry: identity.expiresAt,
++        crabbox_qualification_op: launch.opId,
++      });
++    }
++    await fixture.run.finalize(controller);
++    expect((await fixture.run.attest(controller)).finalized).toBe(true);
++  });
++
+   it("runs the real public stop path through source, candidate, and promoted image order", async () => {
+     vi.stubGlobal("setTimeout", ((callback: () => void) => {
+       queueMicrotask(callback);
+@@ -1611,23 +1782,23 @@ describe("AWS qualification authority", () => {
      const fixture = authorityFixture();
      await fixture.run.enroll(controller, expiring);
      await importKey(fixture, expiring);
@@ -3394,7 +3556,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
      expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
      expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
    });
-@@ -2011,6 +2037,230 @@ describe("AWS qualification authority", () => {
+@@ -2011,6 +2182,230 @@ describe("AWS qualification authority", () => {
      expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
    });
  
@@ -3625,7 +3787,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
    it("revalidates the expected STS account before every mutation", async () => {
      const fixture = authorityFixture();
      await fixture.run.enroll(controller, identity);
-@@ -2026,6 +2276,7 @@ describe("AWS qualification authority", () => {
+@@ -2026,6 +2421,7 @@ describe("AWS qualification authority", () => {
    it("preserves leading-zero account and reservation owner identities", async () => {
      const fixture = authorityFixture();
      fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
@@ -3633,10 +3795,42 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
      fixture.signer.accountId = "001234567890";
      fixture.signer.ownerId = "001234567890";
      await fixture.run.enroll(controller, identity);
-@@ -2363,6 +2614,424 @@ describe("AWS qualification candidate transport", () => {
+@@ -2363,95 +2759,518 @@ describe("AWS qualification candidate transport", () => {
    });
  });
  
+-function authorityFixture(
+-  options: {
+-    borrowedInventory?: boolean;
+-    delayedImageVisibility?: number;
+-    delayedKeyVisibility?: number;
+-    deleteNotFound?: string;
+-    duplicateForeignKey?: boolean;
+-    duplicateSecurityGroup?: boolean;
+-    failOnce?: string;
+-    http500AfterEffect?: string;
+-    loseAfterEffect?: string;
+-    securityGroupErrorWithId?: boolean;
+-    terminationDescribeNotFound?: boolean;
+-    unknownTaggedInstance?: boolean;
+-    unknownVisibilityDelay?: number;
+-  } = {},
+-) {
+-  const storage = new MemoryStorage();
+-  const signer = new FakeSigner(options);
+-  const env = {
+-    CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
+-    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
+-    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
+-    CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
+-    CRABBOX_AWS_QUALIFICATION_REGION: "us-east-1",
+-    CRABBOX_AWS_QUALIFICATION_ROOT_GB: "20",
+-    CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID: "sg-fixed",
+-    CRABBOX_AWS_QUALIFICATION_SUBNET_ID: "subnet-fixed",
+-  };
+-  const run = new AWSQualificationRun({ storage } as never, env as never, signer);
+-  return { env, run, signer, storage };
+-}
 +describe("first-walk integration with the existing authority", () => {
 +  function clockClaim(firstWalk: boolean, minutes: number) {
 +    const f = firstWalkAuthorityFixture();
@@ -3654,14 +3848,51 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
 +    );
 +    return registry.claim(controller, candidate);
 +  }
-+
+ 
+-function retainedIdentity(): AWSQualificationRunIdentity {
+-  return {
+-    ...identity,
+-    expiresAt: new Date(Date.now() + 38 * 60_000).toISOString(),
+-    retainedImage: {
+-      imageId: "ami-11111111",
+-      snapshotId: "snap-22222222",
+-      sourceSha: "c".repeat(40),
+-      capsuleSha256: "e".repeat(64),
+-    },
+-  };
+-}
 +  it.each([
 +    { firstWalk: true, minutes: 150 },
 +    { firstWalk: false, minutes: 120 },
 +  ])("accepts only the mode's maximum window: %j", async ({ firstWalk, minutes }) => {
 +    await expect(clockClaim(firstWalk, minutes)).resolves.toBeDefined();
 +  });
-+
+ 
+-function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
+-  const fixture = authorityFixture();
+-  const env = {
+-    ...fixture.env,
+-    AWS_ACCESS_KEY_ID: "qualification-test",
+-    AWS_SECRET_ACCESS_KEY: "qualification-test",
+-  };
+-  // Keep the production signer and intercept only its final network boundary.
+-  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+-    const signed = new Request(input, init);
+-    const url = new URL(signed.url);
+-    const service = url.hostname.split(".")[0]!;
+-    expect(["ec2", "sts"]).toContain(service);
+-    expect(url.href).toBe(`https://${service}.us-east-1.amazonaws.com/`);
+-    expect(signed.method).toBe("POST");
+-    expect(signed.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+-    const parameters = new URLSearchParams(await signed.text());
+-    const action = parameters.get("Action")!;
+-    parameters.delete("Action");
+-    parameters.delete("Version");
+-    return await fixture.signer.execute(
+-      service,
+-      action,
+-      "us-east-1",
+-      Object.fromEntries(parameters),
 +  it.each([
 +    { firstWalk: true, minutes: 151 },
 +    { firstWalk: false, minutes: 121 },
@@ -3690,8 +3921,24 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
 +    );
 +    await expect(f.run.prepareFirstWalk(identity, firstWalkRequest())).rejects.toThrow(
 +      "not enabled",
-+    );
-+  });
+     );
+   });
+-  vi.stubGlobal("fetch", fetch);
+-  let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+-  const registryStorage = new MemoryStorage();
+-  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
+-  const namespace = { idFromName: (name: string) => name, get: () => run };
+-  const bindings = {
+-    AWS_QUALIFICATION_RUNS: namespace,
+-    AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
+-  } as never;
+-  return {
+-    ...fixture,
+-    env,
+-    fetch,
+-    namespace,
+-    registry,
+-    registryStorage,
 +  it("bounds stock launch selection and keeps borrowed snapshot reads separate from copy deletion", async () => {
 +    const f = firstWalkAuthorityFixture();
 +    await f.run.enroll(controller, f.identity);
@@ -4055,32 +4302,111 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
 +  return stored;
 +}
 +
- function authorityFixture(
-   options: {
-     borrowedInventory?: boolean;
-@@ -2384,6 +3053,8 @@ function authorityFixture(
-   const signer = new FakeSigner(options);
-   const env = {
-     CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
++function authorityFixture(
++  options: {
++    borrowedInventory?: boolean;
++    delayedImageVisibility?: number;
++    delayedKeyVisibility?: number;
++    deleteNotFound?: string;
++    duplicateForeignKey?: boolean;
++    duplicateSecurityGroup?: boolean;
++    failOnce?: string;
++    http500AfterEffect?: string;
++    loseAfterEffect?: string;
++    securityGroupErrorWithId?: boolean;
++    terminationDescribeNotFound?: boolean;
++    unknownTaggedInstance?: boolean;
++    unknownVisibilityDelay?: number;
++  } = {},
++) {
++  const storage = new MemoryStorage();
++  const signer = new FakeSigner(options);
++  const env = {
++    CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
 +    CRABBOX_AWS_QUALIFICATION_ROLE_ARN:
 +      "arn:aws:iam::123456789012:role/qualification/Qualification",
-     CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
-     CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
-     CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
-@@ -2439,8 +3110,11 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
-   vi.stubGlobal("fetch", fetch);
-   let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
-   const registryStorage = new MemoryStorage();
--  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
-   const namespace = { idFromName: (name: string) => name, get: () => run };
++    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
++    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
++    CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
++    CRABBOX_AWS_QUALIFICATION_REGION: "us-east-1",
++    CRABBOX_AWS_QUALIFICATION_ROOT_GB: "20",
++    CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID: "sg-fixed",
++    CRABBOX_AWS_QUALIFICATION_SUBNET_ID: "subnet-fixed",
++  };
++  const run = new AWSQualificationRun({ storage } as never, env as never, signer);
++  return { env, run, signer, storage };
++}
++
++function retainedIdentity(): AWSQualificationRunIdentity {
++  return {
++    ...identity,
++    expiresAt: new Date(Date.now() + 38 * 60_000).toISOString(),
++    retainedImage: {
++      imageId: "ami-11111111",
++      snapshotId: "snap-22222222",
++      sourceSha: "c".repeat(40),
++      capsuleSha256: "e".repeat(64),
++    },
++  };
++}
++
++function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
++  const fixture = authorityFixture();
++  const env = {
++    ...fixture.env,
++    AWS_ACCESS_KEY_ID: "qualification-test",
++    AWS_SECRET_ACCESS_KEY: "qualification-test",
++  };
++  // Keep the production signer and intercept only its final network boundary.
++  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
++    const signed = new Request(input, init);
++    const url = new URL(signed.url);
++    const service = url.hostname.split(".")[0]!;
++    expect(["ec2", "sts"]).toContain(service);
++    expect(url.href).toBe(`https://${service}.us-east-1.amazonaws.com/`);
++    expect(signed.method).toBe("POST");
++    expect(signed.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
++    const parameters = new URLSearchParams(await signed.text());
++    const action = parameters.get("Action")!;
++    parameters.delete("Action");
++    parameters.delete("Version");
++    return await fixture.signer.execute(
++      service,
++      action,
++      "us-east-1",
++      Object.fromEntries(parameters),
++    );
++  });
++  vi.stubGlobal("fetch", fetch);
++  let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
++  const registryStorage = new MemoryStorage();
++  const namespace = { idFromName: (name: string) => name, get: () => run };
 +  const registry = new AWSQualificationRegistry(
 +    { storage: registryStorage } as never,
 +    { AWS_QUALIFICATION_RUNS: namespace } as never,
 +  );
-   const bindings = {
-     AWS_QUALIFICATION_RUNS: namespace,
-     AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
-@@ -2558,7 +3232,9 @@ class FakeSigner {
++  const bindings = {
++    AWS_QUALIFICATION_RUNS: namespace,
++    AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
++  } as never;
++  return {
++    ...fixture,
++    env,
++    fetch,
++    namespace,
++    registry,
++    registryStorage,
+     get run() {
+       return run;
+     },
+@@ -2552,13 +3371,16 @@ function runInstancesParams(): Record<string, unknown> {
+ }
+ 
+ class FakeSigner {
++  readonly instanceTags = new Map<string, string>();
+   readonly calls: Array<{
+     service: string;
+     action: string;
      region: string;
      parameters: Record<string, unknown>;
    }> = [];
@@ -4090,7 +4416,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
    ownerId: string | undefined;
    advanceNextIdentityByMs = 0;
    instanceDescribeNotFound = false;
-@@ -2569,7 +3245,15 @@ class FakeSigner {
+@@ -2569,9 +3391,16 @@ class FakeSigner {
    ];
    private failed = false;
    private imageDescribeCalls = 0;
@@ -4105,9 +4431,11 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
 +    expiry?: string;
 +  };
    private keyDescribeCalls = 0;
-   private instanceOp = "";
+-  private instanceOp = "";
    private instanceState: "absent" | "running" | "shutting-down" | "terminated" = "absent";
-@@ -2606,6 +3290,18 @@ class FakeSigner {
+   private terminationDescribeCalls = 0;
+   private terminationMissingCalls = 0;
+@@ -2606,6 +3435,18 @@ class FakeSigner {
      region: string,
      parameters: Record<string, unknown>,
    ): Promise<Response> {
@@ -4126,7 +4454,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
      this.calls.push({ service, action, region, parameters: structuredClone(parameters) });
      if (action === this.options.failOnce && !this.failed) {
        this.failed = true;
-@@ -2618,7 +3314,7 @@ class FakeSigner {
+@@ -2618,7 +3459,7 @@ class FakeSigner {
          vi.setSystemTime(new Date(Date.now() + advanceBy));
        }
        return xml(
@@ -4135,7 +4463,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
        );
      }
      if (action === "DescribeKeyPairs") {
-@@ -2653,6 +3349,8 @@ class FakeSigner {
+@@ -2653,6 +3494,8 @@ class FakeSigner {
          publicKey: atob(String(parameters["PublicKeyMaterial"])),
          runId: tagValue(parameters, "crabbox_qualification_run"),
          sha: tagValue(parameters, "crabbox_qualification_sha"),
@@ -4144,7 +4472,33 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
        };
        if (this.options.loseAfterEffect === action && !this.failed) {
          this.failed = true;
-@@ -2850,11 +3548,13 @@ function keyXML(key: {
+@@ -2668,7 +3511,15 @@ class FakeSigner {
+     }
+     if (action === "RunInstances") {
+       this.instanceState = "running";
+-      this.instanceOp = tagValue(parameters, "crabbox_qualification_op");
++      this.instanceTags.clear();
++      for (let index = 1; index <= 64; index += 1) {
++        const key = parameters[`TagSpecification.1.Tag.${index}.Key`];
++        if (key)
++          this.instanceTags.set(
++            String(key),
++            String(parameters[`TagSpecification.1.Tag.${index}.Value`]),
++          );
++      }
+       this.terminationDescribeCalls = 0;
+       if (this.options.loseAfterEffect === action && !this.failed) {
+         this.failed = true;
+@@ -2783,7 +3634,7 @@ class FakeSigner {
+           : []),
+         ...(ownedVisible
+           ? [
+-              `<item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>${this.instanceState}</name></instanceState><tagSet><item><key>crabbox_qualification_run</key><value>${identity.runId}</value></item><item><key>crabbox_qualification_op</key><value>${this.instanceOp}</value></item></tagSet><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item>`,
++              `<item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>${this.instanceState}</name></instanceState><tagSet>${new XMLBuilder().build({ item: [...this.instanceTags].map(([key, value]) => ({ key, value })) })}</tagSet><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item>`,
+             ]
+           : []),
+       ].join("");
+@@ -2850,11 +3701,13 @@ function keyXML(key: {
    publicKey: string;
    runId?: string;
    sha?: string;
@@ -4159,7 +4513,7 @@ index 0cc641893c499a52165db94d87bde1f0e6b22d9c..f9cb633c9c6deac68a8b032de58380cc
    </item>`;
  }
  
-@@ -2914,3 +3614,1489 @@ function awsServerError(): Response {
+@@ -2914,3 +3767,1489 @@ function awsServerError(): Response {
  function xml(body: string): Response {
    return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
  }
