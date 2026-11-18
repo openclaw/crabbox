@@ -1659,7 +1659,15 @@ async function verifyExecutionDeployment(cf, expected) {
 }
 
 export async function controllerCall(cf, url, token, action, value = {}, authorityCF = cf) {
-  const signal = action === "discover" ? cf.recoverySignal?.(action) : undefined;
+  const discovery = ["discover", "transport-discover"].includes(action);
+  if (
+    discovery &&
+    (!value ||
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      Reflect.ownKeys(value).length !== 0)
+  )
+    throw new Error("discovery requires an empty input");
+  const signal = discovery ? cf.recoverySignal?.(action) : undefined;
   const request = async (observation = {}) => {
     const previousSignals = [cf.discoverySignal, authorityCF.discoverySignal];
     if (observation.signal) {
@@ -1710,18 +1718,15 @@ export async function controllerCall(cf, url, token, action, value = {}, authori
       }
     }
   };
-  if (action !== "discover") return await request();
-  if (
-    !value ||
-    Object.getPrototypeOf(value) !== Object.prototype ||
-    Reflect.ownKeys(value).length !== 0
-  )
-    throw new Error("discovery requires an empty input");
+  if (!discovery) return await request();
   const result = await observeControllerDiscovery(request, {
+    action,
     deadline: cf.controllerDeadline,
     signal,
   });
-  discoveredRun(result);
+  if (action === "discover") discoveredRun(result);
+  else if (Object.keys(result).join(",") !== "probe")
+    throw new Error("invalid transport discovery");
   return result;
 }
 
