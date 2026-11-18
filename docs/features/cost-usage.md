@@ -95,6 +95,10 @@ Three cost figures are reported per lease:
   retained machines that stop and resume; otherwise runtime uses the existing
   creation and end/release timestamps.
 
+Each lease's figures round to whole cents, so an amount below half a cent counts as
+$0 and cannot trip a budget. Flavors priced at a cent or two an hour reach that with
+short TTLs or runs: at $0.0112/hour, anything under about 27 minutes records $0.
+
 The read-only lease audit cannot reconstruct an earlier deletion time that was not
 persisted. Confirmed stop/resume intervals remain authoritative.
 
@@ -115,6 +119,7 @@ Pricing precedence (highest first):
 2. Provider pricing (successful quotes cached for up to five minutes):
    - AWS EC2 spot price history.
    - Hetzner Cloud server-type hourly prices.
+   - OVHcloud public catalog consumption prices.
 3. Built-in static fallback rate for the "<provider>:<serverType>" pair.
 4. Final fallback: $3.00/hour for AWS, $0.50/hour for any other provider.
 ```
@@ -122,17 +127,21 @@ Pricing precedence (highest first):
 `CRABBOX_COST_RATES_JSON` is a JSON object mapping `"<provider>:<serverType>"` to an
 hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live prices
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
-(default `1.08`).
+(default `1.08`). OVHcloud quotes use the public catalog for the configured endpoint's
+subsidiary: USD passes through, EUR uses the same rate, and any other currency uses the
+normal fallback path. Set `CRABBOX_COST_RATES_JSON` for those flavors, and for large
+flavors where the $0.50/hour fallback would under-reserve if a quote fails.
 
 Successful quotes are cached in coordinator memory by provider, server type, region
-or location, and market; Hetzner also includes the EUR/USD setting. Each coordinator
+or location, and market; Hetzner and OVHcloud also include the EUR/USD setting. Each coordinator
 environment retains at most 256 quotes. Missing, failed, invalid, or expired quotes
 use the normal lookup/fallback path; on-demand AWS estimates never use Spot quotes.
 
-Each optional AWS or Hetzner quote has a five-second waiting budget, including
+Each optional AWS, Hetzner, or OVHcloud quote has a five-second waiting budget, including
 credentials, identity checks, qualification RPCs, and response-body reads. Timeout
 uses the existing fallback rates; admission, activation, and recovery retain their
-own lifecycle rules. The quote aborts its HTTP requests; already-running credential
+own lifecycle rules. An OVHcloud catalog above 16 MiB is not read and uses the same
+fallback, so quotes cannot exhaust coordinator memory during admission. The quote aborts its HTTP requests; already-running credential
 resolution or authority RPCs remain with their existing owners.
 
 ## Budget guardrails

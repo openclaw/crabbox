@@ -579,7 +579,8 @@ provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 `CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
 Provider choices are `HETZNER_TOKEN`, AWS credentials from the default chain or
 an existing static credential contract, an Azure service principal, a GCP
-service account, or `DAYTONA_CRABBOX_KEY`. Node additionally requires
+service account, `DAYTONA_CRABBOX_KEY`, or OVHcloud application credentials
+with `CRABBOX_OVH_PROJECT_ID` and `CRABBOX_OVH_REGION`. Node additionally requires
 `DATABASE_URL`.
 
 GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
@@ -621,6 +622,9 @@ CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for route-scoped access
 CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for route-scoped access
 DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
 CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
+OVH_APPLICATION_KEY               required for coordinator-provisioned OVHcloud leases, with OVH_APPLICATION_SECRET and OVH_CONSUMER_KEY
+CRABBOX_OVH_PROJECT_ID            required OVHcloud project for coordinator-provisioned leases
+CRABBOX_OVH_REGION                required default OVHcloud region
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login

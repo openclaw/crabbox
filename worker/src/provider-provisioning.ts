@@ -76,7 +76,7 @@ export interface ProviderResumableProvisioning {
 }
 
 export interface ProviderProvisioningCleanupClaim {
-  provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona">;
+  provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona" | "ovh">;
   cloudID: string;
   region?: string;
   providerProject?: string;
@@ -175,6 +175,14 @@ export function validateProviderProvisioningCleanupClaim(
       // original allocation context grants managed cleanup authority.
       return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claim.cloudID) &&
         /^daytona:context:v1:[a-f0-9]{64}$/.test(claim.providerScope ?? "")
+        ? claim
+        : undefined;
+    case "ovh":
+      // An instance is only addressable inside the project and region it was created in.
+      return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claim.cloudID) &&
+        nonEmptyClaimValue(claim.region) &&
+        nonEmptyClaimValue(claim.providerResourceID) &&
+        /^ovh:project:[A-Za-z0-9_-]+$/.test(claim.providerScope ?? "")
         ? claim
         : undefined;
   }

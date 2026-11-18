@@ -208,6 +208,52 @@ crabbox cleanup --provider ovh --dry-run
 crabbox cleanup --provider ovh
 ```
 
+## Coordinator Provisioning
+
+A coordinator can provision OVHcloud Public Cloud instances in one configured
+project, so its spend limits, idle and TTL reaping, usage, and run history apply to
+them. The CLI does not select this path yet: `provider: ovh` still runs direct.
+
+```text
+OVH_APPLICATION_KEY
+OVH_APPLICATION_SECRET
+OVH_CONSUMER_KEY
+CRABBOX_OVH_PROJECT_ID              # the project is server configuration, never client input
+CRABBOX_OVH_REGION                  # default region; a lease may request another in the project
+```
+
+Optional coordinator settings:
+
+```text
+OVH_ENDPOINT                        # URL or alias ovh-us, ovh-ca, ovh-eu; default ovh-us
+CRABBOX_OVH_IMAGE                   # default Ubuntu 24.04; Debian or Ubuntu name or exact id
+CRABBOX_OVH_FLAVOR                  # default b3-8
+```
+
+The credentials need the routes listed in [Credential Scope](#credential-scope).
+Prices come from the unauthenticated public catalog, so quotes need no extra grant.
+
+OVH instances carry no provider labels. Before dispatching a create, the coordinator
+records a random per-allocation instance name, then records the exact instance id.
+Deletion requires that id, that name, the region, and the project to all match, and
+recovery after a lost response finds only that exact name, so a same-named instance
+from elsewhere is never adopted. Any mismatch leaves cleanup unresolved for an
+operator. A not-found answer is trusted only while the project is still visible to
+the configured credentials. Direct-mode instances sharing the project are not
+touched, and coordinator orphan sweeps do not cover OVH.
+
+Flavors are selected by name, because rate overrides and catalog plans key on it.
+
+Each lease creates a project SSH key only to satisfy the create call, and removes
+it once the create outcome is known; cloud-init authorizes the lease's public key.
+Release removes any key left behind. A create that fails around a coordinator
+restart or an OVH API outage can leave an inert `crabbox-cbx-*` public key record.
+It grants no access and costs nothing, and can be deleted by hand.
+
+OVH does not support coordinator workspaces, native image lifecycle, or desktop,
+browser, and code leases, and offers no native expiry: the coordinator alarm is the
+only reaper.
+
 ## Guarded Live Smoke
 
 The repeatable live check is opt-in:
