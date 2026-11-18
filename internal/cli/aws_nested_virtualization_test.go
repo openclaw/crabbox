@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -234,5 +235,22 @@ func TestCoordinatorAWSNestedVirtualizationInput(t *testing.T) {
 				t.Fatalf("awsNestedVirtualization must be omitted: %v", value)
 			}
 		})
+	}
+}
+
+func TestLeaseFlagsRejectAWSNestedVirtualizationForOtherProviders(t *testing.T) {
+	cfg := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, cfg)
+	if fs.Lookup("aws-nested-virtualization") == nil {
+		// Core tests register a stub AWS provider; mirror the real adapter flag.
+		fs.Bool("aws-nested-virtualization", false, "")
+	}
+	if err := parseFlags(fs, []string{"--provider", "hetzner", "--aws-nested-virtualization"}); err != nil {
+		t.Fatal(err)
+	}
+	err := applyLeaseCreateFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "--aws-nested-virtualization requires provider=aws") {
+		t.Fatalf("err=%v", err)
 	}
 }
