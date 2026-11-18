@@ -225,6 +225,33 @@ operator; do not clear intent, retry the mutation, substitute a new identity or
 expand permissions to get past a refusal. This is a bounded recovery option,
 not an availability guarantee or qualification success.
 
+## Private reseal failure evidence
+
+After CLI source validation and acquisition of the existing journal lock, `reseal`
+creates one exclusive mode-0600 `session-reseal-<random>.jsonl` in the original
+private recovery directory. Each line includes monotonic elapsed time and is flushed before work continues; the
+file is capped at 128 KiB. Retain it with the original plan, admission journal
+and idle-controller proof. It is local operational evidence, never a public
+artifact or an admission receipt.
+
+The first record binds the attempt, source and canonical plan digest. Fixed stage
+labels distinguish preflight, token/version/fence checks, proof/custody checks,
+recovery-child invocation, journal advancement and final checks. Management
+records report client-call intent and return/failure, with a numeric error status
+or an allowlisted network code when available. Intent establishes neither invocation nor
+server receipt; a returned value still must pass the unchanged identity checks.
+Child failures record only a fixed reason, numeric exit code and whether process
+group settlement completed. Successful child return still requires the original
+proof and journal advancement checks.
+
+No raw exception, stderr, response body, header, URL, credential or environment
+enters these records. Earlier CLI validation failures have no diagnostic file;
+an interrupted invocation may leave a partial final line or no terminal event.
+A missing terminal event is unknown, never success. Diagnostic write failure
+stops the operation and does not authorize another issuance or delivery. The
+original journal and canonical owner remain authoritative for recovery; these
+records do not change source, custody, freshness, deadlines or enrollment gates.
+
 ## Credential-free checks
 
 Use Node from `.node-version`:

@@ -2,6 +2,7 @@
 // Operator tooling only. Registry truth remains with the existing private owner.
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -249,7 +250,8 @@ export async function sessionChild(
   input,
   { signal, timeout = 180_000, cwd, importKeyDryRun = false } = {},
 ) {
-  if (process.platform === "win32" || signal?.aborted) fail();
+  if (process.platform === "win32" || signal?.aborted)
+    throw new SessionChildFailure(signal?.aborted ? "cancelled" : "unsupported", null, true);
   const child = spawn(argv[0], argv.slice(1), {
     env,
     cwd,
@@ -259,7 +261,8 @@ export async function sessionChild(
   let timer,
     failed = false,
     size = 0,
-    exitCode;
+    exitCode,
+    failureReason;
   const chunks = [],
     errors = [];
   const kill = () => {
@@ -267,45 +270,54 @@ export async function sessionChild(
       try {
         process.kill(-child.pid, "SIGKILL");
       } catch (e) {
-        if (e.code !== "ESRCH") failed = true;
+        if (e.code !== "ESRCH") {
+          failed = true;
+          failureReason ??= "settlement-failed";
+        }
       }
   };
-  const stop = () => {
+  const stop = (reason) => {
     failed = true;
+    failureReason ??= reason;
     kill();
   };
+  const cancel = () => stop("cancelled");
   const closed = new Promise((resolve) => child.on("close", resolve));
   const exited = new Promise((resolve) => {
     child.on("error", () => {
       failed = true;
+      failureReason ??= "spawn-failed";
       resolve();
     });
     child.on("exit", (code) => {
       exitCode = code;
-      if (code !== (importKeyDryRun ? 254 : 0)) failed = true;
+      if (code !== (importKeyDryRun ? 254 : 0)) {
+        failed = true;
+        failureReason ??= "exit";
+      }
       resolve();
     });
   });
   child.stdout.on("data", (data) => {
     size += data.length;
-    if (size > 128 * 1024) stop();
+    if (size > 128 * 1024) stop("output-limit");
     else chunks.push(data);
   });
   child.stderr?.on("data", (data) => {
     size += data.length;
-    if (size > 128 * 1024) stop();
+    if (size > 128 * 1024) stop("output-limit");
     else errors.push(data);
   });
-  child.stdin.on("error", stop);
+  child.stdin.on("error", () => stop("stdin-failed"));
   try {
-    signal?.addEventListener("abort", stop, { once: true });
-    timer = setTimeout(stop, timeout);
-    if (signal?.aborted) stop();
+    signal?.addEventListener("abort", cancel, { once: true });
+    timer = setTimeout(() => stop("timeout"), timeout);
+    if (signal?.aborted) cancel();
     child.stdin.end(input ?? "");
     await exited;
   } finally {
     clearTimeout(timer);
-    signal?.removeEventListener("abort", stop);
+    signal?.removeEventListener("abort", cancel);
     if (child.pid) {
       kill();
       // Settlement is deliberately not cancelled when the caller is cancelled.
@@ -315,20 +327,20 @@ export async function sessionChild(
           process.kill(-child.pid, 0);
         } catch (e) {
           if (e.code === "ESRCH") break;
-          fail();
+          childFail("settlement-failed", exitCode, false);
         }
         if (performance.now() >= end) {
           child.stdout.destroy();
           child.stdin.destroy();
           child.stderr?.destroy();
-          fail();
+          childFail("settlement-failed", exitCode, false);
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
     await closed;
   }
-  if (failed) fail();
+  if (failed) throw new SessionChildFailure(failureReason, exitCode, true);
   if (importKeyDryRun) {
     // CLI v2 service errors are exit254. Never accept substrings, stdout, local
     // errors or a successful mutation; never return the raw message/encoded detail.
@@ -438,8 +450,98 @@ const awsEnv = (credentials, region) => ({
   AWS_CLI_AUTO_PROMPT: "off",
 });
 
+// Separate from the admission journal: diagnostics never grant success or replay.
+// Only trusted, fixed labels and numeric HTTP/process outcomes enter this file.
+export async function withResealDiagnosticFile(plan, workdir, run) {
+  if (
+    fs.realpathSync(workdir) !== path.resolve(workdir) ||
+    fs.statSync(workdir).uid !== process.getuid() ||
+    fs.statSync(workdir).mode & 0o077 ||
+    !/^[0-9a-f]{24}$/.test(plan.attemptId ?? "") ||
+    !/^[0-9a-f]{40}$/.test(plan.sourceSha ?? "")
+  )
+    fail();
+  const fd = fs.openSync(
+    path.join(workdir, `session-reseal-${randomBytes(16).toString("hex")}.jsonl`),
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  let bytes = 0;
+  const started = performance.now();
+  const write = (value) => {
+    const stat = fs.fstatSync(fd);
+    const line = canonical({ ...value, elapsedMs: Math.floor(performance.now() - started) }) + "\n";
+    bytes += Buffer.byteLength(line);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.mode & 0o077 || bytes > 128 * 1024) fail();
+    fs.writeFileSync(fd, line);
+    fs.fsyncSync(fd);
+  };
+  try {
+    write({
+      profile: "qualification-session-reseal-diagnostic/v1",
+      attemptId: plan.attemptId,
+      sourceSha: plan.sourceSha,
+      planSha256: digest(canonical(plan)),
+    });
+    const parent = fs.openSync(workdir, "r");
+    try {
+      fs.fsyncSync(parent);
+    } finally {
+      fs.closeSync(parent);
+    }
+    return await run(write);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+class SessionChildFailure extends Error {
+  constructor(reason, exitCode, settled) {
+    super("qualification session replacement refused; preserve original intent and custody");
+    this.detail = Object.freeze({
+      reason,
+      exitCode: Number.isSafeInteger(exitCode) ? exitCode : null,
+      settled,
+    });
+  }
+}
+
+const childFail = (reason, exitCode, settled) => {
+  throw new SessionChildFailure(reason, exitCode, settled);
+};
+
+// Fixed stages are deliberately independent of exception messages and server data.
+export async function replaceIdleSession(plan, state, options) {
+  const diagnostic = options.mode === "reseal" ? (options.diagnostic ?? (() => {})) : () => {};
+  let stage = "preflight";
+  const step = (name) => {
+    stage = name;
+    diagnostic({ kind: "stage", stage, outcome: "started" });
+  };
+  try {
+    step("preflight");
+    const value = await replaceIdleSessionOperation(plan, state, { ...options, step, diagnostic });
+    diagnostic({
+      kind: "stage",
+      stage: "complete",
+      outcome: "completed",
+      resealed: value.phase === "resealed",
+    });
+    return value;
+  } catch (error) {
+    diagnostic({
+      kind: "stage",
+      stage,
+      outcome: "failed",
+      reason: options.signal?.aborted ? "cancelled" : "refused-or-failed",
+      ...(error instanceof SessionChildFailure ? { child: error.detail } : {}),
+    });
+    throw error;
+  }
+}
+
 // Effects are injected for offline tests. The CLI below fixes every live effect.
-export async function replaceIdleSession(
+async function replaceIdleSessionOperation(
   plan,
   state,
   {
@@ -455,6 +557,8 @@ export async function replaceIdleSession(
     workdir,
     claimIssuance = claimSessionIssuance,
     recovery,
+    step,
+    diagnostic,
   },
 ) {
   const admission = validateReplacementPlan(
@@ -509,18 +613,53 @@ export async function replaceIdleSession(
   api.request = async (route, init = {}, options = {}) => {
     clock(mode === "deliver");
     if (++requests > 400 || (init.method ?? "GET") !== "GET") fail();
-    return cf.request(
-      route,
-      {
-        ...init,
-        redirect: "error",
-        signal: AbortSignal.any([
-          AbortSignal.timeout(Math.max(1, Math.min(15_000, time(plan.recoveryStopsAt) - now()))),
-          ...(signal ? [signal] : []),
-        ]),
-      },
-      { ...options, boundedBytes: 1024 * 1024 },
-    );
+    // Invoking the client is not proof that the server received the request.
+    // Route text, headers, bodies and arbitrary error properties are never copied.
+    const operation = route.split("?", 1)[0].split("/").at(-1);
+    const endpoint = [
+      "verify",
+      "deployments",
+      "settings",
+      "subdomain",
+      "schedules",
+      "routes",
+      "domains",
+      "scripts",
+      "namespaces",
+      "v2",
+    ].includes(operation)
+      ? operation
+      : "service";
+    diagnostic({ kind: "management-read", endpoint, outcome: "client-call-intent" });
+    try {
+      const value = await cf.request(
+        route,
+        {
+          ...init,
+          redirect: "error",
+          signal: AbortSignal.any([
+            AbortSignal.timeout(Math.max(1, Math.min(15_000, time(plan.recoveryStopsAt) - now()))),
+            ...(signal ? [signal] : []),
+          ]),
+        },
+        { ...options, boundedBytes: 1024 * 1024 },
+      );
+      diagnostic({ kind: "management-read", endpoint, outcome: "returned" });
+      return value;
+    } catch (error) {
+      const status = error?.responseInfo?.status;
+      diagnostic({
+        kind: "management-read",
+        endpoint,
+        outcome: "failed",
+        status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+        code:
+          ["ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ABORT_ERR"].find(
+            (code) => code === error?.code || code === error?.cause?.code,
+          ) ?? null,
+      });
+      throw error;
+    }
   };
   api.list = async (route) => {
     const all = [];
@@ -795,7 +934,9 @@ export async function replaceIdleSession(
     await persist(state.phase, { recoverySourceSha: recovery.sourceSha });
   // Reconciliation never issues credentials or repeats a delivery, even after a
   // lost successful response. Unknown delivery stays permanently unadmitted.
+  step("token-verification");
   await token();
+  step("authority-version");
   const observedVersion = await api.latestVersion(authorityName);
   if (
     !uuid.test(observedVersion ?? "") ||
@@ -813,6 +954,7 @@ export async function replaceIdleSession(
     fail();
   const isolation = structuredClone(plan.isolation);
   isolation.authority.version = observedVersion;
+  step("authority-fence");
   const afterSettingsSha256 = await fence(isolation, true);
   if (state.phase === "delivery-confirmed")
     await persist("reseal-candidate", {
@@ -821,11 +963,14 @@ export async function replaceIdleSession(
       candidateIsolation: isolation,
     });
   if (mode === "inspect") return state;
+  step("post-idle-proof");
   const proof = await readProof("post");
   const observed = verifyReplacementIdle(plan, proof, isolation, now(), true, afterSettingsSha256);
   if (observed < time(state.deliveryConfirmedAt)) fail();
+  step("post-custody");
   custody(plan, await readCustody("post"), now(), observedVersion, false);
   const recoveryStartedAt = now();
+  step("recovery-child");
   await run(
     [
       plan.tools.node.path,
@@ -844,16 +989,21 @@ export async function replaceIdleSession(
       QUALIFICATION_IDLE_PLAN_SHA256: digest(canonical(proof.ownerPlan)),
     },
   );
+  step("recovered-proof");
   const recovered = await readProof("post");
   verifyReplacementIdle(plan, recovered, isolation, now(), true, afterSettingsSha256);
+  step("recovery-advancement");
   if (
     !equal(recovered.ownerPlan, proof.ownerPlan) ||
     recovered.state.sequence <= proof.state.sequence ||
     !(time(recovered.state.events.at(-1)?.at) >= recoveryStartedAt)
   )
     fail();
+  step("final-authority-fence");
   await fence(isolation, true);
+  step("final-token-verification");
   await token();
+  step("persist-reseal");
   await persist("resealed", {
     afterVersion: observedVersion,
     afterSettingsSha256,
@@ -942,25 +1092,29 @@ export async function replacementCommand(args, env = process.env) {
         create: args[0] === "deliver",
         initial: () => replacementInitialState(plan),
       },
-      (state, save) =>
-        replaceIdleSession(plan, state, {
-          mode: args[0],
-          cf: new Cloudflare(plan.isolation.accountId, env.CLOUDFLARE_API_TOKEN),
-          save,
-          env,
-          signal: stop.signal,
-          workdir,
-          recovery,
-          readCustody: (stage) => readPrivateJSON(path.join(workdir, `${stage}-custody.json`)),
-          readProof: (stage) => ({
-            ownerPlan: readPrivateJSON(
-              path.join(workdir, `${stage}-idle`, "idle-controller-plan.json"),
-            ),
-            state: readPrivateJSON(
-              path.join(workdir, `${stage}-idle`, "idle-controller-state.json"),
-            ),
-          }),
-        }),
+      (state, save) => {
+        const run = (diagnostic) =>
+          replaceIdleSession(plan, state, {
+            diagnostic,
+            mode: args[0],
+            cf: new Cloudflare(plan.isolation.accountId, env.CLOUDFLARE_API_TOKEN),
+            save,
+            env,
+            signal: stop.signal,
+            workdir,
+            recovery,
+            readCustody: (stage) => readPrivateJSON(path.join(workdir, `${stage}-custody.json`)),
+            readProof: (stage) => ({
+              ownerPlan: readPrivateJSON(
+                path.join(workdir, `${stage}-idle`, "idle-controller-plan.json"),
+              ),
+              state: readPrivateJSON(
+                path.join(workdir, `${stage}-idle`, "idle-controller-state.json"),
+              ),
+            }),
+          });
+        return args[0] === "reseal" ? withResealDiagnosticFile(plan, workdir, run) : run();
+      },
     );
   } finally {
     process.removeListener("SIGINT", cancel);
