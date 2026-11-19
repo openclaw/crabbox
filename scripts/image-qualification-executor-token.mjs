@@ -9,13 +9,7 @@ function invalid() {
 // Public template: no credential is generated or exported by the workflow.
 export function executorCredentialIdentity(env) {
   const expected = {
-    version: env.QUALIFICATION_INSTALLATION_ID ? 2 : 1,
-    ...(env.QUALIFICATION_INSTALLATION_ID
-      ? {
-          installationId: env.QUALIFICATION_INSTALLATION_ID,
-          relayWorker: env.QUALIFICATION_RELAY_WORKER,
-        }
-      : {}),
+    version: 1,
     repositoryId: env.GITHUB_REPOSITORY_ID,
     workflowSha: env.QUALIFICATION_WORKFLOW_SHA,
     candidateSha: env.QUALIFICATION_CANDIDATE_SHA,
@@ -26,10 +20,6 @@ export function executorCredentialIdentity(env) {
   };
   const ref = `refs/heads/${env.QUALIFICATION_DEFAULT_BRANCH}`;
   if (
-    (expected.version === 2 &&
-      (!/^[0-9a-f]{64}$/.test(expected.installationId ?? "") ||
-        !/^crabbox-image-qualification-relay-[1-9][0-9]*-1$/.test(expected.relayWorker ?? ""))) ||
-    (!env.QUALIFICATION_INSTALLATION_ID && Boolean(env.QUALIFICATION_RELAY_WORKER)) ||
     !/^[1-9][0-9]*$/.test(expected.repositoryId ?? "") ||
     !/^[1-9][0-9]*$/.test(expected.runId ?? "") ||
     expected.runAttempt !== "1" ||
@@ -58,11 +48,9 @@ export function maskExecutorSecret(value) {
 
 export function readExecutorCredential(
   env,
-  { now = Date.now(), mask = maskExecutorSecret, expectedDigest, preparationStartsAt } = {},
+  { now = Date.now(), mask = maskExecutorSecret, expectedDigest } = {},
 ) {
   const expected = executorCredentialIdentity(env);
-  const starts = preparationStartsAt === undefined ? now : Date.parse(preparationStartsAt);
-  if (!Number.isFinite(starts) || starts - now > 60 * 60_000) invalid();
   let supplied;
   const raw = env.QUALIFICATION_EXECUTOR_CREDENTIAL;
   if (typeof raw !== "string" || !raw || Buffer.byteLength(raw) > 4096) invalid();
@@ -86,8 +74,7 @@ export function readExecutorCredential(
     Object.entries(expected).some(([key, value]) => supplied[key] !== value) ||
     !Number.isFinite(now) ||
     Date.parse(expected.expiresAt) <= now ||
-    Date.parse(expected.expiresAt) - Math.max(now, starts) >
-      (["first-walk", "key-authorization"].includes(env.QUALIFICATION_MODE) ? 150 : 120) * 60_000
+    Date.parse(expected.expiresAt) - now > 120 * 60_000
   )
     invalid();
   const tokenSha256 = crypto.createHash("sha256").update(supplied.token).digest("hex");
@@ -120,7 +107,6 @@ export function executorEnvironment(env, token) {
 }
 
 export function executorToken(env) {
-  const identity = executorCredentialIdentity(env);
   const relay = new URL(env.QUALIFICATION_RELAY_URL);
   if (
     relay.protocol !== "https:" ||
@@ -133,9 +119,7 @@ export function executorToken(env) {
     !/^crabbox-image-qualification-relay-[0-9]+-1\.[a-z0-9-]+\.workers\.dev$/.test(
       relay.hostname,
     ) ||
-    !relay.hostname.startsWith(
-      `${identity.relayWorker ?? `crabbox-image-qualification-relay-${env.GITHUB_RUN_ID}-1`}.`,
-    ) ||
+    !relay.hostname.startsWith(`crabbox-image-qualification-relay-${env.GITHUB_RUN_ID}-1.`) ||
     !/^[0-9a-f]{64}$/.test(env.QUALIFICATION_EXECUTOR_TOKEN_SHA256 ?? "")
   )
     invalid();
