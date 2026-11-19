@@ -371,9 +371,11 @@ for (const {
   badPreparation = false,
   evidenceFault,
   stopObservation,
+  preparationFault = false,
   hygieneWarning = false,
 } of [
   { label: "captures exactly once and dies for independent cleanup" },
+  { label: "retains safe preparation error evidence after recovery", preparationFault: true },
   { label: "rejects failed first walk without replay", badResult: true },
   { label: "rejects incomplete preparation before capture", badPreparation: true },
   { label: "rejects a log replaced by a key symlink", evidenceFault: "symlink" },
@@ -408,6 +410,7 @@ for (const {
       commands = [];
     let executor;
     let leaseReads = 0;
+    let preparationRequests = 0;
     const result = {
       completed: !badResult,
       unmounted: true,
@@ -466,9 +469,20 @@ for (const {
           if (stopObservation === "missing-id") delete data.lease.id;
         }
       } else if (req.url.endsWith("/use")) data = { claim: "fixture-claim" };
-      else if (req.url.endsWith("/first-walk"))
+      else if (req.url.endsWith("/first-walk")) {
+        preparationRequests++;
+        if (preparationFault && preparationRequests === 1) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "first-walk instance account is not verified",
+              private: "UNEXPECTED_ERROR_BODY_DO_NOT_EXPORT",
+            }),
+          );
+          return;
+        }
         data = { phase: "attached", volumeID: result.volumeID };
-      else data = { checkpoint: { state: "ready", image: { snapshotIDs: ["snap-22222222"] } } };
+      } else data = { checkpoint: { state: "ready", image: { snapshotIDs: ["snap-22222222"] } } };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(data));
     });
@@ -566,7 +580,14 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
       assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
-      if (!badResult && !badPreparation && !evidenceFault && !stopObservation && !hygieneWarning)
+      if (
+        !badResult &&
+        !badPreparation &&
+        !evidenceFault &&
+        !stopObservation &&
+        !hygieneWarning &&
+        !preparationFault
+      )
         await checkPinnedCLI(commands, dir);
       for (const command of commands) {
         for (const key of [
@@ -655,6 +676,18 @@ console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.
         return;
       }
       assert.equal(leaseReads, 2, "successful stop must not add a diagnostic read");
+      if (preparationFault) {
+        const evidence = JSON.parse(
+          fs.readFileSync(path.join(proof, "first-walk-preparation.json")),
+        );
+        assert.equal(evidence.attempts, 2);
+        assert.equal(evidence.outcome, "response-received");
+        assert.equal(evidence.firstError.reason, "instance-account-unverified");
+        assert.equal(
+          JSON.stringify(evidence).includes("UNEXPECTED_ERROR_BODY_DO_NOT_EXPORT"),
+          false,
+        );
+      }
       const population = commands.filter((c) => c.input.includes("--work-root"));
       assert.equal(population.length, 1);
       assert.match(population[0].input, /--uid=crabbox --gid=crabbox/);
