@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { executorCredentialIdentity, readExecutorCredential } from "./image-qualification-executor-token.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
@@ -18,6 +19,7 @@ const retainedRunMs = 38 * 60 * 1000;
 const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
+let executorTokenForRedaction;
 const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
@@ -968,6 +970,7 @@ function publishHandoff(identityCheck, manifest) {
     "AWS_SESSION_TOKEN",
     "CLOUDFLARE_API_TOKEN",
     "QUALIFICATION_CONTROLLER_TOKEN",
+    "QUALIFICATION_EXECUTOR_CREDENTIAL",
   ]) {
     if (Object.hasOwn(process.env, name)) throw new Error(`${name} must be absent from preparation`);
   }
@@ -976,12 +979,21 @@ function publishHandoff(identityCheck, manifest) {
     manifest.manifestSha256,
     new Date(Date.now()).toISOString(),
   );
+  assertHandoffWindow(handoff);
+  const executorIdentity = executorCredentialIdentity({
+    ...process.env,
+    QUALIFICATION_HANDOFF_SHA256: digest(canonical(handoff)),
+    QUALIFICATION_EXPIRES_AT: handoff.expiresAt,
+  });
   const directory = path.resolve(required("QUALIFICATION_HANDOFF_DIR"));
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   // Never replace a prepared identity, even when a caller repeats admission locally.
   fs.writeFileSync(path.join(directory, "handoff.json"), `${canonical(handoff)}\n`, {
     flag: "wx",
     mode: 0o600,
+  });
+  fs.writeFileSync(path.join(directory, "executor-identity.json"), `${canonical(executorIdentity)}\n`, {
+    flag: "wx", mode: 0o600,
   });
   let projection;
   if (handoff.mode === "retained") {
@@ -1095,7 +1107,7 @@ function candidateMetadata(mainModule, bindings, createNamespace = false) {
     compatibility_flags: ["nodejs_compat"],
     bindings,
     ...(createNamespace
-      ? { migrations: [{ tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] }] }
+      ? { migrations: { new_tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] } }
       : {}),
   };
 }
@@ -1364,7 +1376,7 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
   ]);
   if (
     (routes ?? []).length !== 0 ||
-    (schedules ?? []).length !== 0 ||
+    !Array.isArray(schedules?.schedules) || schedules.schedules.length !== 0 ||
     (domains ?? []).length !== 0 ||
     namespaceCount !== durableObjectCount ||
     subdomain?.enabled !== workersDev ||
@@ -1403,7 +1415,10 @@ async function deploy() {
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
-  const executorToken = crypto.randomBytes(32).toString("hex");
+  const { token: executorToken, tokenSha256: executorTokenSha256 } = readExecutorCredential({
+    ...process.env, QUALIFICATION_EXPIRES_AT: expiresAt,
+  });
+  executorTokenForRedaction = executorToken;
   const controllerToken = required("QUALIFICATION_CONTROLLER_TOKEN");
   const placeholderIdentity = { ...baseIdentity, deploymentHash: "0".repeat(64) };
   const stagingBindings = candidateBindings(placeholderIdentity, adminToken, sharedToken, config);
@@ -1554,6 +1569,7 @@ async function deploy() {
   writeJSON(path.join(proofDir, "deployment.json"), {
     version: 1,
     handoffSha256: digest(canonical(handoff)),
+    executorTokenSha256,
     runId,
     candidateSha: identity.candidateSha,
     workflowSha: identityCheck.workflowSha,
@@ -1609,7 +1625,7 @@ async function deploy() {
   appendOutput("relay_version", relayVersion);
   appendOutput("relay_binding_digest", relayBindingDigest);
   appendOutput("relay_url", relayURL);
-  appendOutput("executor_token", executorToken);
+  appendOutput("executor_token_sha256", executorTokenSha256);
   appendOutput("deployment_hash", deploymentHash);
   appendOutput("candidate_sha", identity.candidateSha);
   appendOutput("candidate_version", candidateVersion);
@@ -1706,13 +1722,11 @@ async function deleteCandidate(cf, worker) {
       main_module: "tombstone.mjs",
       compatibility_date: "2026-09-03",
       bindings: [],
-      migrations: [
-        {
-          old_tag: "qualification-v1",
-          new_tag: "qualification-delete",
-          deleted_classes: ["FleetDurableObject"],
-        },
-      ],
+      migrations: {
+        old_tag: "qualification-v1",
+        new_tag: "qualification-delete",
+        deleted_classes: ["FleetDurableObject"],
+      },
     });
     await cf.deleteScript(worker);
   } finally {
@@ -2227,6 +2241,7 @@ function sanitizeEvidence(value) {
 }
 
 function redactText(value) {
+  if (executorTokenForRedaction) value = value.replaceAll(executorTokenForRedaction, "[executor-token]");
   return value
     .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
     .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/gi, "[aws-resource]")

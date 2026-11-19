@@ -237,6 +237,16 @@ derived owner, capsule, authority identity, configuration digest, and deadlines.
 Private account, network and resource coordinates are bound only by the digest;
 they are not published in this record.
 
+The artifact also includes `executor-identity.json`. The protected deployer and
+separate `image-qualification-executor` environment receive the same original
+encoded `CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL`, binding that identity
+to a fresh executor token. Both readers validate the exact identity and deadline,
+and mask the encoded credential and decoded token before use. Job outputs and
+public artifacts contain only the token digest; the executor receives no AWS,
+Cloudflare, controller, or GitHub bearer credential. A mismatched or expired
+credential stops execution while the independent finalizer/reaper retains cleanup
+ownership. Do not replace an enrolled token or extend its expiry.
+
 For retained mode, `iam-inputs.json` projects the same record into
 `authority_owner`, `run_id`, `source_sha`, `starts_at`, `creation_expires_at`, and
 `cleanup_expires_at`. Here `source_sha` is the **candidate SHA**, not the workflow
