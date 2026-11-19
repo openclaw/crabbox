@@ -288,8 +288,8 @@ test("retained installer admission rejects the real legacy installer before depl
     "utf8",
   );
   const deploy = control.slice(
-    control.indexOf("async function deploy({"),
-    control.indexOf("async function arm({"),
+    control.indexOf("async function deploy()"),
+    control.indexOf("async function arm()"),
   );
   const admission = deploy.indexOf("verifyManifest(");
   const deployment = deploy.indexOf("await preparePrivateCandidate(");
