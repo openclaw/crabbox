@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFirstWalkRecipe, verifyFirstWalkPreparation } from "./image-qualification-control.mjs";
+import { prepareFirstWalkWithEvidence } from "./image-qualification-first-walk-http.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const required = (name) => {
@@ -265,16 +266,14 @@ try {
     leaseID: targetID,
     readinessReceiptSha256: readiness,
   };
-  let attachment;
-  for (let i = 0; i < 120; i++) {
-    try {
-      attachment = await api("POST", `/v1/checkpoints/${checkpointID}/first-walk`, intent);
-      break;
-    } catch (error) {
-      if (i === 119) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
+  const attachment = await prepareFirstWalkWithEvidence({
+    relay,
+    token,
+    intent,
+    checkpointID,
+    proof,
+    remaining,
+  });
   if (attachment?.phase !== "attached" || !/^vol-[a-f0-9]+$/.test(attachment.volumeID ?? ""))
     throw new Error("copy attachment not proven");
   const script = `set -eu\nbase=$(mktemp -d /tmp/first-walk-input.XXXXXXXX)\ntrap 'sudo rm -rf -- "$base"' EXIT\nprintf '%s' '${recipe.toString("base64")}' | base64 -d >"$base/recipe"\nprintf '%s' '${runner.toString("base64")}' | base64 -d >"$base/runner.py"\nsudo systemd-run --quiet --wait --pipe --unit=crabbox-first-walk-${suffix} --property=MemoryMax=2G --property=TasksMax=32 --property=LimitNOFILE=65536 --property=RuntimeMaxSec=3600 --property=KillMode=control-group unshare --mount --propagation private -- python3 "$base/runner.py" --volume '${attachment.volumeID}' --saved-work-root '${work}' --recipe "$base/recipe" --recipe-sha256 '${sha(recipe)}' --output "$base/evidence"\n`;
