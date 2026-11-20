@@ -109,6 +109,16 @@ tailscale_backend_state() {
     sed -n 's/.*"BackendState"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
     head -n1
 }
+stop_lease_tailscaled() {
+  daemon_pid="$(cat "${TS_PID_FILE}" 2>/dev/null || true)"
+  case "${daemon_pid}" in
+    ""|*[!0-9]*) return 0 ;;
+  esac
+  cmdline="$(tr '\000' ' ' <"/proc/${daemon_pid}/cmdline" 2>/dev/null || true)"
+  case "${cmdline}" in
+    *tailscaled*"--socket=${TS_SOCKET}"*) kill "${daemon_pid}" 2>/dev/null || true ;;
+  esac
+}
 if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then
   old_pid="$(cat "${TS_PID_FILE}" 2>/dev/null || true)"
   case "${old_pid}" in
@@ -178,6 +188,12 @@ if [ -z "${ts_ip}" ]; then
   if [ "${TS_HAS_AUTH}" = "true" ]; then set -- "$@" --auth-key="file:/dev/stdin"; fi
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
+  # A stopped daemon still has its preferences. Omitting a saved exit node
+  # makes Tailscale reject the restart before selection can run.
+  if [ "${backend_state}" = "Stopped" ] && [ -n "${TS_EXIT_NODE}" ]; then
+    set -- "$@" "--exit-node=${TS_EXIT_NODE}"
+    if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
+  fi
   if [ "${TS_HAS_AUTH}" = "true" ]; then
     printf '%s' "${TS_AUTH_VALUE}" | "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
   else
@@ -192,7 +208,11 @@ if [ -z "${ts_ip}" ]; then
   if [ -n "${ts_ip}" ] && [ -n "${TS_EXIT_NODE}" ]; then
     set -- --exit-node="${TS_EXIT_NODE}"
     if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
-    "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"
+    if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"; then
+      echo "tailscale exit-node selection failed" >&2
+      stop_lease_tailscaled
+      exit 1
+    fi
   fi
 fi
 unset TS_AUTH_VALUE

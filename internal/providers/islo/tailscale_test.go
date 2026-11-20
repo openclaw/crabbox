@@ -140,7 +140,18 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		t.Fatal("bring-up script must select the exit node with tailscale set after tailscale up")
 	}
 	if strings.Contains(isloTailscaleBringUp, `set -- "$@" --exit-node=`) {
-		t.Fatal("bring-up script must not pass the exit node to tailscale up")
+		t.Fatal("fresh bring-up must not append an unquoted exit node onto tailscale up")
+	}
+	if !strings.Contains(isloTailscaleBringUp, `[ "${backend_state}" = "Stopped" ] && [ -n "${TS_EXIT_NODE}" ]`) ||
+		!strings.Contains(isloTailscaleBringUp, `"--exit-node=${TS_EXIT_NODE}"`) {
+		t.Fatal("stopped-daemon restart must keep the saved exit node on tailscale up")
+	}
+	failedSet := strings.Index(isloTailscaleBringUp, `if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"`)
+	stopAt := strings.Index(isloTailscaleBringUp[max(0, failedSet):], "stop_lease_tailscaled")
+	failureExit := strings.Index(isloTailscaleBringUp, "tailscale exit-node selection failed")
+	reportedIP := strings.LastIndex(isloTailscaleBringUp, `echo "CRABBOX_TS_IP=${ts_ip}"`)
+	if failedSet < 0 || stopAt < 0 || failureExit < failedSet || reportedIP < failureExit {
+		t.Fatal("failed exit-node selection must stop this lease daemon before reporting an address")
 	}
 	if strings.Contains(isloTailscaleBringUp, "pkill") {
 		t.Fatal("bring-up script must target only the daemon for this lease")
