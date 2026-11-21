@@ -713,10 +713,12 @@ func TestPondACLRestrictedSelfPeeringRowsAreNotComplete(t *testing.T) {
 		complete bool
 	}{
 		{"grant wildcard", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"]}]`, true},
+		{"grant wildcard among entries", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["tcp:22","*"]}]`, true},
 		{"grant ssh only", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["tcp:22"]}]`, false},
 		{"grant source posture", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"],"srcPosture":["posture:latest"]}]`, false},
 		{"acl wildcard", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"]}]`, true},
 		{"acl udp only", `"acls":[{"action":"accept","proto":"udp","src":["TAG"],"dst":["TAG:*"]}]`, false},
+		{"acl numeric tcp only", `"acls":[{"action":"accept","proto":6,"src":["TAG"],"dst":["TAG:*"]}]`, false},
 		{"acl source posture", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"],"srcPosture":["posture:latest"]}]`, false},
 		{"acl ssh only", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:22"]}]`, false},
 	} {
