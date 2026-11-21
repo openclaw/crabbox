@@ -103,6 +103,35 @@ Good habits:
 - avoid broad local deletes unless they are intentional;
 - use `crabbox inspect` when diagnosing stale remote state.
 
+### Reusing the local Git bundle
+
+With `sync.gitSeedSource: local` the fingerprint above includes your dirty files,
+so any edit forces a new sync pass. Before this reuse step the pass also
+streamed the whole full-history bundle again, even though the bundle digest
+(the content address of `HEAD` and the selected refs) had not changed.
+
+Now the receiver is probed first. After every import the host keeps a pristine
+copy of the verified metadata (objects, refs, `HEAD`, ownership markers; no index
+or sync state) in `/var/tmp/crabbox-<uid>/git-seeds/<digest>.git`. It is private
+to the user, hardlinks only the immutable object storage, and keeps the three
+most recently used subjects. When the digest is in that cache, the probe replaces
+the workspace `.git` with a freshly verified copy (object closure, refs, `HEAD`,
+index tree, `fsck`) and skips the transfer, for a rerun in the same workspace or
+for a new workspace or lease on the same persistent host. The workspace `.git`
+itself is never trusted or cached: hooks, config values, index flags, or ref
+locks left by an earlier workload are discarded, exactly as a full import would.
+
+Reuse fails open. A probe miss, verification failure, SSH error, or unknown
+output streams the bundle exactly as before. A fresh ephemeral VM has an empty
+cache and still receives the bundle once. To drop the cache, delete that
+directory on the host.
+
+Measured on loopback with a synthetic 128 MB history (16 commits of 8 MB random
+files): a dirty-edit resync of the same `HEAD` skipped 128 MB of transfer and
+cut receiver work from 2.0s (receive, unbundle, `fsck`, swap) to 0.6s (verify
+only). On a real link the saving is the bundle size divided by your bandwidth,
+which is where the minutes of a 1 GiB bundle come from.
+
 ## Git hydration
 
 Crabbox seeds remote Git when possible, then overlays the dirty local checkout

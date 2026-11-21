@@ -49,6 +49,7 @@ func localReceiverFixture(t *testing.T, objectFormats ...string) (gitLocalSeedPl
 	return gitLocalSeedPlan{
 		Head: head, Tree: gitOutput(root, "rev-parse", "HEAD^{tree}"), ObjectFormat: format,
 		Digest: hex.EncodeToString(digest[:]), Refs: refs, PackedBytes: int64(len(data)), Fingerprint: strings.Repeat("b", 64),
+		CacheRoot: filepath.Join(t.TempDir(), "git-seeds"),
 	}, data, root
 }
 

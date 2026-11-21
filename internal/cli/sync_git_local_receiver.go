@@ -16,6 +16,8 @@ type gitLocalSeedPlan struct {
 	Refs                             []localGitSeedRef
 	PackedBytes                      int64
 	Fingerprint                      string
+	// CacheRoot overrides the per-user host cache directory (tests only).
+	CacheRoot string
 }
 
 func (p gitLocalSeedPlan) valid() bool {
@@ -78,8 +80,22 @@ func remoteGitLocalSeedFinalize(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "finalize")
 }
 
+// remoteGitLocalSeedProbe replaces the workspace metadata with a verified copy of
+// the import-time host cache entry for this exact artifact digest. It never receives the bundle: any
+// non-zero exit means the caller must stream the bundle as before.
+func remoteGitLocalSeedProbe(workdir string, plan gitLocalSeedPlan) string {
+	return remoteGitLocalSeedCommand(workdir, plan, "probe")
+}
+
 func remoteGitLocalSeedFingerprint(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "fingerprint")
+}
+
+func cacheRootAssignment(plan gitLocalSeedPlan) string {
+	if plan.CacheRoot != "" {
+		return shellPathQuote(plan.CacheRoot)
+	}
+	return `"/var/tmp/crabbox-$(id -u)/git-seeds"`
 }
 
 func remoteGitLocalSeedCommand(workdir string, plan gitLocalSeedPlan, action string) string {
@@ -176,6 +192,87 @@ $config_keys
 EOF
   plain_git --git-dir="$metadata" fsck --full --strict --no-reflogs >/dev/null 2>&1 || return 1
 }
+# Host cache keyed only by the bundle digest. Entries hold verified metadata
+# (objects, refs, ownership markers) without index or sync state, are private to
+# this user, and are re-verified by verify_metadata before any reuse.
+cache_root=` + cacheRootAssignment(plan) + `
+cache_entry="$cache_root/$expected_digest.git"
+cache_ready() {
+  [ -d "$cache_root" ] && [ ! -L "$cache_root" ] && [ -O "$cache_root" ]
+}
+# Only object storage is hardlinked (immutable); HEAD, config, refs and markers
+# are copied so a workload writing in one workspace cannot alter a sibling or the cache.
+# A receiver-created .git holds only these names; anything else is never cached.
+metadata_name_allowed() {
+  case "$1" in HEAD|config|objects|refs|packed-refs|index|crabbox|crabbox-local-owner|crabbox-local-artifact|crabbox-local-complete) return 0 ;; esac
+  return 1
+}
+copy_metadata() {
+  mkdir -- "$2" || return 1
+  for entry in "$1"/* "$1"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    metadata_name_allowed "$name" || continue
+    if [ "$name" = objects ] && [ ! -L "$entry" ]; then
+      cp -al "$entry" "$2/objects" 2>/dev/null || { rm -rf -- "$2/objects"; cp -a "$entry" "$2/objects" || return 1; }
+    else
+      cp -a "$entry" "$2/$name" || return 1
+    fi
+  done
+}
+# Cache upkeep, run on every cache touch (store, reimport, probe): drop staging
+# left by an interrupted store, nested losers of a publication race, and
+# subjects beyond the retention bound.
+maintain_cache() {
+  cache_ready || return 0
+  # Keep the three most recently used subjects, repairing the bound after an
+  # interrupted store as well as after a normal one.
+  ls -1t "$cache_root" | grep -E '^[0-9a-f]{64}[.]git$' | tail -n +4 | while IFS= read -r old; do
+    rm -rf -- "$cache_root/$old"
+  done
+  find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
+  # A store that lost a publication race is renamed inside the winner; a real entry
+  # never has a "git" child, so such a tree is always garbage.
+  for subject in "$cache_root"/*.git; do
+    # Never traverse a linked subject: only real directories can hold a loser tree.
+    [ -d "$subject" ] && [ ! -L "$subject" ] || continue
+    nested="$subject/git"
+    [ -e "$nested" ] || [ -L "$nested" ] || continue
+    rm -rf -- "$nested" || true
+  done
+}
+# A directory alone is not a usable entry: an interrupted eviction can leave a fragment.
+cache_entry_usable() {
+  [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || return 1
+  [ -f "$cache_entry/HEAD" ] && [ -f "$cache_entry/config" ] && [ -f "$cache_entry/crabbox-local-owner" ] || return 1
+  [ -d "$cache_entry/objects" ] && [ -d "$cache_entry/refs" ] || return 1
+  [ "$(cat "$cache_entry/crabbox-local-artifact" 2>/dev/null)" = "$expected_digest" ]
+}
+store_cache() (
+  umask 077
+  maintain_cache
+  if cache_entry_usable; then touch -- "$cache_entry"; return 0; fi
+  # Replace a rejected fragment with the freshly verified metadata.
+  if [ -e "$cache_entry" ] || [ -L "$cache_entry" ]; then rm -rf -- "$cache_entry" || return 1; fi
+  mkdir -p -- "$cache_root" && cache_ready || return 1
+  maintain_cache
+  tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
+  # A subshell resets inherited signal traps: convert signals into an exit so the EXIT trap cleans up.
+  trap 'rm -rf -- "$tmp"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  copy_metadata "$1" "$tmp/git" || return 1
+  rm -rf -- "$tmp/git/index" "$tmp/git/crabbox" "$tmp/git/crabbox-local-complete" || return 1
+  # mv into an existing directory nests instead of failing, so a concurrent winner is
+  # detected afterwards: the loser's tree lands at "$cache_entry/git" and is discarded.
+  if [ ! -e "$cache_entry" ]; then
+    mv -- "$tmp/git" "$cache_entry" || return 1
+    rm -rf -- "$cache_entry/git" || return 1
+  fi
+  maintain_cache
+  return 0
+)
 `
 	if action == "import" {
 		script += fmt.Sprintf(`phase=ownership
@@ -253,7 +350,74 @@ if [ -n "$backup" ]; then
   fi
   backup=
 fi
+phase=cache
+store_cache "$metadata" || true
 `, plan.PackedBytes)
+	} else if action == "probe" {
+		script += `phase=probe
+miss() { exit 1; }
+# Never trust a workspace .git a workload has touched (hooks, config values, ref locks,
+# index bits). Reuse always restores a pristine, re-verified copy of the import-time cache
+# entry, exactly the metadata a full import would have published.
+maintain_cache
+cache_ready && cache_entry_usable || miss
+manifest_dir="$workdir/.crabbox"
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  owned_metadata || miss
+  manifest_dir="$metadata/crabbox"
+fi
+manifest="$manifest_dir/sync-manifest"
+mkdir -p -- "$workdir" || fail
+stage="$(mktemp -d "$workdir/.crabbox-local-git.XXXXXXXX")" || miss
+fresh="$stage/git"
+copy_metadata "$cache_entry" "$fresh" || miss
+plain_git --git-dir="$fresh" read-tree "$expected_head" >/dev/null 2>&1 || miss
+metadata="$fresh"
+verify_metadata || miss
+metadata="$workdir/.git"
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  [ -d "$manifest_dir" ] && [ ! -L "$manifest_dir" ] && [ -f "$manifest" ] && [ ! -L "$manifest" ] || miss
+  mkdir -- "$fresh/crabbox" || miss
+  cp -- "$manifest" "$fresh/crabbox/sync-manifest" || miss
+fi
+staged_raw=
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  # While .git is moved aside, a fallback import looks for the manifest at the raw
+  # location: leave it there so a kill between the two renames cannot lose file ownership.
+  if [ -f "$manifest" ]; then
+    raw_dir="$workdir/.crabbox"
+    [ ! -e "$raw_dir" ] || { [ -d "$raw_dir" ] && [ ! -L "$raw_dir" ]; } || miss
+    mkdir -p -- "$raw_dir" || miss
+    [ ! -e "$raw_dir/sync-manifest" ] || { [ -f "$raw_dir/sync-manifest" ] && [ ! -L "$raw_dir/sync-manifest" ]; } || miss
+    # Exclusive temporary file: a pre-planted link at a fixed name would be followed by cp.
+    raw_tmp="$(mktemp "$raw_dir/sync-manifest.XXXXXXXX")" || miss
+    cp -- "$manifest" "$raw_tmp" || { rm -f -- "$raw_tmp"; miss; }
+    mv -f -- "$raw_tmp" "$raw_dir/sync-manifest" || { rm -f -- "$raw_tmp"; miss; }
+    staged_raw=1
+  fi
+  previous="$stage/previous.git"
+  mv -- "$metadata" "$previous" || miss
+  # An interrupt between the moves must retain the previous metadata (cleanup keeps the stage).
+  backup="$previous"
+  if ! mv -- "$fresh" "$metadata"; then
+    mv -- "$previous" "$metadata" || fail
+    backup=
+    miss
+  fi
+  if ! rm -rf -- "$previous"; then stage=; fail; fi
+  backup=
+  # The manifest is canonical inside .git again. Only undo what this probe staged, in the
+  # directory it validated: never follow a link planted at .crabbox.
+  if [ -n "$staged_raw" ] && [ -d "$workdir/.crabbox" ] && [ ! -L "$workdir/.crabbox" ]; then
+    rm -f -- "$workdir/.crabbox/sync-manifest" || true
+    rmdir -- "$workdir/.crabbox" 2>/dev/null || true
+  fi
+else
+  mv -- "$fresh" "$metadata" || miss
+fi
+touch -- "$cache_entry" 2>/dev/null || true
+echo reused-cache
+`
 	} else {
 		if action == "finalize" {
 			script += `owned_metadata || fail
