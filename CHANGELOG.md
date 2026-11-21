@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Daytona: verify configured snapshots are active before reporting readiness or attempting allocation, and report account-default snapshot readiness as unverified.
+- Daytona: verify configured snapshots are active before reporting readiness or attempting allocation, and report account-default snapshot readiness as unverified. [PR 3218](https://github.com/openclaw/crabbox/pull/3218). Thanks @vincentkoc.
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 
