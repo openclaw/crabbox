@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -65,6 +66,47 @@ func nativeRuntimeTestTarget(t *testing.T, checksumTool, gzipTool bool) SSHTarge
 	t.Setenv("CRABBOX_POSIX_BASH_AVAILABLE", "false")
 	t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return SSHTarget{User: "fixture", Host: "127.0.0.1", Port: startTCPReadinessFixture(t), TargetOS: targetLinux, NoControlMaster: true}
+}
+
+func TestNativeRuntimeProxyConnectionBudget(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		for _, metadata := range []bool{false, true} {
+			t.Run(fmt.Sprintf("proxy=%t/metadata=%t", proxy, metadata), func(t *testing.T) {
+				target := nativeRuntimeTestTarget(t, false, false)
+				target.SSHConfigProxy = proxy
+				transport, err := exec.LookPath("ssh")
+				if err != nil {
+					t.Fatal(err)
+				}
+				bin := t.TempDir()
+				budget := "2"
+				if proxy {
+					// Model an admitted proxy whose banner cannot arrive within
+					// two seconds, but fits the existing readiness allowance.
+					budget = "5"
+				}
+				wrapper := "#!/bin/sh\ncase \" $* \" in *' ConnectTimeout=" + budget + " '*) ;; *) echo 'Connection timed out during banner exchange' >&2; exit 255 ;; esac\nexec " + shellQuote(transport) + " \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(wrapper), 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				runtime := &remoteNativeRuntime{target: target}
+				var output bytes.Buffer
+				if metadata {
+					runtime.path = filepath.Join(t.TempDir(), "runtime")
+					if err := os.WriteFile(runtime.path, []byte("#!/bin/sh\nprintf 'metadata-ready'\n"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					err = runtime.runMetadata(t.Context(), []string{"identity"}, &output)
+				} else {
+					err = runtime.runPOSIX(t.Context(), "printf 'transport-ready'", &output)
+				}
+				if err != nil || !strings.HasSuffix(output.String(), "ready") {
+					t.Fatalf("admitted transport did not reach runtime setup: output=%q err=%v", output.String(), err)
+				}
+			})
+		}
+	}
 }
 
 func TestNativeRuntimeUploadAndVerification(t *testing.T) {
