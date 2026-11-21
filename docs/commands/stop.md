@@ -288,7 +288,13 @@ For SSH leases, shared connection cleanup makes best-effort attempts to signal
 [Actions hydration](../features/actions-hydration.md) shutdown, stop local
 mediated-egress daemon state and supported remote egress clients, and log out
 remote Tailscale when stored lease metadata marks it enabled. Providers can
-gate remote cleanup behind their ownership checks. The ordered remote cleanup
+gate remote cleanup behind their ownership checks. Guest cleanup
+uses the adapter's live endpoint and stored lease SSH key. Direct release-only
+resolution still skips local key preparation; stop prepares guest access
+separately so a missing or invalid local key cannot block provider deletion.
+Preparation failures warn and skip guest cleanup. Claim-only recovery for an
+absent resource does not contact a stored, potentially stale endpoint.
+The ordered remote cleanup
 chain has a 35-second budget, including coordinator guest network selection and
 reserving five-second windows for later egress
 and Tailscale cleanup. Responsive hydrated jobs keep their normal 20-second

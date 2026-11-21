@@ -407,7 +407,8 @@ Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions for
 instances, key pairs, and managed security groups, plus the image lifecycle
 permissions (`CreateImage`, `DeregisterImage`, `RegisterImage`,
 `DescribeSnapshots`, `DeleteSnapshot`, `DescribeFastSnapshotRestores`,
-`EnableFastSnapshotRestores`), `ec2:DescribeInstanceTypes`, and
+`EnableFastSnapshotRestores`), `ec2:DescribeInstanceTypes`,
+`ec2:DescribeSpotPriceHistory`, and
 `servicequotas:GetServiceQuota`. The image
 permissions cover `crabbox image`, native AWS checkpoints, macOS image bake
 validation, and Fast Snapshot Restore promotion. Quota admission and readiness

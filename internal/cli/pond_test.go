@@ -591,6 +591,45 @@ func TestDoctorPondSummaryOKWhenACLPresent(t *testing.T) {
 	}
 }
 
+func TestDoctorPondSummaryRestrictedSelfPeering(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},
+	})
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	tag := pondTailscaleTag(localCoordinatorOwner(), "alpha")
+	prev := doctorTailscaleACLClientFactory
+	t.Cleanup(func() { doctorTailscaleACLClientFactory = prev })
+	for _, tc := range []struct {
+		name, row string
+		complete  bool
+	}{
+		{"grant wildcard", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"]}]`, true},
+		{"grant SSH only", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["tcp:22"]}]`, false},
+		{"grant posture", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"],"srcPosture":["posture:latest"]}]`, false},
+		{"ACL wildcard", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"]}]`, true},
+		{"ACL UDP only", `"acls":[{"action":"accept","proto":"udp","src":["TAG"],"dst":["TAG:*"]}]`, false},
+		{"ACL posture", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"],"srcPosture":["posture:latest"]}]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := `{"tagOwners":{"` + tag + `":["autogroup:admin"]},` + strings.ReplaceAll(tc.row, "TAG", tag) + `}`
+			doctorTailscaleACLClientFactory = func(string) doctorTailscaleACLClient {
+				return stubDoctorTailscaleACLClient{policy: policy}
+			}
+			verdict, message, details := doctorPondSummary(context.Background(), Config{Provider: "hetzner", Pond: "alpha"})
+			want := "failed"
+			if tc.complete {
+				want = "ok"
+			}
+			if verdict != want {
+				t.Fatalf("verdict=%q, want %q: %s", verdict, want, message)
+			}
+			if !tc.complete && details["remedy"] != "see_docs_features_pond_md" {
+				t.Fatalf("restricted policy has no manual remedy: %#v", details)
+			}
+		})
+	}
+}
+
 func TestDoctorPondSummaryFailsWhenACLMissing(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},

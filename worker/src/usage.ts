@@ -1,6 +1,7 @@
 import { lifetimeOwnsCompute, lifetimeRuntimeMs } from "./lease-lifetime";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import { orgLabelForDisplay, orgMatchesForAccounting, orgMatchesForFilter } from "./org-identity";
+import { pricingFallback, type PricingFallback } from "./provider-pricing";
 import type { Env, LeaseRecord, Provider } from "./types";
 
 export { requestOrg, requestOrgKey, requestOrgLabel } from "./org-identity";
@@ -8,6 +9,37 @@ export { requestOrg, requestOrgKey, requestOrgLabel } from "./org-identity";
 export interface LeaseCost {
   hourlyUSD: number;
   maxUSD: number;
+  pricingFallback?: PricingFallback;
+}
+
+export async function quotedLeaseCost(
+  env: Pick<Env, "CRABBOX_COST_RATES_JSON">,
+  provider: Provider,
+  serverType: string,
+  ttlSeconds: number,
+  quote: () => Promise<number | undefined>,
+): Promise<LeaseCost> {
+  let failure: PricingFallback | undefined;
+  let hourlyUSD: number | undefined;
+  try {
+    hourlyUSD = await quote();
+  } catch (error) {
+    failure = pricingFallback(error);
+  }
+  const cost = leaseCost(env, provider, serverType, ttlSeconds, hourlyUSD);
+  if (failure && rateOverrides(env)[`${provider}:${serverType}`] === undefined) {
+    cost.pricingFallback = failure;
+    console.warn(
+      JSON.stringify({
+        event: "pricing_fallback",
+        provider,
+        serverType,
+        hourlyUSD: cost.hourlyUSD,
+        ...failure,
+      }),
+    );
+  }
+  return cost;
 }
 
 export interface CostLimits {
@@ -32,6 +64,7 @@ export interface CostLimitUsage {
   committedUSD: number;
   ownerCommittedUSD: number;
   orgCommittedUSD: number;
+  pricingFallbacks?: { fleet: number; owner: number; org: number };
 }
 
 export interface OwnerCapacity {
@@ -68,6 +101,11 @@ export interface UsageSummary {
   byProvider: UsageGroup[];
   byServerType: UsageGroup[];
   byMachine: UsageGroup[];
+  pricingFallbacks?: (PricingFallback & {
+    provider: string;
+    serverType: string;
+    leases: number;
+  })[];
 }
 
 export interface UsageGroup {
@@ -202,6 +240,12 @@ export function addLeaseToCostLimitUsage(
     return;
   }
   const committedUSD = leaseUsage(lease, now).committedUSD;
+  if (lease.pricingFallback && committedUSD > 0) {
+    const fallbacks = (usage.pricingFallbacks ??= { fleet: 0, owner: 0, org: 0 });
+    fallbacks.fleet++;
+    if (lease.owner === usage.owner) fallbacks.owner++;
+    if (orgMatchesForAccounting(lease.org, usage.org)) fallbacks.org++;
+  }
   usage.committedUSD = roundUSD(usage.committedUSD + committedUSD);
   if (lease.owner === usage.owner) {
     usage.ownerCommittedUSD = roundUSD(usage.ownerCommittedUSD + committedUSD);
@@ -247,10 +291,21 @@ export function enforceCostLimitUsage(
 
 export function enforceBudgetLimitUsage(
   usage: CostLimitUsage,
-  candidate: Pick<LeaseRecord, "maxEstimatedUSD">,
+  candidate: Pick<LeaseRecord, "maxEstimatedUSD" | "pricingFallback">,
   limits: CostLimits,
   existingReservationUSD?: number,
 ): string {
+  if (
+    (limits.maxMonthlyUSD > 0 && (candidate.pricingFallback || usage.pricingFallbacks?.fleet)) ||
+    (limits.maxMonthlyUSDPerOwner > 0 &&
+      (candidate.pricingFallback || usage.pricingFallbacks?.owner)) ||
+    (limits.maxMonthlyUSDPerOrg > 0 && (candidate.pricingFallback || usage.pricingFallbacks?.org))
+  ) {
+    if (candidate.pricingFallback) {
+      return `monthly budget cannot be verified: ${candidate.pricingFallback.message}; restore provider pricing or configure an explicit CRABBOX_COST_RATES_JSON rate`;
+    }
+    return "monthly budget cannot be verified: existing committed cost uses a fallback after a failed provider quote; review the recorded fallback estimates before approving additional spend";
+  }
   const headroom = (used: number, limit: number): string =>
     existingReservationUSD === undefined
       ? ""
@@ -288,8 +343,20 @@ export function createUsageSummary(filter: UsageFilter, now: Date) {
   const byServerType = new Map<string, UsageAccumulator>();
   const byMachine = new Map<string, UsageAccumulator>();
   const machineCPUSeconds = new Map<string, number>();
+  const pricingFallbacks = new Map<string, NonNullable<UsageSummary["pricingFallbacks"]>[number]>();
   const add = (lease: LeaseRecord) => {
     if (isRegisteredLease(lease) || !leaseMatchesUsageFilter(lease, filter)) return;
+    if (lease.pricingFallback) {
+      const key = JSON.stringify([lease.provider, lease.serverType, lease.pricingFallback.reason]);
+      const entry = pricingFallbacks.get(key) ?? {
+        ...lease.pricingFallback,
+        provider: lease.provider,
+        serverType: lease.serverType,
+        leases: 0,
+      };
+      entry.leases++;
+      pricingFallbacks.set(key, entry);
+    }
     const item = leaseUsage(lease, now);
     addUsage(total, item);
     addUsage(mapAccumulator(byOwner, lease.owner || "unknown"), item);
@@ -333,6 +400,7 @@ export function createUsageSummary(filter: UsageFilter, now: Date) {
     if (filter.org) {
       summary.org = orgLabelForDisplay(filter.org);
     }
+    if (pricingFallbacks.size) summary.pricingFallbacks = [...pricingFallbacks.values()];
     return summary;
   };
   return { add, finish };

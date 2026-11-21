@@ -3936,3 +3936,30 @@ func TestCanceledCoordinatorCreateSlowRetryFitsRecoveryWindow(t *testing.T) {
 		}
 	})
 }
+
+func TestCoordinatorCreateLeaseReportsPricingFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"lease":{"id":"cbx_abcdef123456","provider":"aws","state":"active","pricingFallback":{"reason":"permission_denied","message":"provider pricing permission denied"}}}`)
+	}))
+	defer server.Close()
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "synthetic-token"
+	var stderr bytes.Buffer
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: mustNewCoordinatorClient(t, cfg), rt: Runtime{Stderr: &stderr}}
+	lease, err := backend.createCoordinatorLeaseWithProgress(t.Context(), cfg, "ssh-ed25519 test", false, "cbx_abcdef123456", "test-lease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "cost estimate fallback reason=permission_denied") {
+		t.Fatalf("missing warning: %s", &stderr)
+	}
+	data, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"pricingFallback":{"reason":"permission_denied"`) {
+		t.Fatalf("lost JSON fallback: %s", data)
+	}
+}
