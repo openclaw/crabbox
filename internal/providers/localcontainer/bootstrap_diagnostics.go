@@ -14,7 +14,8 @@ const bootstrapDiagnosticLimit = 8 * 1024
 // Read only the already-verified exact container, before any failure rollback.
 // Logging failures must never replace the readiness failure or delay cleanup indefinitely.
 func (b *backend) captureBootstrapDiagnostics(ctx context.Context, containerID string, failure *terminalContainerError) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// Terminal evidence gets its own bounded window even after readiness is canceled.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	req := containerRuntimeRequest(b.configForRun(), []string{"logs", "--tail", "100", containerID})
 	req.MaxCapturedOutputBytes = bootstrapDiagnosticLimit

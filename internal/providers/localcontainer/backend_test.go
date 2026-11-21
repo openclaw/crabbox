@@ -3024,6 +3024,8 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 	const ready = `[{"Id":"endpoint-container","State":{"Status":"running"},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49170"}]}}}]`
 	const pending = `[{"Id":"endpoint-container","State":{"Status":"running"}}]`
 	const stopped = `[{"Id":"endpoint-container","State":{"Status":"exited"}}]`
+	const bootstrapLog = "sshd: no hostkeys available -- exiting."
+	const stoppedMessage = "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"
 	callerCause := errors.New("endpoint wait canceled by caller")
 	for _, tc := range []struct {
 		name         string
@@ -3033,6 +3035,7 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 		wantCode     int
 		wantMessage  string
 		wantCause    error
+		wantLogs     bool
 	}{
 		{name: "ready", wantCalls: 1},
 		{name: "pending port", wantCalls: 2, wantElapsed: 100 * time.Millisecond},
@@ -3044,8 +3047,10 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 		{name: "blocked inspect", wantCalls: 1, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container inspect failed: context deadline exceeded", wantCause: context.DeadlineExceeded},
 		// The final sleep and deadline can wake together before cancellation is delivered.
 		{name: "pending timeout", wantCalls: 300, wantMaxCalls: 301, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container endpoint-con has no published SSH port", wantCause: context.DeadlineExceeded},
-		{name: "stopped", wantCalls: 1, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
-		{name: "late stopped observation", wantCalls: 1, wantElapsed: 31 * time.Second, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
+		{name: "stopped", wantCalls: 1, wantCode: 5, wantLogs: true, wantMessage: stoppedMessage + "\nbootstrap logs (last 100 lines, bounded excerpt):\n" + bootstrapLog},
+		{name: "late stopped observation", wantCalls: 1, wantElapsed: 31 * time.Second, wantCode: 5, wantLogs: true, wantMessage: stoppedMessage + "\nbootstrap logs (last 100 lines, bounded excerpt):\n" + bootstrapLog},
+		{name: "blocked bootstrap logs", wantCalls: 1, wantElapsed: 2 * time.Second, wantCode: 5, wantLogs: true, wantMessage: stoppedMessage + "; bootstrap logs unavailable"},
+		{name: "late blocked bootstrap logs", wantCalls: 1, wantElapsed: 33 * time.Second, wantCode: 5, wantLogs: true, wantMessage: stoppedMessage + "; bootstrap logs unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
@@ -3063,17 +3068,38 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 				defer stop()
 				started := time.Now()
 				runner := &recordingRunner{}
+				var inspectCalls, logCalls int
 				runner.runContext = func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if tc.wantLogs && req.Name == "docker" && reflect.DeepEqual(req.Args, []string{"logs", "--tail", "100", containerID}) {
+						logCalls++
+						if err := commandCtx.Err(); err != nil {
+							t.Errorf("bootstrap logs inherited expired context: %v", err)
+							return core.LocalCommandResult{}, err
+						}
+						deadline, ok := commandCtx.Deadline()
+						if !ok || !deadline.Equal(time.Now().Add(2*time.Second)) {
+							t.Errorf("bootstrap logs deadline=%v bounded=%t, want fresh two-second budget", deadline, ok)
+						}
+						if req.MaxCapturedOutputBytes != bootstrapDiagnosticLimit {
+							t.Errorf("bootstrap logs capture limit=%d, want %d", req.MaxCapturedOutputBytes, bootstrapDiagnosticLimit)
+						}
+						if strings.Contains(tc.name, "blocked bootstrap logs") {
+							<-commandCtx.Done()
+							return core.LocalCommandResult{}, commandCtx.Err()
+						}
+						return core.LocalCommandResult{Stderr: bootstrapLog}, nil
+					}
 					if req.Name != "docker" || !reflect.DeepEqual(req.Args, []string{"inspect", containerID}) {
 						t.Fatalf("unexpected command: %s %v", req.Name, req.Args)
 					}
+					inspectCalls++
 					switch tc.name {
 					case "pending port":
-						if len(runner.calls) == 1 {
+						if inspectCalls == 1 {
 							return core.LocalCommandResult{Stdout: pending}, nil
 						}
 					case "inspect retry", "client deadline":
-						if len(runner.calls) == 1 {
+						if inspectCalls == 1 {
 							if tc.name == "client deadline" {
 								return core.LocalCommandResult{}, context.DeadlineExceeded
 							}
@@ -3092,9 +3118,12 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 						}
 						<-commandCtx.Done()
 						return core.LocalCommandResult{}, commandCtx.Err()
-					case "stopped", "late stopped observation":
-						if tc.name == "late stopped observation" {
+					case "stopped", "late stopped observation", "blocked bootstrap logs", "late blocked bootstrap logs":
+						if strings.HasPrefix(tc.name, "late ") {
 							time.Sleep(31 * time.Second)
+							if commandCtx.Err() != context.DeadlineExceeded {
+								t.Fatalf("late inspection context error=%v, want expired readiness budget", commandCtx.Err())
+							}
 						}
 						return core.LocalCommandResult{Stdout: stopped}, nil
 					}
@@ -3122,8 +3151,15 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 					}
 				}
 				maxCalls := max(tc.wantCalls, tc.wantMaxCalls)
-				if elapsed := time.Since(started); elapsed != tc.wantElapsed || len(runner.calls) < tc.wantCalls || len(runner.calls) > maxCalls {
-					t.Fatalf("elapsed=%s calls=%d, want %s/%d..%d", elapsed, len(runner.calls), tc.wantElapsed, tc.wantCalls, maxCalls)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed || inspectCalls < tc.wantCalls || inspectCalls > maxCalls {
+					t.Fatalf("elapsed=%s inspections=%d, want %s/%d..%d", elapsed, inspectCalls, tc.wantElapsed, tc.wantCalls, maxCalls)
+				}
+				wantLogCalls := 0
+				if tc.wantLogs {
+					wantLogCalls = 1
+				}
+				if logCalls != wantLogCalls {
+					t.Fatalf("bootstrap logs calls=%d, want %d", logCalls, wantLogCalls)
 				}
 			})
 		})
