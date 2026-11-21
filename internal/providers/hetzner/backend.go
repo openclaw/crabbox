@@ -122,7 +122,9 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 	}
 	server = normalizeHetznerServer(server)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSHReady(ctx, &ssh, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, bootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return waitForSSHReady(ctx, target, b.RT.Stderr, "bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"

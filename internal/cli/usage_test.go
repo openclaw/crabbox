@@ -119,3 +119,34 @@ func TestUsageByMachine(t *testing.T) {
 		t.Fatalf("empty machine section: %s", &out)
 	}
 }
+
+func TestUsagePricingFallbackVisible(t *testing.T) {
+	for _, reason := range []string{"permission_denied", "quote_error"} {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", reason, jsonOut), func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Chdir(t.TempDir())
+				t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprintf(w, `{"usage":{"month":"2026-05","scope":"user","pricingFallbacks":[{"provider":"aws","serverType":"c7a.2xlarge","reason":%q,"message":"provider quote unavailable","leases":1}]}}`, reason)
+				}))
+				defer server.Close()
+				t.Setenv("CRABBOX_COORDINATOR", server.URL)
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN", "synthetic-usage-token")
+				var out bytes.Buffer
+				args := []string{"--month", "2026-05"}
+				if jsonOut {
+					args = append(args, "--json")
+				}
+				if err := (App{Stdout: &out}).usage(context.Background(), args); err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"fallback", reason, "c7a.2xlarge"} {
+					if !strings.Contains(strings.ToLower(out.String()), want) {
+						t.Fatalf("missing %q: %s", want, &out)
+					}
+				}
+			})
+		}
+	}
+}

@@ -128,6 +128,7 @@ import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
 import { ReadyPoolAccess, portablePoolReservationKey } from "../src/ready-pool-access";
 import { setPoolWake } from "../src/ready-pool-wake";
 import * as retainedReconcile from "../src/retained-lease-reconcile";
+import { RunLogStorage, runLogBudget } from "../src/run-log-storage";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -394,6 +395,10 @@ function workspaceFixtureKey(
 class FleetDurableObject extends ProductionFleetDurableObject {
   private readonly initialized: Promise<unknown>;
   private readonly tasks: Set<Promise<unknown>>;
+
+  override startCapacityIndexRecovery(): void {
+    // Isolate request/maintenance accounting here; capacity.test.ts covers real startup recovery.
+  }
 
   constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
     const [state, env, ...rest] = args;
@@ -19096,7 +19101,7 @@ describe("fleet lease identity and idle", () => {
     storage.beforeGet = undefined;
     list.mockRestore();
     await logs.deleteTerminalRun(id, Date.now());
-    expect(storage.value(`run:${id}`)).toBeUndefined();
+    expect(storage.value<RunRecord>(`run:${id}`)?.logEvicted).toBe("retention");
   });
 
   it("defers terminal run pruning until every log reader closes", async () => {
@@ -19139,7 +19144,7 @@ describe("fleet lease identity and idle", () => {
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("second\n");
     expect((await reader.read()).done).toBe(true);
     await prune();
-    expect(storage.value(`run:${id}`)).toBeUndefined();
+    expect(storage.value<RunRecord>(`run:${id}`)?.logEvicted).toBe("retention");
     expect(storage.value(`runlog:${id}:chunk:000000`)).toBeUndefined();
     expect(storage.value(`runlog:${id}:chunk:000001`)).toBeUndefined();
   });
@@ -23256,6 +23261,74 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(revokedPage.status).toBe(404);
+  });
+
+  it.each(["released", "expired", "failed", "active"] as const)(
+    "rejects late Tailscale metadata after confirmed cleanup in %s state",
+    async (state) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        state,
+        host: "",
+        cleanupCompletedAt: new Date().toISOString(),
+        provisioningResourceMayExist: false,
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const currentRequest = () =>
+        request("GET", "/v1/leases?view=current", {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        });
+      const before = (await (await fleet.fetch(currentRequest())).json()) as {
+        leases: LeaseRecord[];
+      };
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/tailscale`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          body: { enabled: true, ipv4: "100.64.0.9", state: "failed" },
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect((await storage.get<LeaseRecord>(`lease:${lease.id}`))?.tailscale).toBeUndefined();
+      const stored = await storage.get<LeaseRecord>(`lease:${lease.id}`);
+      expect(stored?.cleanupCompletedAt).toBe(lease.cleanupCompletedAt);
+      const after = (await (await fleet.fetch(currentRequest())).json()) as {
+        leases: LeaseRecord[];
+      };
+      expect(after.leases.map((entry) => entry.id)).toEqual(before.leases.map((entry) => entry.id));
+    },
+  );
+
+  it("fences Tailscale metadata against a replaced lease generation", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const stale = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedCreatedAt: "2020-01-01T00:00:00.000Z", ipv4: "100.64.0.9" },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect((await storage.get<LeaseRecord>(`lease:${lease.id}`))?.tailscale).toBeUndefined();
+    const current = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedCreatedAt: lease.createdAt, ipv4: "100.64.0.5" },
+      }),
+    );
+    expect(current.status).toBe(200);
   });
 
   it("requires manage access for shared lease heartbeat and Tailscale metadata updates", async () => {
@@ -51115,71 +51188,38 @@ describe("fleet run history", () => {
     ]);
   });
 
-  it("prunes expired terminal runs and artifacts in resumable batches", async () => {
+  it("prunes 128 expired terminal log payloads per pass while preserving records and events", async () => {
     const storage = new ObservedMemoryStorage();
     const fleet = testFleet(storage);
-    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
-    const recentAt = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
-    for (let index = 0; index < 20; index += 1) {
+    const expiredAt = new Date(Date.now() - 31 * 86400_000).toISOString();
+    for (let index = 0; index < 260; index++) {
       const id = `run_${index.toString().padStart(12, "0")}`;
       storage.seed(
         `run:${id}`,
-        testRun({
-          id,
-          state: "succeeded",
-          startedAt: expiredAt,
-          lastEventAt: expiredAt,
-          endedAt: expiredAt,
-        }),
+        testRun({ id, state: "succeeded", endedAt: expiredAt, logBytes: 1 }),
       );
+      storage.seed(`runlog:${id}`, "x");
     }
-    storage.seed(
-      "run:run_recent",
-      testRun({
-        id: "run_recent",
-        state: "succeeded",
-        startedAt: recentAt,
-        endedAt: recentAt,
-      }),
-    );
-    storage.seed(
-      "run:run_still_running",
-      testRun({ id: "run_still_running", state: "running", startedAt: expiredAt }),
-    );
-    storage.seed("runlog:run_000000000000", "legacy log");
-    storage.seed("runlog:run_000000000000:chunk:000000", "chunk");
     storage.seed("runevent:run_000000000000:000000000001", { seq: 1 });
-    storage.seed("runevent-id:run_000000000000:abc", { seq: 1, fingerprint: "test" });
-
-    storage.resetListOptions();
+    storage.seed(
+      "run:run_running",
+      testRun({ id: "run_running", startedAt: expiredAt, logBytes: 1 }),
+    );
+    storage.seed("runlog:run_running", "y");
+    storage.seed("lease:cbx_000000000001", testLease({ id: "cbx_000000000001" }));
     await fleet.alarm();
-
-    for (let index = 0; index < 16; index += 1) {
-      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
-    }
-    expect(storage.value("run:run_000000000016")).toBeDefined();
-    expect(storage.value("run:run_recent")).toBeDefined();
-    expect(storage.value("run:run_still_running")).toBeDefined();
-    expect(storage.value("runlog:run_000000000000")).toBeUndefined();
-    expect(storage.value("runlog:run_000000000000:chunk:000000")).toBeUndefined();
-    expect(storage.value("runevent:run_000000000000:000000000001")).toBeUndefined();
-    expect(storage.value("runevent-id:run_000000000000:abc")).toBeUndefined();
-    expect(storage.value("maintenance:run-prune-cursor")).toBe("run:run_000000000015");
-    expect(storage.alarm()).toBeGreaterThan(Date.now());
+    expect((await storage.list({ prefix: "run:" })).size).toBe(261);
+    expect((await storage.list({ prefix: "runlog:" })).size).toBe(133);
+    expect(storage.value("maintenance:run-prune-cursor")).toBe("run:run_000000000127");
     expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);
-    expect(storage.listOptions.findLast((options) => options.prefix === "run:")).toEqual({
-      prefix: "run:",
-      limit: 128,
-    });
-
     await fleet.alarm();
-
-    for (let index = 0; index < 20; index += 1) {
-      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
-    }
-    expect(storage.value("maintenance:run-prune-cursor")).toBeUndefined();
-    expect(storage.value("run:run_recent")).toBeDefined();
-    expect(storage.value("run:run_still_running")).toBeDefined();
+    expect((await storage.list({ prefix: "runlog:" })).size).toBe(5);
+    await fleet.alarm();
+    expect((await storage.list({ prefix: "runlog:" })).size).toBe(1);
+    expect(storage.value("runlog:run_running")).toBe("y");
+    expect(storage.value("runevent:run_000000000000:000000000001")).toEqual({ seq: 1 });
+    expect(storage.value("lease:cbx_000000000001")).toBeDefined();
+    expect(storage.value<RunRecord>("run:run_000000000000")?.logEvicted).toBe("retention");
   });
 
   it("recovers a caller-known run admission without restarting its history", async () => {
@@ -53429,7 +53469,7 @@ describe("fleet run history", () => {
         })
       ).size,
     ).toBe(3);
-    expect(storage.transactionPutCounts.at(-1)).toBe(2);
+    expect(storage.transactionPutCounts.at(-1)).toBe(4);
 
     const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`));
     const logText = await logs.text();
@@ -57288,7 +57328,7 @@ describe("synthetic acknowledgement reliability", () => {
     try {
       const storage = new MemoryStorage();
       const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
-      for (let index = 0; index < 49; index++) {
+      for (let index = 0; index < 385; index++) {
         const id = `run_${index.toString().padStart(12, "0")}`;
         storage.seed(
           `run:${id}`,
@@ -57299,20 +57339,22 @@ describe("synthetic acknowledgement reliability", () => {
             state: "succeeded",
             startedAt: expiredAt,
             endedAt: expiredAt,
+            logBytes: 1,
           }),
         );
+        storage.seed(`runlog:${id}`, "x");
       }
       const fleet = testFleet(storage);
-      for (const remaining of [33, 17, 1]) {
+      for (const remaining of [257, 129, 1]) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- each pass must advance its cursor without escalating.
         await fleet.alarm();
         // oxlint-disable-next-line eslint/no-await-in-loop -- verify the actual batch before delivering another alarm.
-        expect(await storage.list({ prefix: "run:" })).toHaveLength(remaining);
+        expect(await storage.list({ prefix: "runlog:" })).toHaveLength(remaining);
         expect(storage.alarm()).toBe(Date.now() + 1000);
         vi.setSystemTime(storage.alarm()!);
       }
       await fleet.alarm();
-      expect(await storage.list({ prefix: "run:" })).toHaveLength(0);
+      expect(await storage.list({ prefix: "runlog:" })).toHaveLength(0);
       expect(storage.alarm()).toBeUndefined();
       expect(warn).not.toHaveBeenCalled();
     } finally {
@@ -63587,5 +63629,293 @@ describe("control credential continuation", () => {
     await internal.closeBridgesForPortalSession(f.attachment.portalSessionHash as string);
     expect(f.socket.closeCode).toBe(1008);
     expect(f.socket.closeReason).toBe("portal session ended");
+  });
+});
+
+describe("AWS quote failure diagnostics", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  it.each([
+    {
+      error: "UnauthorizedOperation: ec2:DescribeSpotPriceHistory denied",
+      reason: "permission_denied",
+    },
+    { error: "upstream unavailable", reason: "quote_error" },
+  ])("persists and reports fallback after $reason", async ({ error, reason }) => {
+    const storage = new MemoryStorage();
+    const env = { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" } as Env;
+    const provider = fakeProvider(undefined, { provider: "aws", serverType: "c7a.2xlarge" });
+    provider.hourlyPriceUSD = (type, config) =>
+      new AWSProvider(env, "eu-west-1", storage).hourlyPriceUSD(type, config);
+    const quote = vi
+      .spyOn(EC2SpotClient.prototype, "hourlySpotPriceUSD")
+      .mockRejectedValue(new Error(error));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fleet = testFleet(storage, { aws: provider }, env);
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            provider: "aws",
+            serverType: "c7a.2xlarge",
+            ttlSeconds: 3600,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(create.status).toBe(201);
+      const body = (await create.json()) as {
+        lease: { id: string; pricingFallback: { reason: string }; estimatedHourlyUSD: number };
+      };
+      expect(body.lease).toMatchObject({ estimatedHourlyUSD: 3, pricingFallback: { reason } });
+      expect(storage.value<LeaseRecord>(`lease:${body.lease.id}`)).toMatchObject({
+        pricingFallback: { reason },
+      });
+      const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+      expect(await usage.json()).toMatchObject({
+        usage: {
+          pricingFallbacks: [{ provider: "aws", serverType: "c7a.2xlarge", reason, leases: 1 }],
+        },
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('"event":"pricing_fallback"'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(reason));
+    } finally {
+      quote.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    "CRABBOX_MAX_MONTHLY_USD",
+    "CRABBOX_MAX_MONTHLY_USD_PER_OWNER",
+    "CRABBOX_MAX_MONTHLY_USD_PER_ORG",
+  ] as const)("fails closed for %s but honors an explicit rate", async (limit) => {
+    const storage = new MemoryStorage();
+    const env = {
+      AWS_ACCESS_KEY_ID: "fixture",
+      AWS_SECRET_ACCESS_KEY: "fixture",
+      [limit]: "100",
+    } as Env;
+    let creates = 0;
+    const provider = fakeProvider(
+      () => {
+        creates++;
+      },
+      { provider: "aws", serverType: "c7a.2xlarge" },
+    );
+    provider.hourlyPriceUSD = (type, config) =>
+      new AWSProvider(env, "eu-west-1", storage).hourlyPriceUSD(type, config);
+    const quote = vi
+      .spyOn(EC2SpotClient.prototype, "hourlySpotPriceUSD")
+      .mockRejectedValue(new Error("UnauthorizedOperation"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fleet = testFleet(storage, { aws: provider }, env);
+      const body = {
+        provider: "aws",
+        serverType: "c7a.2xlarge",
+        ttlSeconds: 3600,
+        sshPublicKey: "ssh-ed25519 test",
+      };
+      const denied = await fleet.fetch(request("POST", "/v1/leases", { headers, body }));
+      expect(denied.status).toBe(429);
+      expect(await denied.json()).toMatchObject({
+        error: "cost_limit_exceeded",
+        message: expect.stringContaining("provider pricing permission denied"),
+      });
+      expect(creates).toBe(0);
+      env.CRABBOX_COST_RATES_JSON = '{"aws:c7a.2xlarge":0.5}';
+      // testFleet snapshots env, so use a new coordinator with the override.
+      const configured = testFleet(storage, { aws: provider }, env);
+      const allowed = await configured.fetch(request("POST", "/v1/leases", { headers, body }));
+      expect(allowed.status).toBe(201);
+      expect(((await allowed.json()) as { lease: unknown }).lease).toMatchObject({
+        estimatedHourlyUSD: 0.5,
+      });
+      expect(creates).toBe(1);
+    } finally {
+      quote.mockRestore();
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("bounded run log storage", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+
+  function seedLog(storage: MemoryStorage, id: string, log: string, day: number, running = false) {
+    storage.seed(
+      `run:${id}`,
+      testRun({
+        id,
+        owner: "alice@example.com",
+        org: "example-org",
+        state: running ? "running" : "succeeded",
+        logBytes: Buffer.byteLength(log),
+        startedAt: `2026-11-${String(day).padStart(2, "0")}T00:00:00.000Z`,
+        ...(running ? {} : { endedAt: `2026-11-${String(day).padStart(2, "0")}T00:00:00.000Z` }),
+      }),
+    );
+    storage.seed(`runlog:${id}`, log);
+  }
+
+  it("defaults invalid budgets safely", () => {
+    for (const value of [undefined, "0", "-1", "Infinity", "bad", "1.5"]) {
+      expect(runLogBudget(value)).toBe(512 * 1024 * 1024);
+    }
+    expect(runLogBudget("42")).toBe(42);
+  });
+
+  it.each([testFleet, testCoordinator])(
+    "evicts by terminal time, protects running logs, and exposes readback on %s",
+    async (makeFleet) => {
+      const storage = new MemoryStorage();
+      seedLog(storage, "run_z_old", "aaaa", 1);
+      seedLog(storage, "run_a_middle", "bbbb", 2);
+      seedLog(storage, "run_b_new", "cccc", 3);
+      seedLog(storage, "run_running", "ddd", 1, true);
+      const logs = new RunLogStorage(storage, 7, () => false);
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await logs.maintain();
+      expect(storage.value<RunRecord>("run:run_z_old")?.logEvicted).toBe("storage_pressure");
+      expect(storage.value<RunRecord>("run:run_a_middle")?.logEvicted).toBe("storage_pressure");
+      expect(storage.value("runlog:run_b_new")).toBe("cccc");
+      expect(storage.value("runlog:run_running")).toBe("ddd");
+      expect((await storage.list({ prefix: "run:" })).size).toBe(4);
+      expect(await logs.capacity()).toEqual({
+        storedBytes: 7,
+        budgetBytes: 7,
+        accountingComplete: true,
+        pressure: true,
+      });
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"coordinator.run_log_storage_pressure"'),
+      );
+      const fleet = makeFleet(storage, {}, { CRABBOX_RUN_LOG_BUDGET_BYTES: "7" });
+      const capacity = await fleet.fetch(request("GET", "/v1/capacity/run-logs", { headers }));
+      expect(capacity.status).toBe(200);
+      expect(await capacity.json()).toEqual(await logs.capacity());
+      const response = await fleet.fetch(request("GET", "/v1/runs/run_z_old/logs", { headers }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("log evicted under storage pressure\n");
+      const record = await fleet.fetch(request("GET", "/v1/runs/run_z_old", { headers }));
+      expect(await record.json()).toMatchObject({
+        run: { logEvicted: "storage_pressure", logBytes: 4 },
+      });
+      const portal = await fleet.fetch(request("GET", "/portal/runs/run_z_old", { headers }));
+      expect(await portal.text()).toContain("log evicted under storage pressure");
+      warning.mockRestore();
+    },
+  );
+
+  it("converges legacy accounting in bounded pages while finishes continue", async () => {
+    const storage = new ObservedMemoryStorage();
+    for (let i = 0; i < 260; i++) seedLog(storage, `run_${String(i).padStart(3, "0")}`, "old", 1);
+    const logs = new RunLogStorage(storage, 1000, () => false);
+    expect(await logs.maintain()).toBe(true);
+    expect(await logs.capacity()).toMatchObject({ storedBytes: 384, accountingComplete: false });
+    const fleet = testFleet(storage);
+    storage.seed(
+      "run:run_new",
+      testRun({ id: "run_new", owner: "alice@example.com", org: "example-org" }),
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/runs/run_new/finish", { headers, body: { exitCode: 0, log: "new" } }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      run: { state: "succeeded", logEvicted: "storage_pressure" },
+    });
+    expect(await logs.maintain()).toBe(true);
+    expect(await logs.maintain()).toBe(false);
+    expect(await logs.capacity()).toMatchObject({ storedBytes: 780, accountingComplete: true });
+    await logs.maintain();
+    expect(await logs.capacity()).toMatchObject({ storedBytes: 780 });
+    expect(
+      storage.listOptions.filter((o) => o.prefix === "run:").every((o) => o.limit === 128),
+    ).toBe(true);
+  });
+
+  it("accounts reservations, duplicate finishes, and failed writes without exceeding the budget", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, { CRABBOX_RUN_LOG_BUDGET_BYTES: "8" });
+    for (const id of ["run_first", "run_second", "run_failed"]) {
+      storage.seed(`run:${id}`, testRun({ id, owner: "alice@example.com", org: "example-org" }));
+    }
+    const finish = (id: string, log = "123456") =>
+      fleet.fetch(
+        request("POST", `/v1/runs/${id}/finish`, { headers, body: { exitCode: 0, log } }),
+      );
+    expect((await finish("run_first")).status).toBe(200);
+    expect((await finish("run_first")).status).toBe(200);
+    const logs = new RunLogStorage(storage, 8, () => false);
+    expect((await logs.capacity()).storedBytes).toBe(6);
+    expect((await finish("run_second")).status).toBe(200);
+    expect(storage.value<RunRecord>("run:run_first")?.logEvicted).toBe("storage_pressure");
+    expect((await logs.capacity()).storedBytes).toBe(6);
+    storage.beforePut = async (key) => {
+      if (key === "run:run_failed") throw new Error("injected write failure");
+    };
+    expect((await finish("run_failed", "x")).status).toBe(500);
+    storage.beforePut = undefined;
+    expect((await logs.capacity()).storedBytes).toBe(6);
+    expect((await storage.list({ prefix: "run-log-storage:reservation:" })).size).toBe(0);
+    expect((await storage.list({ prefix: "runlog:run_failed:" })).size).toBe(0);
+    expect(storage.value<RunRecord>("run:run_failed")?.state).toBe("running");
+  });
+
+  it("never evicts running logs even when they exceed the budget", async () => {
+    const storage = new MemoryStorage();
+    seedLog(storage, "run_running", "running output", 1, true);
+    const logs = new RunLogStorage(storage, 1, () => false);
+    expect(await logs.maintain()).toBe(true);
+    expect(await logs.reserve("runlog:run_new:finish:attempt:", 1)).toBe(false);
+    expect(storage.value("runlog:run_running")).toBe("running output");
+    expect(storage.value<RunRecord>("run:run_running")?.logEvicted).toBeUndefined();
+  });
+});
+
+describe("run-log capacity regression", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  it("keeps payload admission within budget and lease cleanup writable", async () => {
+    const storage = new MemoryStorage();
+    let deletes = 0;
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+          deletes++;
+        }),
+      },
+      { CRABBOX_RUN_LOG_BUDGET_BYTES: "8" },
+    );
+    for (const id of ["run_budget_first", "run_budget_second"]) {
+      storage.seed(`run:${id}`, testRun({ id, owner: "alice@example.com", org: "example-org" }));
+      // oxlint-disable-next-line eslint/no-await-in-loop -- accumulate stored output across sequential finishes.
+      const result = await fleet.fetch(
+        request("POST", `/v1/runs/${id}/finish`, { headers, body: { exitCode: 0, log: "123456" } }),
+      );
+      expect(result.status).toBe(200);
+    }
+    const payloads = await storage.list<string>({ prefix: "runlog:" });
+    expect(
+      [...payloads.values()].reduce((bytes, value) => bytes + Buffer.byteLength(value), 0),
+    ).toBeLessThanOrEqual(8);
+    const read = await fleet.fetch(request("GET", "/v1/runs/run_budget_first/logs", { headers }));
+    expect(await read.text()).toBe("log evicted under storage pressure\n");
+    expect(storage.value("run:run_budget_first")).toBeDefined();
+    await storage.put(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        cloudID: "i-000000000001",
+        region: "eu-west-1",
+        expiresAt: "2026-05-01T00:00:01.000Z",
+      }),
+    );
+    await fleet.alarm();
+    expect(deletes).toBe(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.state).toBe("expired");
   });
 });

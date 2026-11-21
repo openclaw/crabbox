@@ -126,7 +126,9 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		return core.LeaseTarget{}, fmt.Errorf("azure readiness rejected: %w", err)
 	}
 	target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.Azure.Network))
-	if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &target, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, _ time.Duration) error {
+		return bootstrapManagedWindowsDesktop(ctx, cfg, target, publicKey, b.RT.Stderr)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
