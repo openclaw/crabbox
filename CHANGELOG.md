@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
 - Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
 - Checkpoints: reconcile pending AWS snapshot and AMI states in coordinator inventory, including existing checkpoints, with bounded polling and identity-checked verification writes. [PR 3146](https://github.com/openclaw/crabbox/pull/3146). Thanks @mkusaka.
 - Coordinator: recover capacity indexes at startup across retained lease history and restarts while preserving rollback completeness. [PR 3149](https://github.com/openclaw/crabbox/pull/3149). Thanks @mkusaka.

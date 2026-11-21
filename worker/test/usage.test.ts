@@ -927,3 +927,65 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     ...overrides,
   };
 }
+
+describe("failed quote budget guard", () => {
+  const now = new Date("2026-11-13T12:00:00Z");
+  const fallback = {
+    reason: "permission_denied" as const,
+    message: "provider pricing permission denied",
+  };
+  it.each([
+    "CRABBOX_MAX_MONTHLY_USD",
+    "CRABBOX_MAX_MONTHLY_USD_PER_OWNER",
+    "CRABBOX_MAX_MONTHLY_USD_PER_ORG",
+  ] as const)("rejects uncertain candidate and committed cost for %s", (limit) => {
+    const candidate = testLease({
+      createdAt: now.toISOString(),
+      owner: "alice@example.com",
+      org: "example-org",
+      maxEstimatedUSD: 0.1,
+    });
+    const limits = costLimits({ [limit]: "100" } as Env);
+    expect(
+      enforceCostLimits([], { ...candidate, pricingFallback: fallback }, limits, now),
+    ).toContain("monthly budget cannot be verified");
+    const existing = { ...candidate, id: "cbx_111111111111", pricingFallback: fallback };
+    expect(enforceCostLimits([existing], candidate, limits, now)).toContain(
+      "existing committed cost uses a fallback",
+    );
+    expect(
+      enforceCostLimits(
+        [],
+        { ...candidate, pricingFallback: fallback },
+        costLimits({} as Env),
+        now,
+      ),
+    ).toBe("");
+    expect(enforceCostLimits([], candidate, limits, now)).toBe("");
+  });
+  it("does not block unrelated owner and org budgets", () => {
+    const candidate = testLease({
+      createdAt: now.toISOString(),
+      owner: "alice@example.com",
+      org: "example-org",
+      maxEstimatedUSD: 0.1,
+    });
+    const existing = {
+      ...candidate,
+      owner: "bob@example.com",
+      org: "other-org",
+      pricingFallback: fallback,
+    };
+    expect(
+      enforceCostLimits(
+        [existing],
+        candidate,
+        costLimits({
+          CRABBOX_MAX_MONTHLY_USD_PER_OWNER: "100",
+          CRABBOX_MAX_MONTHLY_USD_PER_ORG: "100",
+        } as Env),
+        now,
+      ),
+    ).toBe("");
+  });
+});
