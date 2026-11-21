@@ -224,7 +224,9 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	created = waited
 	server := serverFromDroplet(created, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "digitalocean bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "digitalocean bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, now)
@@ -489,6 +491,7 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 		return core.LeaseTarget{
 			LeaseID: claim.LeaseID,
 			Server:  server,
+			SSH:     core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP),
 		}, nil
 	} else if !isDigitalOceanNotFound(err) {
 		return core.LeaseTarget{}, err
@@ -521,7 +524,7 @@ func (b *digitalOceanLeaseBackend) reconcilePendingRecovery(ctx context.Context,
 					return false, err
 				}
 				core.SetServerLeaseClaimSnapshot(&server, updated, true)
-				target = core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}
+				target = core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)}
 				return true, nil
 			case 0:
 				return false, nil
@@ -738,7 +741,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 			return core.LeaseTarget{}, err
 		}
 		core.SetServerLeaseClaimSnapshot(&server, updated, true)
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {

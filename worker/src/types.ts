@@ -1,5 +1,6 @@
 import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
 import type { LeaseLifetimePolicy } from "./lease-lifetime";
+import type { PricingFallback } from "./provider-pricing";
 import type { ServeRelayBackend } from "./serve-relay";
 
 export interface AWSCredentials {
@@ -127,6 +128,7 @@ export interface Env {
   CRABBOX_DURABLE_PROVISIONING_ADMISSION?: string;
   CRABBOX_USER_TOKEN_TTL_SECONDS?: string;
   CRABBOX_RUN_RETENTION_DAYS?: string;
+  CRABBOX_RUN_LOG_BUDGET_BYTES?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
   CRABBOX_GITHUB_CLIENT_SECRET?: string;
   CRABBOX_GITHUB_ALLOWED_ORG?: string;
@@ -640,6 +642,7 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
+  pricingFallback?: PricingFallback;
   state: "provisioning" | "active" | "released" | "expired" | "failed";
   createdAt: string;
   updatedAt: string;
@@ -1036,6 +1039,7 @@ export interface CoordinatorCheckpointRecord {
   updatedAt: string;
   lastUsedAt: string;
   nextSweepAt?: string;
+  imageRefreshAt?: string;
   createClaim?: CoordinatorCheckpointCreateClaim;
   deleteClaim?: CoordinatorCheckpointDeleteClaim;
   deleteRequestedAt?: string;
@@ -1155,6 +1159,8 @@ export interface RunRecord {
   durationMs?: number;
   logBytes: number;
   logTruncated: boolean;
+  logEvicted?: "storage_pressure" | "retention";
+  storedLogBytes?: number;
   blockedStage?: string;
   retryLikely?: string;
   results?: TestResultSummary;

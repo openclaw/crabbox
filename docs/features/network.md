@@ -59,6 +59,17 @@ For a lease that carries tailnet metadata, `auto`:
 
 For a lease with no tailnet metadata, `auto` is just public mode.
 
+An exit node can make bootstrap prefer the tailnet before this selection runs.
+If that later probe fails, fallback restores the original provider SSH endpoint
+and reports `network=public`; it does not reuse the failed tailnet address.
+Provider-specific routes and SSH settings remain intact.
+If there is no provider endpoint to fall back to, an unreachable tailnet causes
+an error instead of reporting a public connection with an empty address.
+
+The fallback notice goes to stderr, including for `ssh` and `status --json`, so
+SSH command lines and JSON on stdout remain usable. `status --wait` prints the
+notice once per invocation, even when it polls the lease repeatedly.
+
 Static SSH targets behave the same way when the static host name is a MagicDNS
 name or a `100.x` address: `auto` defers to whatever `static.host` resolves to.
 
@@ -246,7 +257,7 @@ network=tailscale requested for static host mac-studio but SSH is not reachable;
 network=tailscale requested but blue-lobster.tail-scale.ts.net is not reachable over SSH; is this client joined to the tailnet?
 ```
 
-`auto` mode never fails on a tailnet probe; it falls back to public and writes
+When a provider endpoint is available, `auto` falls back after a failed tailnet probe and writes
 `network fallback tailscale_unreachable` to stderr. That line is the diagnostic
 signal that the tailnet plane is unhealthy even though the command kept working;
 the corresponding `network=public` token in the `ready`/`status` output confirms

@@ -43,7 +43,7 @@ const (
 func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *Backend {
 	cfg.Provider = providerName
 	b := &Backend{
-		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt},
+		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true},
 	}
 	b.clientFactory = func(cfg core.Config, rt core.Runtime) (API, error) {
 		return newClient(cfg, rt)
@@ -254,7 +254,9 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	waited.SSHKeyID = shared.FirstNonBlank(waited.SSHKeyID, createdKey.ID)
 	server := serverFromInstance(waited, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "ovh bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "ovh bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", core.ClockNow(b.RT.Clock).UTC())
@@ -334,7 +336,7 @@ func (b *Backend) targetFromInstance(instance Instance, req core.ResolveRequest)
 	}
 	core.SetServerLeaseClaimSnapshot(&server, claim, claimExists)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe && server.PublicNet.IPv4.IP == "") {
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
@@ -409,7 +411,7 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client API, id str
 				if err := validateOVHClaim(claim, server); err != nil {
 					return core.LeaseTarget{}, err
 				}
-				return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+				return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)}, nil
 			}
 			return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous instance create remains indeterminate for lease=%s; credentials and recovery claim retained", claim.LeaseID)
 		case "rollback-cleanup":
@@ -427,7 +429,7 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client API, id str
 		if err := validateOVHClaim(claim, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)}, nil
 	}
 	if !isOVHNotFound(err) {
 		return core.LeaseTarget{}, err

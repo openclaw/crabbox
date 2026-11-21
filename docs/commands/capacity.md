@@ -93,16 +93,20 @@ This read-only snapshot does not hold the lifecycle mutex. Node uses a storage
 transaction. Cloudflare permits concurrent events during its reads and rejects
 the snapshot if any storage write overlaps, without holding the input gate for
 the scan. It reads the maintained lease index instead of
-scanning retained history or calculating monthly spend. Before the current
-runtime finishes index backfill or audit, only a store with at most 128 lease
-records can use the bounded historical fallback. A larger unindexed store or
+scanning retained history or calculating monthly spend. On startup, capacity
+waits for a storage-only index backfill or restart audit, in pages of at most
+128 records. Recovery continues across as many bounded passes as the retained
+history requires; other lifecycle requests remain available during recovery.
+This audit also recovers leases written by an older deployment without index
+updates. If recovery fails, only a store with at most 128 lease records can use
+the bounded historical fallback until background maintenance repairs the index.
+A larger unindexed store or
 a snapshot exceeding 4,096 lease-index and reservation entries, or a concurrent
 Cloudflare write returns
 retryable HTTP 503 `capacity_unavailable`, never a partial count. Each index or
 reservation page contains at most 128 entries.
 
-Normal service startup and background recovery retain their
-existing behavior; the capacity handler itself neither allocates nor reconciles
+The capacity handler itself neither allocates nor reconciles
 resources, deletes stale records, schedules maintenance, nor calls providers.
 Fleet or org cap exhaustion caused by other owners is reported as an aggregate
 count only. The response reveals no other owners' identities, lease IDs, records,

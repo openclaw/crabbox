@@ -108,6 +108,19 @@ by coordinator config:
   tokens, comma-only values, and mixed empty entries fail authorization closed.
 - `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
   membership caching (default 300, maximum 3600; set 0 to check every request).
+  Cloudflare Workers keep an isolate-local first level and share positive results
+  through the regional Workers Cache API, without contacting Fleet. Cache keys
+  use a session-secret-keyed HMAC of the token identity, organization, normalized
+  org/team policy, TTL, and cache policy version; neither tokens nor membership
+  responses are stored in that cache. Policy changes invalidate the corresponding
+  entries. Node keeps its process-local cache because it has no Workers Cache API.
+  Hits at either level preserve the original absolute expiry: GitHub membership
+  removal or credential revocation can remain unseen for at most the configured
+  TTL after the last successful check (300 seconds by default, at most 3600).
+  Failed checks are never cached, and an expired entry cannot authorize a request
+  when GitHub revalidation fails. Token expiry and configured user revocation are
+  still checked on every request. Regional eviction, different regions, or
+  simultaneous cold misses can cause additional GitHub checks.
 - `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated immutable
   `github:<numeric-id>` owners; an optional `owner:` prefix is accepted. Use this
   for narrow emergency revocation without rotating every token. Email, login,

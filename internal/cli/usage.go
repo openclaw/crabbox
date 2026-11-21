@@ -60,6 +60,9 @@ func printUsageSummary(out interface{ Write([]byte) (int, error) }, usage Coordi
 	printUsageGroups(out, "providers", usage.ByProvider)
 	printUsageGroups(out, "server_types", usage.ByServerType)
 	printUsageGroups(out, "by machine", usage.ByMachine)
+	for _, fallback := range usage.PricingFallbacks {
+		fmt.Fprintf(out, "warning: cost estimate fallback provider=%s type=%s leases=%d reason=%s: %s\n", fallback.Provider, fallback.ServerType, fallback.Leases, fallback.Reason, fallback.Message)
+	}
 }
 
 func printUsageGroups(out interface{ Write([]byte) (int, error) }, title string, groups []CoordinatorUsageGroup) {

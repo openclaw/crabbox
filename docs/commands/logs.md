@@ -24,7 +24,14 @@ When `crabbox run` executes against a coordinator, it streams the remote
 process stdout and stderr to your terminal *and* records a bounded copy on the
 coordinator. The retained log is the combined command output, capped at 8 MiB
 per run; the coordinator stores it in 64 KiB chunks so a noisy parallel run
-does not blow past Durable Object storage limits.
+stays within per-value storage limits. Aggregate storage is separately bounded
+by `CRABBOX_RUN_LOG_BUDGET_BYTES` (512 MiB by default). The configured
+`CRABBOX_RUN_RETENTION_DAYS` (30 by default) is a maximum: older terminal logs
+can be evicted sooner under storage pressure. Running logs and run records are
+preserved. Evicted reads return `log evicted under storage pressure` in the
+CLI, portal, and API, with `run.logEvicted: "storage_pressure"` in JSON.
+Age-expired logs return `log expired under retention policy` and
+`run.logEvicted: "retention"`.
 
 Output beyond the cap is dropped and the run is flagged as truncated, so a
 consumer can tell the tail is missing.
