@@ -149,11 +149,11 @@ class ConsumerContract(unittest.TestCase):
                      deterministic=True, initialFuel=qualify.INITIAL, remainingFuel=qualify.INITIAL - 12)
         projection = dict(argv=qualify.ARGV, configuration=meter['configuration'], engine='wasmtime',
                           engineRevision=meter['engineRevision'], engineVersion=meter['engineVersion'],
-                          metric='fuel', target='wasip1/wasm', toolchain='go1.27.3', unit='fuel',
+                          metric='fuel', target='wasip1/wasm', toolchain='go1.27.4', unit='fuel',
                           wasiConfiguration=meter['wasiConfiguration'], workload=workload)
         meter['comparisonKey'] = 'sha256:' + qualify.sha(json.dumps(projection, sort_keys=True, separators=(',', ':')).encode())
         return dict(schemaVersion=1, generatedAt='2026-01-01T00:00:00Z', provider='local-container',
-                    workload=dict(name=workload, moduleSha256='a' * 64, toolchain='go1.27.3', target='wasip1/wasm', argv=qualify.ARGV),
+                    workload=dict(name=workload, moduleSha256='a' * 64, toolchain='go1.27.4', target='wasip1/wasm', argv=qualify.ARGV),
                     meter=meter, results=[dict(metric='fuel', unit='fuel', measured=12, budget=12, exceeded=False)],
                     exceeded=False, guestOutput=dict(stdoutSha256=qualify.sha(b'PASS\n'), stderrSha256=qualify.sha(b'')))
 

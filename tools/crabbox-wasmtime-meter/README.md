@@ -18,7 +18,7 @@ Linux amd64 and arm64 are the qualification targets. Build with Rust 1.97.0:
 cargo build --locked --release --manifest-path tools/crabbox-wasmtime-meter/Cargo.toml
 ```
 
-Compile the selected Go tests with Go 1.27.3, `GOOS=wasip1 GOARCH=wasm`, using
+Compile the selected Go tests with Go 1.27.4, `GOOS=wasip1 GOARCH=wasm`, using
 `go test -c -trimpath ... ./scripts`. The helper supplies the fixed anchored
 selection, `-test.count=1` and `-test.shuffle=off`; it does not execute Node.js.
 Use a fresh private output directory owned by the helper account:

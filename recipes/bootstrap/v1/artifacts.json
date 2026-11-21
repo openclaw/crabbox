@@ -14,8 +14,8 @@
       "SHA256": "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
     },
     "gitForWindowsSetup": {
-      "URL": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/Git-2.56.0.3-64-bit.exe",
-      "SHA256": "dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2"
+      "URL": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/Git-2.56.1-64-bit.exe",
+      "SHA256": "c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559"
     },
     "openSSHWin64Zip": {
       "URL": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip",
@@ -26,19 +26,19 @@
       "SHA256": "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
     },
     "wslTruffleHog": {
-      "Version": "3.99.4",
-      "AMD64SHA256": "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1"
+      "Version": "3.100.0",
+      "AMD64SHA256": "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb"
     },
     "defaultTailscale": {
-      "Version": "1.104.2",
-      "AMD64SHA256": "512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae",
-      "ARM64SHA256": "5776aaa901b5ef1916e66be5bb54b9f481cd399c9c28db123a8cab620efa237b",
+      "Version": "1.104.7",
+      "AMD64SHA256": "e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c",
+      "ARM64SHA256": "d6bed2720310b328b861f943d7b4016c5358a9bad60575eb51e8143b79068484",
       "KeyringSHA256": "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
     },
     "defaultCodeServer": {
-      "Version": "4.143.1",
-      "AMD64SHA256": "614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5",
-      "ARM64SHA256": "51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384"
+      "Version": "4.146.0",
+      "AMD64SHA256": "cf7e82ca5fe1df664d43a43d900c3c9710f8f3403a5e8d0e18f6a12d10d7401b",
+      "ARM64SHA256": "3df88f7f1feecce3583ab0109c5f6bf14f90ae3a44939b4257ccd9850ef37a6e"
     },
     "googleLinuxSigningKey": {
       "Fingerprint": "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"

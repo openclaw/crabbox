@@ -574,10 +574,10 @@ release installations do not compile replacement companions from source.
 For a CLI-only source install, pin a supported release (v0.44.0 or later):
 
 ```sh
-GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.81.0
+GOTOOLCHAIN=go1.27.4 go install github.com/openclaw/crabbox/cmd/crabbox@v0.81.0
 ```
 
-The module minimum remains Go 1.26. Use the explicit patched toolchain above
+The module minimum is Go 1.26.10. Use the explicit patched toolchain above
 for source installs: versioned `go install` ignores the target module's toolchain
 suggestion. Avoid `@latest` while older,
 incompatible release tags remain visible.

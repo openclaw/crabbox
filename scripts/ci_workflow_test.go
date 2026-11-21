@@ -238,7 +238,7 @@ func checkCIGoContract(document *yaml.Node) error {
 				keys = append(keys, "with")
 				with := ciGoField(step, "with")
 				fields(with, label+" inputs", "go-version", "go-version-file", "cache", "cache-dependency-path")
-				require(ciGoScalar(with, "go-version") == "1.27.3", "%s must select the patched Go toolchain", label)
+				require(ciGoScalar(with, "go-version") == "1.27.4", "%s must select the patched Go toolchain", label)
 				require(ciGoScalar(with, "go-version-file") == "go.mod", "%s must use go.mod", label)
 				require(ciGoScalar(with, "cache") == "true", "%s must cache Go builds and modules", label)
 				require(ciGoScalar(with, "cache-dependency-path") == "**/go.sum", "%s must key every module dependency", label)

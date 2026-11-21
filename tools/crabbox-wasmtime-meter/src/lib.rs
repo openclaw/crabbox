@@ -16,7 +16,7 @@ pub const ENGINE_VERSION: &str = "50.0.1";
 pub const ENGINE_REVISION: &str = "c307ec81de02852d815e9849f7c89d955c03c30d";
 pub const CONFIGURATION: &str = "crabbox-wasmtime-fuel/v2";
 pub const WASI_CONFIGURATION: &str = "crabbox-deterministic-wasi/v1";
-pub const TOOLCHAIN: &str = "go1.27.3";
+pub const TOOLCHAIN: &str = "go1.27.4";
 pub const ARGV: [&str; 4] = [
     "workflow-action-pins.test",
     "-test.run=^(TestCheckWorkflowNodeAcceptsImmutableUsesSyntaxes|TestCheckWorkflowNodeIgnoresUnrelatedUsesKeys)$",

@@ -1298,7 +1298,7 @@ fi
 test("generic executor retains the protected credential reader without campaign modes", () => {
   const executeJob = workflow.slice(workflow.indexOf("  execute:"), workflow.indexOf("  finalize:"));
   assert.match(executeJob, /environment: image-qualification-executor/);
-  assert.match(executeJob, /node-version: 24\.22\.1/);
+  assert.match(executeJob, /node-version: 24\.22\.3/);
   assert.match(executeJob, /node harness\/scripts\/image-qualification-executor-token\.mjs/);
   assert.match(executeJob, /QUALIFICATION_HANDOFF_SHA256:/);
   assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN_SHA256:/);

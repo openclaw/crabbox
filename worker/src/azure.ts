@@ -68,11 +68,11 @@ const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
   "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest";
 const DEFAULT_AZURE_WINDOWS_IMAGE =
   "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest";
-const AZURE_TRUFFLEHOG_VERSION = "3.99.4";
+const AZURE_TRUFFLEHOG_VERSION = "3.100.0";
 const AZURE_TRUFFLEHOG_AMD64_SHA256 =
-  "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1";
+  "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb";
 const AZURE_TRUFFLEHOG_ARM64_SHA256 =
-  "e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5";
+  "aa61657049229ae523e8455fcbba87dff57b0a2ba6bdb391a38cf75e6d4016dd";
 
 export function azureLinuxCloudInit(config: LeaseConfig): string {
   return cloudInit(config, azureLinuxTruffleHogBootstrap());

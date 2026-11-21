@@ -25,9 +25,9 @@ import (
 func TestAzureLinuxCloudInitInstallsPinnedTruffleHog(t *testing.T) {
 	got := azureLinuxCloudInit(baseConfig(), "ssh-ed25519 test")
 	for _, want := range []string{
-		"trufflehog_version=3.99.4",
-		"5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1",
-		"e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5",
+		"trufflehog_version=3.100.0",
+		"b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb",
+		"aa61657049229ae523e8455fcbba87dff57b0a2ba6bdb391a38cf75e6d4016dd",
 		"trufflehog --no-update --version",
 		"sha256sum -c -",
 		"tar --no-same-owner",
@@ -1193,7 +1193,7 @@ func TestAzureWindowsBootstrapPowerShell(t *testing.T) {
 	got := azureWindowsBootstrapPowerShell(cfg, "ssh-rsa test")
 	for _, want := range []string{
 		"OpenSSH-Win64.zip",
-		"Git-2.56.0.3-64-bit.exe",
+		"Git-2.56.1-64-bit.exe",
 		"administrators_authorized_keys",
 		"Match Group administrators",
 		"$sshPorts = @('2222', '22')",

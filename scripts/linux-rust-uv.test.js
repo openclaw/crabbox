@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 const installer = new URL("./install-linux-developer-tools.sh", import.meta.url).pathname;
-const versions = { rust: "1.98.1", uv: "0.13.5" };
+const versions = { rust: "1.100.0", uv: "0.13.9" };
 const commands = { rust: ["rustc", "cargo", "rustdoc"], uv: ["uv", "uvx"] };
 
 test(
@@ -329,18 +329,20 @@ for (const tool of ["rust", "uv"]) {
   });
 }
 
-for (const state of ["present", "dangling"]) {
-  test(`uv rebakes released predecessor ${state} aliases without running old bytes`, (t) => {
-    const { root, run, destination } = fixture(t, "uv");
-    const previous = path.join(root, "tools", "uv", "0.12.19", "bin");
+for (const [tool, version] of [["uv", "0.12.19"], ["uv", "0.13.5"], ["rust", "1.98.1"]]) {
+  for (const state of ["present", "dangling"]) {
+  test(`${tool} rebakes released predecessor ${version} ${state} aliases without running old bytes`, (t) => {
+    const { root, run, destination } = fixture(t, tool);
+    const previous = path.join(root, "tools", tool, version, "bin");
     if (state === "present") {
       fs.mkdirSync(previous, { recursive: true });
-      for (const name of commands.uv) executable(path.join(previous, name), 'touch "$HOME/old-uv-executed"; exit 79');
+      for (const name of commands[tool]) executable(path.join(previous, name), 'touch "$HOME/old-tool-executed"; exit 79');
     }
-    for (const name of commands.uv) fs.symlinkSync(path.join(previous, name), path.join(root, "bin", name));
-    success(run("install_rust_uv_toolchain uv\ninstall_rust_uv_toolchain uv\noffline_uv_probe"));
-    for (const name of commands.uv) assert.equal(fs.readlinkSync(path.join(root, "bin", name)), `${destination}/bin/${name}`);
-    assert.equal(fs.existsSync(path.join(root, "home", "old-uv-executed")), false);
-    if (state === "present") assert.match(fs.readFileSync(path.join(previous, "uv"), "utf8"), /exit 79/);
+    for (const name of commands[tool]) fs.symlinkSync(path.join(previous, name), path.join(root, "bin", name));
+    success(run(`install_rust_uv_toolchain ${tool}\ninstall_rust_uv_toolchain ${tool}\noffline_${tool}_probe`));
+    for (const name of commands[tool]) assert.equal(fs.readlinkSync(path.join(root, "bin", name)), `${destination}/bin/${name}`);
+    assert.equal(fs.existsSync(path.join(root, "home", "old-tool-executed")), false);
+    if (state === "present") assert.match(fs.readFileSync(path.join(previous, commands[tool][0]), "utf8"), /exit 79/);
   });
+  }
 }
