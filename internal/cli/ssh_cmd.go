@@ -74,7 +74,7 @@ func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command str
 	if err := requireLeaseID(*id, "crabbox "+command+" --id <lease-id-or-slug>", cfg); err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}
-	lease, err := a.resolveNetworkLoginLeaseTargetForRepo(ctx, &cfg, *id, false, *reclaim, command != "connect")
+	lease, err := a.resolveNetworkLoginLeaseTargetForRepo(ctx, &cfg, *id, true, *reclaim, command != "connect")
 	if err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}

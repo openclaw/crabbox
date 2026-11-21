@@ -104,7 +104,9 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return core.LeaseTarget{}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &target, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return waitForSSHReady(ctx, target, b.RT.Stderr, "bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
