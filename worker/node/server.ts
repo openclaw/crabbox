@@ -52,7 +52,10 @@ const diagnoseUntrustedForwarding = createUntrustedForwardingDiagnostic();
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
 await awsDeployment.start();
-await runtime.start(() => coordinator.alarm());
+await runtime.start(
+  () => coordinator.alarm(),
+  () => coordinator.startCapacityIndexRecovery(),
+);
 
 const server = createServer((request, response) => {
   void activeRequests

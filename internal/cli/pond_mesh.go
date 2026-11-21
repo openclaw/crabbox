@@ -68,6 +68,8 @@ const pondMeshEnvFileName = "env"
 // `pond disconnect <name>` can clean up this pond without broad process scans.
 const pondMeshDaemonFileName = "daemon.json"
 
+const pondMeshForegroundFileName = "foreground.json"
+
 type pondMeshRunner interface {
 	Command(ctx context.Context, target SSHTarget, name string, args ...string) pondMeshHandle
 }
@@ -264,8 +266,7 @@ type pondMember struct {
 }
 
 // pondMeshForward is one (peer, port) pair plus the loopback port the
-// operator-side allocator assigned to it. The doctor sub-check counts these
-// to report the SSH-mesh plane status without re-running the orchestration.
+// operator-side allocator assigned to it.
 type pondMeshForward struct {
 	Peer       string `json:"peer"`
 	RemotePort int    `json:"remotePort"`
@@ -352,7 +353,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	members, ineligible, err := collectPondMembersAcrossProviders(ctx, runtimeForApp(a), cfg, pond, *providerFilter)
+	members, ineligible, err := collectPondMembersAcrossProviders(ctx, runtimeForApp(a), cfg, pond, *providerFilter, !*jsonOut)
 	if err != nil {
 		return err
 	}
@@ -364,6 +365,30 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		return nil
 	}
 	opts := pondConnectOptions{Stdout: a.Stdout, Stderr: a.Stderr, HomeDir: os.Getenv("HOME")}
+	if *exportOnly && !*jsonOut && !pondMeshDaemonSupported(runtime.GOOS) {
+		return Exit(2, "pond connect --export is not supported on Windows operator hosts yet; run without --export or from macOS/Linux")
+	}
+	if *jsonOut || *exportOnly {
+		summary, running, err := runningPondMeshSummary(opts.HomeDir, pond, members, *exportOnly && !*jsonOut)
+		if err != nil {
+			return err
+		}
+		if running {
+			if *jsonOut {
+				return json.NewEncoder(a.Stdout).Encode(summary)
+			}
+			for _, line := range summary.Exports {
+				fmt.Fprintln(a.Stdout, line)
+			}
+			return nil
+		}
+	}
+	if *exportOnly && !*jsonOut {
+		// Validate and stop the old set before allocating its replacement.
+		if _, err := stopPondMeshDaemonState(opts.HomeDir, pond); err != nil {
+			return err
+		}
+	}
 	summary, err := preparePondMeshSummary(pond, members, opts)
 	if err != nil {
 		return err
@@ -375,15 +400,10 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(summary)
 	}
+	if err := persistPondMeshSummary(summary); err != nil {
+		return err
+	}
 	if *exportOnly {
-		if !pondMeshDaemonSupported(runtime.GOOS) {
-			return Exit(2, "pond connect --export is not supported on Windows operator hosts yet; run without --export or from macOS/Linux")
-		}
-		// Start daemons before emitting exports so shell evals never see
-		// assignments for tunnels that failed to start.
-		if _, err := stopPondMeshDaemonState(opts.HomeDir, pond); err != nil {
-			return err
-		}
 		if err := startPondMeshDaemons(ctx, opts, pond, members, summary); err != nil {
 			return err
 		}
@@ -439,7 +459,7 @@ func (a App) pondDisconnect(_ context.Context, args []string) error {
 // providerFilter, when non-empty, restricts the search to that single
 // provider — the caller passes this through from `--provider X` for users
 // who want an explicit single-provider filter.
-func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Config, pond, providerFilter string) ([]pondMember, []string, error) {
+func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Config, pond, providerFilter string, prepare bool) ([]pondMember, []string, error) {
 	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -484,7 +504,7 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 		if serr != nil {
 			return nil, nil, fmt.Errorf("list %s leases: %w", p, serr)
 		}
-		providerMembers, merr := collectPondMembers(ctx, sshBackend, providerCfg, servers, pond)
+		providerMembers, merr := collectPondMembers(ctx, sshBackend, providerCfg, servers, pond, prepare)
 		if merr != nil {
 			return nil, nil, fmt.Errorf("collect %s pond members: %w", p, merr)
 		}
@@ -501,11 +521,19 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 // collectPondMembers narrows a backend's list output to the pond of interest.
 // It resolves SSH targets only for members with exposed ports, avoiding a
 // provider lifecycle change when pond connect has nothing to forward.
-func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config, servers []Server, pond string) ([]pondMember, error) {
+func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config, servers []Server, pond string, prepare bool) ([]pondMember, error) {
 	servers = filterServersByPond(servers, pond)
 	out := make([]pondMember, 0, len(servers))
 	for _, server := range servers {
 		resolveID := pondResolveIDForServer(server)
+		expectedClaim, err := ReadLeaseClaim(resolveID)
+		if err != nil {
+			return nil, fmt.Errorf("read %s claim: %w", server.Name, err)
+		}
+		if expectedClaim.LeaseID != resolveID || NormalizePondName(expectedClaim.Pond) != NormalizePondName(pond) ||
+			(cfg.Provider != "" && canonicalClaimProvider(expectedClaim.Provider) != canonicalClaimProvider(cfg.Provider)) {
+			continue
+		}
 		name := strings.TrimSpace(ServerSlug(server))
 		if name == "" {
 			name = resolveID
@@ -515,15 +543,11 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 			out = append(out, pondMember{Name: name, Ports: ports, Lease: resolveID})
 			continue
 		}
-		expectedClaim, expectedClaimed, err := ResolveLeaseClaim(resolveID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve %s claim: %w", server.Name, err)
-		}
-		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: resolveID, Prepare: true})
+		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: resolveID, Prepare: prepare})
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
-		if expectedClaimed && expectedClaim.LeaseID == lease.LeaseID {
+		if prepare && expectedClaim.LeaseID == lease.LeaseID {
 			if _, err := UpdateLeaseClaimEndpointIfUnchanged(lease.LeaseID, expectedClaim, lease.Server, lease.SSH); err != nil {
 				current, claimed, resolveErr := ResolveLeaseClaim(lease.LeaseID)
 				if resolveErr != nil {
@@ -618,9 +642,7 @@ func shortLeaseID(leaseID string) string {
 	return leaseID
 }
 
-// preparePondMeshSummary builds the forward table and renders hosts + env
-// files under HOME. It does not spawn processes; orchestration is split out
-// so the rendering is unit-testable in isolation from any ssh exec.
+// preparePondMeshSummary plans a forward table without writing state or starting SSH.
 func preparePondMeshSummary(pond string, members []pondMember, opts pondConnectOptions) (pondMeshSummary, error) {
 	used := map[int]bool{}
 	alloc := opts.PortAlloc
@@ -650,15 +672,19 @@ func preparePondMeshSummary(pond string, members []pondMember, opts pondConnectO
 	if err != nil {
 		return pondMeshSummary{}, err
 	}
-	hostsBody := renderPondMeshHostsFile(forwards)
-	envBody, exports := renderPondMeshEnvFile(forwards)
-	if err := writePondMeshStateFile(hostsPath, hostsBody); err != nil {
-		return pondMeshSummary{}, err
-	}
-	if err := writePondMeshStateFile(envPath, envBody); err != nil {
-		return pondMeshSummary{}, err
-	}
+	_, exports := renderPondMeshEnvFile(forwards)
 	return pondMeshSummary{HostsPath: hostsPath, EnvPath: envPath, Exports: exports, Forwards: forwards}, nil
+}
+
+func persistPondMeshSummary(summary pondMeshSummary) error {
+	if err := os.MkdirAll(filepath.Dir(summary.HostsPath), 0o700); err != nil {
+		return err
+	}
+	if err := writePondMeshStateFile(summary.HostsPath, renderPondMeshHostsFile(summary.Forwards)); err != nil {
+		return err
+	}
+	env, _ := renderPondMeshEnvFile(summary.Forwards)
+	return writePondMeshStateFile(summary.EnvPath, env)
 }
 
 // allocateLocalForwardPort walks the operator-side window looking for a free
@@ -682,10 +708,9 @@ func allocateLocalForwardPort(used map[int]bool) (int, error) {
 }
 
 // pondMeshHostsAndEnvPaths returns the absolute paths to the per-pond state
-// files under HOME. The parent directory is created with 0700 so the layout
-// matches the rest of ~/.crabbox.
+// files under HOME without creating directories.
 func pondMeshHostsAndEnvPaths(home, pond string) (string, string, error) {
-	dir, err := ensurePondMeshStateDir(home, pond)
+	dir, err := pondMeshStateDir(home, pond)
 	if err != nil {
 		return "", "", err
 	}
@@ -793,6 +818,10 @@ func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, groups
 	if err != nil {
 		return err
 	}
+	return writePondMeshProcessState(path, pond, summary, groups, handles)
+}
+
+func writePondMeshProcessState(path, pond string, summary pondMeshSummary, groups []pondMeshForwardGroup, handles []*exec.Cmd) error {
 	pids := make([]int, 0, len(handles))
 	processes := make([]pondMeshDaemonProcess, 0, len(handles))
 	for i, handle := range handles {
@@ -844,17 +873,21 @@ func stopPondMeshDaemonState(home, pond string) (int, error) {
 		if entry.PID <= 0 {
 			continue
 		}
-		command, alive := pondMeshDaemonProcessCommand(entry.PID)
+		command, alive, err := pondMeshDaemonProcessCommand(entry.PID)
+		if err != nil {
+			return stopped, err
+		}
 		if !alive || !isPondMeshDaemonCommand(command, entry.Forward) {
 			continue
 		}
 		proc, err := os.FindProcess(entry.PID)
 		if err != nil {
-			continue
+			return stopped, err
 		}
-		if err := stopDaemonProcess(proc, entry.PID); err == nil {
-			stopped++
+		if err := stopDaemonProcess(proc, entry.PID); err != nil {
+			return stopped, err
 		}
+		stopped++
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return stopped, err
@@ -877,13 +910,17 @@ func pondMeshDaemonProcesses(state pondMeshDaemonState) []pondMeshDaemonProcess 
 	return out
 }
 
-func pondMeshDaemonProcessCommand(pid int) (string, bool) {
-	out, err := systemInspectionCommand("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+func pondMeshDaemonProcessCommand(pid int) (string, bool, error) {
+	out, err := systemInspectionCommand("ps", "-ww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
-		return "", false
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 && len(exitErr.Stderr) == 0 {
+			return "", false, nil // ps confirmed there is no such process.
+		}
+		return "", false, fmt.Errorf("inspect pond forward PID %d: %w", pid, err)
 	}
 	command := strings.TrimSpace(string(out))
-	return command, command != ""
+	return command, command != "", nil
 }
 
 func pondMeshDaemonSupported(goos string) bool {
@@ -1087,6 +1124,22 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 		running = append(running, runningForwardGroup{group: group, handle: handle, session: session})
 		for _, fwd := range group.Forwards {
 			fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+		}
+	}
+	if opts.HomeDir != "" && summary.HostsPath != "" && pondMeshDaemonSupported(runtime.GOOS) {
+		var handles []*exec.Cmd
+		for _, rf := range running {
+			if handle, ok := rf.handle.(*pondMeshExecHandle); ok {
+				handles = append(handles, handle.cmd)
+			}
+		}
+		if len(handles) == len(running) {
+			path := filepath.Join(filepath.Dir(summary.HostsPath), pondMeshForegroundFileName)
+			if err := writePondMeshProcessState(path, filepath.Base(filepath.Dir(path)), summary, groups, handles); err != nil {
+				cancel()
+				return errors.Join(err, reapStarted())
+			}
+			defer os.Remove(path)
 		}
 	}
 	var wg sync.WaitGroup

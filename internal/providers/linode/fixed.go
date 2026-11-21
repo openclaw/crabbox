@@ -153,7 +153,9 @@ func (b *linodeLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireR
 		server := serverFromLinode(item, cfg)
 		server.ImmutableID = claim.CloudImmutableID
 		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-		if err := b.waitSSH(ctx, &target, "linode bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+		if err := core.WaitForDirectBootstrap(ctx, cfg, server, &target, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+			return b.waitSSH(ctx, target, "linode bootstrap", timeout)
+		}); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		labels := maps.Clone(server.Labels)
