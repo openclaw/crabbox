@@ -2,12 +2,33 @@
 
 ## Unreleased
 
-- Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
-- Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
-
 ### Fixed
 
 - Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
+- Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
+- Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
+
+## 0.83.2 - 2026-11-15
+
+### Added
+
+- Managed SSH hosts: prepare public enrollment descriptors and install per-host expiring credentials, with admin-only revocation, reissue and exact-custody cleanup recovery, pinned host identity, and heartbeat/relay-only authorization. [PR 3169](https://github.com/openclaw/crabbox/pull/3169). Thanks @vincentkoc.
+
+### Fixed
+
+- Boat: confirm absence and release the local lease when a snapshot-disabled sandbox disappears during native stop, while retaining claims if inventory or ownership is uncertain. [PR 3168](https://github.com/openclaw/crabbox/pull/3168). Thanks @vincentkoc.
+- Egress: keep concurrent proxy connection IDs unique to prevent paired immediate and timed-out HTTP 502 responses. [PR 3116](https://github.com/openclaw/crabbox/pull/3116). Thanks @robojarvis.
+- Run: print recovery stop commands with the exact lease ID so shared static-host slots remain independently releasable. [PR 3106](https://github.com/openclaw/crabbox/pull/3106). Thanks @saariuslystoned.
+- Warmup: report the resolver-selected network consistently with status for static SSH hosts. [PR 3108](https://github.com/openclaw/crabbox/pull/3108). Thanks @saariuslystoned.
+- Tailscale: use coordinator default tags for lease API requests that omit tags while preserving explicit-tag validation. [PR 3110](https://github.com/openclaw/crabbox/pull/3110). Thanks @KrasimirKralev.
+- Tailscale: limit rendered hostnames to valid 63-character DNS labels in direct and coordinator provisioning. [PR 3099](https://github.com/openclaw/crabbox/pull/3099). Thanks @KrasimirKralev.
+- RunPod: migrate the provider and live-smoke cleanup to REST v2 before v1 retirement, with complete pagination, actual-state SSH readiness, and ownership-fenced termination. [PR 3147](https://github.com/openclaw/crabbox/pull/3147). Thanks @michaelmanly.
+
+## 0.83.1 - 2026-11-14
+
+- Azure Sandbox: select every resource tier from XS (0.25 vCPU / 0.5 GiB) to 3XL (16 vCPU / 32 GiB), including 5–320 GiB tier disk capacities, with `--type` names or tier aliases while preserving implicit defaults, safe lease replay and snapshot inheritance. https://github.com/openclaw/crabbox/pull/3143 Thanks @galiniliev.
+- Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
+- Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
 ## 0.83.0 - 2026-11-10
 

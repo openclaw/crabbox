@@ -359,6 +359,17 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 		onDeletionObserved(operation)
 	}
 	if err != nil {
+		var missing *boxNotFoundError
+		if errors.As(err, &missing) && missing.id == expected.ID {
+			// A snapshot-disabled sandbox can disappear during native stop.
+			absent, absenceErr := boxAbsentAfterDeletion(ctx, client, expected)
+			if absenceErr != nil {
+				return errors.Join(err, fmt.Errorf("ascii-box cleanup confirmation: %w", absenceErr))
+			}
+			if absent {
+				return nil
+			}
+		}
 		return err
 	}
 	// Re-attest both absence witnesses inside the release fence.

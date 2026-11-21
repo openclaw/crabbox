@@ -798,11 +798,7 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.CoordAdminToken != "" {
-		cfg.CoordToken = cfg.CoordAdminToken
-		cfg.CoordTokenCommand = nil
-	}
-	coord, ok, err := newCoordinatorClient(cfg)
+	coord, ok, err := newCoordinatorClient(adminCoordinatorConfig(cfg))
 	if err != nil {
 		return nil, err
 	}

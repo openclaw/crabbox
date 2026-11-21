@@ -5,6 +5,7 @@ package sshhost
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
@@ -42,4 +43,12 @@ func lockMachine() (func(), error) {
 		return nil, err
 	}
 	return func() { windows.CloseHandle(h) }, nil
+}
+
+func verifyPrivateHostFile(f *os.File) error {
+	_, user, err := privatefile.WindowsAttributes(false)
+	if err != nil {
+		return err
+	}
+	return privatefile.VerifyWindowsHandle(windows.Handle(f.Fd()), false, user)
 }

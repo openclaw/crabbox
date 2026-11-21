@@ -44,12 +44,15 @@ type hostReport struct {
 	WorkRoot         string `json:"workRoot,omitempty"`
 }
 type hostState struct {
-	FrontDoorKey string          `json:"frontDoorKey"`
-	ID           string          `json:"id"`
-	Coordinator  string          `json:"coordinator"`
-	Assignment   *hostAssignment `json:"assignment,omitempty"`
-	Runtime      *runtimeState   `json:"runtime,omitempty"`
-	Report       *hostReport     `json:"report,omitempty"`
+	Descriptor   *hostDescriptor         `json:"descriptor,omitempty"`
+	Credential   *hostCredentialEnvelope `json:"credential,omitempty"`
+	AuthMode     string                  `json:"authMode,omitempty"`
+	FrontDoorKey string                  `json:"frontDoorKey"`
+	ID           string                  `json:"id"`
+	Coordinator  string                  `json:"coordinator"`
+	Assignment   *hostAssignment         `json:"assignment,omitempty"`
+	Runtime      *runtimeState           `json:"runtime,omitempty"`
+	Report       *hostReport             `json:"report,omitempty"`
 }
 type runtimeState struct {
 	User              string `json:"user,omitempty"`
@@ -69,9 +72,10 @@ type relayAssignment struct {
 	AgentToken string `json:"agentToken"`
 }
 type hostHeartbeat struct {
-	Assignment *hostAssignment   `json:"assignment"`
-	Relays     []relayAssignment `json:"relays"`
-	ServerTime int64             `json:"serverTime"`
+	CleanupComplete bool              `json:"cleanupComplete"`
+	Assignment      *hostAssignment   `json:"assignment"`
+	Relays          []relayAssignment `json:"relays"`
+	ServerTime      int64             `json:"serverTime"`
 }
 type hostAgent struct {
 	coord  *core.CoordinatorClient
@@ -86,7 +90,7 @@ type hostAgent struct {
 
 func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: crabbox host enroll|list|enable|drain|remove|serve")
+		return fmt.Errorf("usage: crabbox host prepare|enroll|install|revoke|reissue|recover|list|enable|drain|remove|serve")
 	}
 	action := args[0]
 	fs := flag.NewFlagSet("host "+action, flag.ContinueOnError)
@@ -104,6 +108,15 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	template := fs.String("template", "", "Operator-controlled environment revision")
 	capabilities := fs.String("capabilities", "", "Comma-separated advertised capabilities")
 	mxc := fs.String("mxc-executable", "", "Absolute pinned MXC 0.8.0 executor (Windows interactive desktop only)")
+	descriptor := fs.String("descriptor", "", "Public prepared host descriptor for admin enrollment")
+	credentialOut := fs.String("credential-out", "", "Private credential output file (retained for safe retries)")
+	credentialStdin := fs.Bool("credential-stdin", false, "Install the credential envelope from stdin")
+	credentialTTL := fs.Duration("credential-ttl", 90*24*time.Hour, "Host credential lifetime (maximum 365 days)")
+	recoveryLease := fs.String("lease-id", "", "Exact retained lease UUID for cleanup recovery")
+	recoveryGeneration := fs.Int("allocation-generation", 0, "Exact retained allocation generation for cleanup recovery")
+	recoveryAccess := fs.Int("access-generation", -1, "Exact retained access generation for cleanup recovery")
+	expectedGeneration := fs.Int("expected-generation", 0, "Current credential generation for reissue")
+	coordinator := fs.String("coordinator", "", "Coordinator URL for host preparation")
 	endpoint := fs.String("endpoint-state", "", "Internal isolated endpoint configuration")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -117,9 +130,37 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 		}
 		return runEndpoint(ctx, *endpoint)
 	}
-	c, err := core.NewCoordinatorClient(cfg)
-	if err != nil {
-		return err
+	if action == "prepare" || action == "install" || action == "revoke" || action == "reissue" || action == "recover" || (action == "enroll" && *descriptor != "") {
+		var cleanup *hostCleanupBinding
+		if action == "recover" {
+			cleanup = &hostCleanupBinding{LeaseID: *recoveryLease, Generation: *recoveryGeneration, AccessGeneration: *recoveryAccess}
+			if !hostLeasePattern.MatchString(cleanup.LeaseID) || cleanup.Generation < 1 || cleanup.AccessGeneration < 0 {
+				return fmt.Errorf("recover requires --lease-id, --allocation-generation and --access-generation")
+			}
+			providedTTL := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "credential-ttl" {
+					providedTTL = true
+				}
+			})
+			if !providedTTL {
+				*credentialTTL = time.Hour
+			}
+		}
+		return runCredentialCommand(ctx, cfg, rt, hostCredentialOptions{cleanup: cleanup, action: action, dir: *dir, id: *id, name: *name, template: *template, capabilities: *capabilities, descriptor: *descriptor, output: *credentialOut, stdin: *credentialStdin, ttl: *credentialTTL, expectedGeneration: *expectedGeneration, coordinator: *coordinator}, os.Stdin)
+	}
+	var c *core.CoordinatorClient
+	var err error
+	if action != "serve" {
+		client := core.NewCoordinatorClient
+		switch action {
+		case "enroll", "enable", "disable", "drain", "resume", "remove":
+			client = core.NewAdminCoordinatorClient
+		}
+		c, err = client(cfg)
+		if err != nil {
+			return err
+		}
 	}
 	if action == "list" {
 		var out json.RawMessage
@@ -173,7 +214,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	}
 	defer lock.Close()
 	a := &hostAgent{coord: c, path: filepath.Join(*dir, "state.json"), stderr: rt.Stderr, mxc: *mxc, relays: map[string]bool{}}
-	data, err := os.ReadFile(a.path)
+	data, err := readPrivateHostFile(a.path)
 	if err == nil {
 		if err = json.Unmarshal(data, &a.state); err != nil {
 			return err
@@ -196,6 +237,13 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 		if err = a.save(); err != nil {
 			return err
 		}
+	}
+	if action == "serve" {
+		c, err = hostCoordinator(cfg, a.state)
+		if err != nil {
+			return err
+		}
+		a.coord = c
 	}
 	if a.state.Coordinator != c.BaseURL {
 		return fmt.Errorf("host state is bound to a different coordinator")
@@ -258,7 +306,9 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 		if err = a.cleanup(ctx); err != nil {
 			return fmt.Errorf("host restart cleanup pending: %w", err)
 		}
-		a.state.Report = a.report("failed")
+		if a.state.Credential == nil || a.state.Credential.Purpose != "cleanup" {
+			a.state.Report = a.report("failed")
+		}
 		if err = a.save(); err != nil {
 			return err
 		}
@@ -319,9 +369,17 @@ func (a *hostAgent) tick(ctx context.Context) error {
 	defer cancel()
 	var response hostHeartbeat
 	if err := a.coord.AgentRequest(bounded, "POST", "/v1/ssh-hosts/"+a.state.ID+"/heartbeat", map[string]any{"hostKey": strings.TrimSpace(a.front.HostKey()), "report": a.state.Report}, &response); err != nil {
+		if a.state.AuthMode == "host" && a.front != nil {
+			a.front.Revoke()
+		}
 		return err
 	}
 	next := response.Assignment
+	if a.state.Credential != nil && a.state.Credential.Purpose == "cleanup" {
+		if len(response.Relays) != 0 || (next == nil && !response.CleanupComplete) || (next != nil && (!a.state.Credential.Cleanup.matches(next) || next.Operation != "clean")) {
+			return fmt.Errorf("invalid cleanup-only host assignment")
+		}
+	}
 	if next == nil {
 		if a.state.Runtime != nil {
 			if err := a.cleanup(ctx); err != nil {
