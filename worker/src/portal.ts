@@ -623,11 +623,6 @@ function portalAdminSummary(input: { owner: string; org: string }): string {
   return `<section class="admin-bar" data-admin-panel>
     <span class="admin-bar-mode">${lockIcon}<span>admin mode</span></span>
     <span class="admin-bar-scope">all scopes · signed in as <strong>${escapeHTML(`${input.owner || "unknown"} / ${input.org || "unknown"}`)}</strong></span>
-    <nav class="admin-bar-links" aria-label="Admin JSON endpoints">
-      <a href="/v1/admin/leases">leases JSON</a>
-      <a href="/v1/pool">pool JSON</a>
-      <a href="/v1/usage?scope=all">usage JSON</a>
-    </nav>
   </section>`;
 }
 
@@ -3648,10 +3643,6 @@ function html(
     .admin-bar-mode { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:8px; background:color-mix(in srgb, var(--accent) 16%, transparent); color:var(--accent-ink); font-weight:600; white-space:nowrap; }
     .admin-bar-scope { min-width:0; overflow:hidden; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; }
     .admin-bar-scope strong { font-family:var(--mono); font-size:12px; font-weight:500; }
-    .admin-bar-links { display:flex; gap:2px; margin-left:auto; }
-    .admin-bar-links a { display:inline-flex; align-items:center; height:28px; padding:0 9px; border-radius:7px; color:var(--fg-2); font-family:var(--mono); font-size:11.5px; text-decoration:none; white-space:nowrap; }
-    .admin-bar-links a::after { content:"↗"; margin-left:4px; color:var(--subtle); }
-    .admin-bar-links a:hover { background:var(--hover); color:var(--fg); }
     /* Fleet readouts: an instrument cluster of clickable filter presets. */
     .fleet-overview { border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:var(--panel-shadow); overflow:hidden; }
     .fleet-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:1px; background:var(--line-soft); }
@@ -4085,7 +4076,6 @@ function html(
       .tide { padding:12px 14px; }
       .admin-bar { flex-wrap:wrap; gap:6px 10px; }
       .admin-bar-scope { flex:1 1 60%; }
-      .admin-bar-links { margin-left:0; flex-wrap:wrap; }
       .vnc-bar { flex-wrap:wrap; gap:8px; min-height:0; padding:6px 10px; margin:0 -12px; }
       .vnc-meta { flex-wrap:wrap; gap:4px 10px; }
       .vnc-meta p .vnc-id { display:none; }
