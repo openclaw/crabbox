@@ -59,6 +59,7 @@ import {
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
 import { SSHHostCoordinator } from "./ssh-host";
+import { hostCredentialRequest, hostCredentialRouteAllowed } from "./ssh-host-auth";
 import { generateSSHHostKeyPair } from "./ssh-host-key";
 import { sshHostCloudProvider } from "./ssh-host-provider";
 type ReadyPoolMode = boolean | "portable";
@@ -1393,6 +1394,14 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
+      if (hostCredentialRequest(request)) {
+        if (!hostCredentialRouteAllowed(request))
+          return json({ error: "host_scope_forbidden" }, { status: 403 });
+        const parts = pathParts(request);
+        return parts[1] === "ssh-hosts"
+          ? await new SSHHostCoordinator(this.state, this.env).route(request, parts)
+          : await new ServeCoordinator(this.state, this.env).route(request, parts);
+      }
       if (isDeviceTokenRequest(request) && !configuredFleetBearer(request, this.env)) {
         const authenticated = await this.authenticatedDeviceRequest(request);
         if (authenticated instanceof Response) return authenticated;
@@ -8738,7 +8747,7 @@ export class FleetCoordinator {
     }
     try {
       config.tailscaleTags = validateTailscaleTags(
-        input.tailscaleTags ?? config.tailscaleTags,
+        input.tailscaleTags ?? [],
         tailscaleDefaultTags(this.env),
       );
       config.tailscaleHostname = renderTailscaleHostname(
