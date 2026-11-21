@@ -188,10 +188,12 @@ import {
   CheckpointError,
   abortCheckpointProvisioningForLease,
   acquireCheckpointUse,
+  backfillCheckpointImageRefresh,
   backfillFailedCheckpointCreateRecovery,
   bindCheckpointUseProvisioningInTransaction,
   cancelFailedCheckpointCreate,
   checkpointDuePrefix,
+  checkpointImageBackfillKey,
   checkpointEventKey,
   checkpointKey,
   checkpointLeaseSourceIdentity,
@@ -199,6 +201,7 @@ import {
   checkpointUseKey,
   checkpointVisibleTo,
   claimCheckpointDeletion,
+  deferCheckpointImageRefresh,
   expireCheckpointClaims,
   failCheckpointCreateDefinitively,
   finalizeCheckpointDeletion,
@@ -216,6 +219,7 @@ import {
   recordCheckpointCreateRecoveryFailure,
   recordCheckpointDeletionFailure,
   recordCheckpointExpiryDue,
+  recordCheckpointImageObservation,
   recordCheckpointProviderAbsence,
   resolveRejectedCheckpointProvisioning,
   renewCheckpointUse,
@@ -226,6 +230,7 @@ import {
   validCheckpointID,
   validCheckpointRetention,
   validateCheckpointUse,
+  type CheckpointImageBackfill,
   type CheckpointPrincipal,
 } from "./checkpoints";
 import {
@@ -17019,22 +17024,14 @@ export class FleetCoordinator {
             current.scope.project,
           );
           const image = await provider.getImage(current.image.id, current.image.kind);
-          if (
-            image.id !== current.image.id ||
-            image.resourceID !== current.image.resourceID ||
-            image.immutableID !== current.image.immutableID ||
-            image.region !== current.scope.region ||
-            (current.provider === "gcp" && image.project !== current.scope.project) ||
-            (current.provider === "aws" &&
-              image.accountID &&
-              image.accountID !== current.scope.accountID)
-          ) {
-            throw new CheckpointError(
-              "checkpoint_source_mismatch",
-              "provider resource no longer matches checkpoint ownership",
-            );
-          }
-          return json({ checkpoint: publicCheckpointRecord(current), image });
+          const updated = await recordCheckpointImageObservation(
+            this.state.storage,
+            current,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({ checkpoint: publicCheckpointRecord(updated), image });
         }
         return json({ checkpoint: publicCheckpointRecord(current) });
       }
@@ -17158,7 +17155,12 @@ export class FleetCoordinator {
           }
           const recovered = await provider.recoverCheckpointImage(current);
           if (recovered) {
-            await publishRecoveredCheckpoint(this.state.storage, checkpointID, recovered);
+            await publishRecoveredCheckpoint(
+              this.state.storage,
+              checkpointID,
+              recovered,
+              provider.checkpointImageNeedsRefresh?.(recovered) ?? false,
+            );
             return await this.deleteManagedCheckpoint(checkpointID, principal, "create-recovery");
           }
           const observed = await recordCheckpointProviderAbsence(this.state.storage, checkpointID);
@@ -17353,6 +17355,7 @@ export class FleetCoordinator {
         reservation.id,
         ownershipToken,
         image,
+        provider.checkpointImageNeedsRefresh?.(image) ?? false,
       );
       await this.scheduleCheckpointAlarm();
       return json({ checkpoint: publicCheckpointRecord(checkpoint), image }, { status: 201 });
@@ -17797,6 +17800,15 @@ export class FleetCoordinator {
   }
 
   private async maintainCheckpoints(): Promise<void> {
+    await backfillCheckpointImageRefresh(
+      this.state.storage,
+      (checkpoint) =>
+        this.provider(
+          checkpoint.provider,
+          checkpoint.scope.region,
+          checkpoint.scope.project,
+        ).checkpointImageNeedsRefresh?.(checkpoint.image!) ?? false,
+    );
     await backfillFailedCheckpointCreateRecovery(this.state.storage, checkpointLimits(this.env));
     const due = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
       prefix: checkpointDuePrefix,
@@ -17847,7 +17859,12 @@ export class FleetCoordinator {
         }
         const image = await provider.recoverCheckpointImage(checkpoint);
         if (image) {
-          await publishRecoveredCheckpoint(this.state.storage, checkpoint.id, image);
+          await publishRecoveredCheckpoint(
+            this.state.storage,
+            checkpoint.id,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
         } else {
           await recordCheckpointProviderAbsence(this.state.storage, checkpoint.id);
         }
@@ -17871,6 +17888,29 @@ export class FleetCoordinator {
       ) {
         await recordCheckpointExpiryDue(this.state.storage, checkpoint.id);
         await this.deleteManagedCheckpoint(checkpoint.id, undefined, "unused-expiry");
+        return;
+      }
+      if (
+        checkpoint?.state === "ready" &&
+        checkpoint.image &&
+        Date.parse(checkpoint.imageRefreshAt ?? "") <= now
+      ) {
+        const provider = this.provider(
+          checkpoint.provider,
+          checkpoint.scope.region,
+          checkpoint.scope.project,
+        );
+        try {
+          const image = await provider.getImage(checkpoint.image.id, checkpoint.image.kind);
+          await recordCheckpointImageObservation(
+            this.state.storage,
+            checkpoint,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
+        } catch {
+          await deferCheckpointImageRefresh(this.state.storage, checkpoint);
+        }
       }
       return;
     }
@@ -19373,6 +19413,17 @@ export class FleetCoordinator {
       prefix: checkpointDuePrefix,
       limit: 1,
     });
+    const imageBackfill = await this.state.storage.get<CheckpointImageBackfill>(
+      checkpointImageBackfillKey,
+    );
+    // Scheduled maintenance starts the migration; only unfinished pages need an extra wakeup.
+    if (imageBackfill && !imageBackfill.complete) {
+      retainAlarm(
+        now + 1000,
+        "checkpoint",
+        `${checkpointImageBackfillKey}:${imageBackfill?.startAfter ?? ""}`,
+      );
+    }
     const checkpoint = [...nextCheckpoint][0];
     if (checkpoint) {
       // Tombstone pruning advances audit rows while retaining the same due marker.
@@ -29454,6 +29505,7 @@ export interface CloudProvider {
     checkpoint: CoordinatorCheckpointRecord,
   ): Promise<ProviderImage | undefined>;
   deleteCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  checkpointImageNeedsRefresh?(image: Pick<ProviderImage, "kind" | "state">): boolean;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
   retireCatalogImage?(imageID: string, region?: string): Promise<number>;
@@ -32567,6 +32619,13 @@ export class AWSProvider implements CloudProvider {
       );
     }
     return { region, accountID: identity.account };
+  }
+
+  checkpointImageNeedsRefresh(image: Pick<ProviderImage, "kind" | "state">): boolean {
+    return (
+      (image.kind === "aws-ebs-snapshot" || image.kind === "aws-ami") &&
+      image.state.toLowerCase() === "pending"
+    );
   }
 
   async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
