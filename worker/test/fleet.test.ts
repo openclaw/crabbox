@@ -55043,7 +55043,11 @@ describe("fleet identity", () => {
       expect(await response.text()).not.toContain("creation unresolved");
       expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
       const attempt = storage.value<CreateAttemptRecord>(`create-attempt:${leaseID}`);
-      expect(Boolean(attempt)).toBe(method === "POST");
+      expect(attempt).toMatchObject({
+        requestedLeaseID: leaseID,
+        version: method === "PUT" ? 2 : 1,
+        state: "pending",
+      });
       expect(attempt?.canonicalLeaseID).toBeUndefined();
       expect(attempt?.cloudID).toBeUndefined();
       expect(attempt?.generation).toBeUndefined();
