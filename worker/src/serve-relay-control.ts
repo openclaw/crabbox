@@ -5,6 +5,7 @@ import { putLeaseRecord } from "./lease-record-store";
 import { requestOrg } from "./org-identity";
 import type { ServeMachine } from "./serve";
 import { serveRelayBackend, serveRelayID, type ServeRelayDescriptor } from "./serve-relay";
+import { hostCredentialRequest } from "./ssh-host-auth";
 import { mintHostRelay, authorizeHostRelay } from "./ssh-host-relay";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env, LeaseRecord } from "./types";
@@ -127,6 +128,7 @@ export class ServeRelayControl {
       return notAllowed();
     const hostAdmission = await authorizeHostRelay(s, this.env, r, id, role);
     if (hostAdmission) return hostAdmission;
+    if (hostCredentialRequest(r)) return notAllowed();
     const owner = requestOwner(r),
       org = requestOrg(r, this.env);
     const rows = await this.rows(s, owner, org),
