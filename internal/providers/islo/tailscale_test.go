@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,9 @@ func TestIsloTailscaleBringUpScriptIsValidBash(t *testing.T) {
 }
 
 func TestIsloTailscaleExitNodeEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the Linux bootstrap with a POSIX socket and shell")
+	}
 	for _, tc := range []struct {
 		name, state, exitNode string
 		failSelection         bool

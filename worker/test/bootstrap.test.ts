@@ -808,23 +808,27 @@ describe("cloud-init bootstrap", () => {
     expect(codeServerCleanup).toBeGreaterThan(codeServerTrap);
   });
 
-  it("enrolls before exit-node selection and fails before readiness on selection errors", () => {
-    for (const exitNode of ["exit.example.ts.net", "100.64.0.1"]) {
-      for (const fail of [false, true]) {
-        const dir = mkdtempSync(join(tmpdir(), "crabbox-tailscale-"));
-        try {
-          const got = cloudInit({
-            ...config,
-            tailscale: true,
-            tailscaleAuthKey: "synthetic",
-            tailscaleExitNode: exitNode,
-            tailscaleExitNodeAllowLanAccess: true,
-          });
-          const start = got.indexOf(`printf '%s' "$TS_AUTHKEY" | tailscale up`);
-          const end = got.indexOf(`    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`);
-          expect(start).toBeGreaterThanOrEqual(0);
-          expect(end).toBeGreaterThan(start);
-          const script = `tailscale() {
+  it.skipIf(process.platform === "win32")(
+    "enrolls before exit-node selection and fails before readiness on selection errors",
+    () => {
+      for (const exitNode of ["exit.example.ts.net", "100.64.0.1"]) {
+        for (const fail of [false, true]) {
+          const dir = mkdtempSync(join(tmpdir(), "crabbox-tailscale-"));
+          try {
+            const got = cloudInit({
+              ...config,
+              tailscale: true,
+              tailscaleAuthKey: "synthetic",
+              tailscaleExitNode: exitNode,
+              tailscaleExitNodeAllowLanAccess: true,
+            });
+            const start = got.indexOf(`printf '%s' "$TS_AUTHKEY" | tailscale up`);
+            const end = got.indexOf(
+              `    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`,
+            );
+            expect(start).toBeGreaterThanOrEqual(0);
+            expect(end).toBeGreaterThan(start);
+            const script = `tailscale() {
   case "$1" in
     up)
       case "$*" in *--exit-node=*) return 1 ;; esac
@@ -841,25 +845,26 @@ TS_AUTHKEY=synthetic
 ${got.slice(start, end)}
 echo ready
 `;
-          const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
-            encoding: "utf8",
-            timeout: 5000,
-            env: {
-              ...process.env,
-              JOINED: join(dir, "joined"),
-              EXIT_NODE: exitNode,
-              FAIL_SELECTION: String(fail),
-            },
-          });
-          expect(result.error).toBeUndefined();
-          expect(result.status === 0).toBe(!fail);
-          expect(result.stdout.includes("ready")).toBe(!fail);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
+            const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+              encoding: "utf8",
+              timeout: 5000,
+              env: {
+                ...process.env,
+                JOINED: join(dir, "joined"),
+                EXIT_NODE: exitNode,
+                FAIL_SELECTION: String(fail),
+              },
+            });
+            expect(result.error).toBeUndefined();
+            expect(result.status === 0).toBe(!fail);
+            expect(result.stdout.includes("ready")).toBe(!fail);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
         }
       }
-    }
-  });
+    },
+  );
 
   it("adds Tailscale setup only when requested", () => {
     const plain = cloudInit(config);

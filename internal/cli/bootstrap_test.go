@@ -549,6 +549,9 @@ func TestCloudInitCodeProfile(t *testing.T) {
 }
 
 func TestCloudInitTailscaleExitNodeEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the Linux bootstrap with a POSIX shell")
+	}
 	for _, exitNode := range []string{"exit.example.ts.net", "100.64.0.1"} {
 		for _, fail := range []bool{false, true} {
 			t.Run(exitNode+map[bool]string{false: "/success", true: "/failure"}[fail], func(t *testing.T) {
