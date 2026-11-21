@@ -8834,7 +8834,11 @@ export class FleetCoordinator {
       });
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (message.includes("tags not allowed") || message.includes("requires at least one")) {
+      if (
+        message.includes("invalid Tailscale tag") ||
+        message.includes("tags not allowed") ||
+        message.includes("requires at least one")
+      ) {
         return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
       }
       const tagOwnershipMessage = tailscaleTagOwnershipErrorMessage(error);
@@ -30980,12 +30984,17 @@ export class DaytonaProvider implements CloudProvider {
     };
     try {
       const servers = await this.client.listCrabboxServers();
+      const snapshotReady = await this.client.validateConfiguredSnapshot();
       return [
         {
-          status: "ok",
+          status: snapshotReady ? "ok" : "warning",
           check: "daytona-fallback",
-          message: `auth=ready control_plane=ready inventory=ready leases=${servers.length} mutation=false`,
-          details: { ...details, leases: String(servers.length) },
+          message: `auth=ready control_plane=ready inventory=ready leases=${servers.length} snapshot=${snapshotReady ? "active" : "account-default-unverified"} mutation=false`,
+          details: {
+            ...details,
+            leases: String(servers.length),
+            snapshot_state: snapshotReady ? "active" : "unverified",
+          },
         },
       ];
     } catch (error) {
@@ -30993,7 +31002,7 @@ export class DaytonaProvider implements CloudProvider {
         {
           status: "failed",
           check: "daytona-fallback",
-          message: `auth_or_control_plane=failed mutation=false ${coordinatorErrorMessage(this.env, error)}`,
+          message: `daytona_readiness=failed mutation=false ${coordinatorErrorMessage(this.env, error)}`,
           details,
         },
       ];
@@ -31021,6 +31030,8 @@ export class DaytonaProvider implements CloudProvider {
     config: LeaseConfig,
     lease: LeaseRecord,
   ): Promise<ProviderLeaseCreatePreparation> {
+    // Read failures here precede provider dispatch and cannot imply an uncertain allocation.
+    await this.client.validateConfiguredSnapshot();
     const providerScope = await this.client.providerScope();
     return { config, lease: { ...lease, providerScope } };
   }

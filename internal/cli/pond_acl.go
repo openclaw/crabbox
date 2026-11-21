@@ -128,16 +128,21 @@ func pondACLEnsure(ctx context.Context, client pondTailnetACLClient, tailnet, ow
 	return fmt.Errorf("pond acl: ETag race persisted after %d attempts: %w", pondACLMaxAttempts, lastPutErr)
 }
 
+// Proto and SrcPosture are decoded only to recognize rows narrower than the
+// documented pond row; the rows Crabbox writes never set them.
 type pondACLRule struct {
-	Action string   `json:"action"`
-	Src    []string `json:"src"`
-	Dst    []string `json:"dst"`
+	Action     string   `json:"action"`
+	Src        []string `json:"src"`
+	Dst        []string `json:"dst"`
+	Proto      any      `json:"proto,omitempty"`
+	SrcPosture []string `json:"srcPosture,omitempty"`
 }
 
 type pondGrantRule struct {
-	Src []string `json:"src"`
-	Dst []string `json:"dst"`
-	IP  []string `json:"ip"`
+	Src        []string `json:"src"`
+	Dst        []string `json:"dst"`
+	IP         []string `json:"ip"`
+	SrcPosture []string `json:"srcPosture,omitempty"`
 }
 
 type pondACLPolicyState struct {
@@ -324,16 +329,21 @@ func parsePondACLPolicy(body, tag string) (pondACLPolicyState, error) {
 	if err := json.Unmarshal(standardized, &semantic); err != nil {
 		return pondACLPolicyState{}, fmt.Errorf("pond acl: cannot safely decode policy sections: %w", err)
 	}
+	// Pond services use arbitrary ports, so only a row that admits every port
+	// and protocol from every pond member counts as the self-peering row.
 	for _, grant := range semantic.Grants {
 		state.grantPresent = state.grantPresent ||
 			pondStringSliceContains(grant.Src, tag) &&
 				pondStringSliceContains(grant.Dst, tag) &&
-				len(grant.IP) > 0
+				pondStringSliceContains(grant.IP, "*") &&
+				len(grant.SrcPosture) == 0
 	}
 	for _, acl := range semantic.ACLs {
 		state.aclPresent = state.aclPresent ||
 			pondStringSliceContains(acl.Src, tag) &&
-				(pondStringSliceContains(acl.Dst, tag) || pondStringSliceContains(acl.Dst, tag+":*"))
+				(pondStringSliceContains(acl.Dst, tag) || pondStringSliceContains(acl.Dst, tag+":*")) &&
+				acl.Proto == nil &&
+				len(acl.SrcPosture) == 0
 	}
 	return state, nil
 }

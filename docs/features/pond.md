@@ -57,7 +57,7 @@ instead.
 
 | Plane     | Feature flag       | Providers that advertise it (today)                                                                                       | What you get                                                |
 | --------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Tailscale | `FeatureTailscale` | AWS, Hetzner, Azure, GCP, Islo (userspace `tailscaled` via exec, opt-in with `--tailscale`)                               | tailnet membership; OS-routed peer mesh on managed Linux, userspace proxy path on Islo |
+| Tailscale | `FeatureTailscale` | [Compiled Tailscale provider catalog](tailscale.md#scope), opt-in with `--tailscale` | tailnet membership; OS-routed peer mesh on managed Linux, userspace egress on Islo (no bidirectional tailnet endpoint) |
 | Bridge    | `FeatureURLBridge` | Islo, E2B, Railway                                                                                                      | provider-native HTTP(S) endpoints for discovery and sharing |
 | SSH-mesh  | `FeatureSSH`       | any provider advertising SSH: Hetzner, Azure, GCP, AWS, Proxmox, static `ssh`, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect`           |
 
@@ -282,6 +282,12 @@ commas, and unrelated policy sections are preserved. Ambiguous or unsupported
 policy shapes fail closed with the manual snippet below. If the control plane
 does not expose a Tailscale-compatible policy API (e.g. Headscale), lease
 creation is not blocked.
+
+A self-peering rule counts as present only when it admits every port and
+protocol between pond members: a grant with `"ip": ["*"]`, or an `acls` row to
+`<tag>:*` without `proto`, and neither restricted by `srcPosture`. A narrower
+existing rule (for example `"ip": ["tcp:22"]`) is left in place and the full
+rule is added next to it; until then `doctor --pond` reports the row as missing.
 
 Without the opt-in, `crabbox doctor --pond <name>` verifies the required policy
 row (using `TS_API_KEY` read-only) and points you at this document if it is
