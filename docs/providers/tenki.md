@@ -6,7 +6,14 @@ Read when:
 - running Crabbox on Tenki sandbox VMs;
 - changing `internal/providers/tenki`.
 
-Tenki is an SSH-lease provider. Crabbox asks the Tenki CLI to create and delete
+Tenki is now Luxor Agent Cloud (Luxor Sandbox); the provider keeps the `tenki`
+name so existing config, flags, and leases continue to work. The CLI command is
+now `luxor`. Crabbox runs `luxor` by default and falls back to the legacy `tenki`
+command when `luxor` is not on `PATH`. Pre-rebrand `tenki` installs do not accept
+`lx_` keys or `LUXORAI_*` settings; upgrade to the Luxor CLI. Switching between
+the `luxor` and `tenki` commands keeps existing fixed leases.
+
+Tenki is an SSH-lease provider. Crabbox asks the Luxor CLI to create and delete
 sandbox sessions, then runs normal Crabbox sync/commands over SSH through
 Tenki's sandbox SSH WebSocket proxy using the Tenki-managed SSH key and
 per-session cert.
@@ -18,7 +25,7 @@ to retrieve the CA and discover the session's gateway identity. It writes a
 separate authority file alongside the native session certificate, without
 changing Tenki's private keys or certificates. Authority discovery and client
 certificate refresh require a workspace
-API key from `tenki onboard` or `TENKI_API_KEY`.
+API key (`lx_` or legacy `tk_`) from `luxor onboard` or `LUXORAI_API_KEY`.
 
 Gateway certificates signed by the trusted CA can rotate without enrolling
 individual leaf keys. Failed discovery, unknown authorities, or missing trust
@@ -95,23 +102,33 @@ Crabbox lease record; it does not add a provider-side expiry to the session.
 
 ## Auth
 
-Authenticate with the Tenki CLI's browser flow:
+Install the Luxor CLI (`curl -fsSL https://luxor.ai/install.sh | sh` or
+`npm i -g @luxorai/cli`) and authenticate with its browser flow:
 
 ```sh
-tenki login
+luxor login
 ```
 
-Crabbox reuses the Tenki CLI's normal config and auth state. For host-authority
-discovery, it reads `~/.config/tenki/config.yaml` (or the basename selected by
-`TENKI_CONFIG_FILE`), with the CLI's `TENKI_AUTH_TOKEN`, `TENKI_API_KEY`, and
-`TENKI_API_ENDPOINT` overrides. The API endpoint must use HTTPS; Crabbox never
-follows authority requests to another origin. `TENKI_API_URL` and
-`XDG_CONFIG_HOME` do not change the native CLI's credential context.
+Crabbox reuses the Luxor CLI's normal config and auth state. For host-authority
+discovery, it reads `config.yaml` (or the basename selected by
+`LUXORAI_CONFIG_FILE`) from `~/.config/luxor`, or from `~/.config/tenki` until
+the CLI has migrated that directory. It applies the CLI's environment overrides
+in the CLI's order: `LUXORAI_AUTH_TOKEN`, `LUXORAI_API_KEY`, `TENKI_AUTH_TOKEN`,
+then `TENKI_API_KEY` for the key, and `LUXORAI_API_ENDPOINT` before
+`TENKI_API_ENDPOINT` for the endpoint, which defaults to
+`https://api.luxor.ai`. Blank values are ignored. The API endpoint must use
+HTTPS; Crabbox never follows authority requests to another origin.
+`LUXORAI_API_URL`, `TENKI_API_URL`, and `XDG_CONFIG_HOME` do not change the
+native CLI's credential context.
 
-The current Tenki CLI selects the workspace from the authenticated
+`TENKI_*` variables, `tk_` keys, and `api.tenki.cloud` stop working after
+December 31, 2026. Move to `LUXORAI_*`, `lx_` keys, and `api.luxor.ai`,
+including any `api_endpoint` the CLI persisted in its config.
+
+The current Luxor CLI selects the workspace from the authenticated
 API key; it does not accept separate sandbox `--workspace` or `--project`
-selectors. Run `tenki login` again when you need a different workspace. Do not
-pass Tenki auth tokens as command-line arguments.
+selectors. Run `luxor login` again when you need a different workspace. Do not
+pass Luxor auth tokens as command-line arguments.
 
 ## Config
 
@@ -119,7 +136,7 @@ pass Tenki auth tokens as command-line arguments.
 provider: tenki
 target: linux
 tenki:
-  cliPath: tenki
+  cliPath: luxor
   endpoint: https://api.example.test
   gateway: wss://sandbox-gateway.example.test
   image: ubuntu:tenki
@@ -166,7 +183,7 @@ CRABBOX_TENKI_DISK_GB
 Workspace and project settings are retained only to match claims created by
 older Crabbox versions. Current Tenki authentication selects the workspace from
 the API key, and Crabbox rejects these settings for new leases. Keep them only
-while stopping an older scoped lease, then remove them and run `tenki login` for
+while stopping an older scoped lease, then remove them and run `luxor login` for
 the intended workspace.
 
 ## Sizing
@@ -198,15 +215,15 @@ These map to Tenki create flags as `--cpu`, `--memory-mb`, and
 
 ## Lifecycle
 
-1. Run `tenki sandbox create` with Crabbox metadata and tags.
-2. Run `tenki sandbox ssh-command --output json --session <session-id>` to let
-   the Tenki CLI resolve `~/.config/tenki/ssh/id_ed25519` and mint the session
-   cert under `~/.config/tenki/ssh-certs/<session-id>/`.
-3. Return an SSH target using `ProxyCommand tenki sandbox ssh-proxy --session
-   <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
+1. Run `luxor sandbox create` with Crabbox metadata and tags.
+2. Run `luxor sandbox ssh-command --output json --session <session-id>` to let
+   the Luxor CLI resolve `~/.config/luxor/ssh/id_ed25519` and mint the session
+   cert under `~/.config/luxor/ssh-certs/<session-id>/`.
+3. Return an SSH target using the CLI-reported `ProxyCommand <cli> sandbox
+   ssh-proxy --session <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
 4. Let core Crabbox perform rsync, command execution, `ssh`, and artifacts.
 5. On release, verify the exact local claim, session ID, and fresh
-   provider-side lease metadata, then run `tenki sandbox terminate <session-id>`
+   provider-side lease metadata, then run `luxor sandbox terminate <session-id>`
    under the claim lock. Only after the same session reports `TERMINATING` or
    `TERMINATED` does Crabbox remove an ordinary claim or replace a fixed-ID
    claim with a terminal receipt. A mismatched or missing session ID,
@@ -285,7 +302,7 @@ not destroys it. Always finish with `crabbox stop --provider tenki <lease>`.
 ## Live Smoke
 
 ```sh
-tenki login
+luxor login
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox warmup --provider tenki --keep=false --ttl 15m --timing-json
@@ -308,7 +325,7 @@ scripts/live-smoke.sh
 ```
 
 The smoke exits before any Crabbox `doctor`, `warmup`, `status`, `run`, `list`,
-or `stop` call when `tenki status --json` does not report a logged-in CLI. With
+or `stop` call when `luxor status --json` does not report a logged-in CLI. With
 an authenticated CLI, it creates one sandbox session, waits for status, runs one
 no-sync command, pauses the Tenki session directly, verifies a Crabbox
 `status --wait` timeout does not resume it, then stops the lease.
