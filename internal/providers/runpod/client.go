@@ -19,7 +19,7 @@ import (
 // runpodAPI covers RunPod pod REST operations and GraphQL account identity. The
 // provider keeps the surface intentionally small: deploy a pod, look it up,
 // list pods, and terminate it. The pod's full SSH coordinates come back as
-// publicIp + portMappings["22"] once the pod reaches RUNNING.
+// ssh.direct once the pod reaches RUNNING.
 type runpodAPI interface {
 	Whoami(ctx context.Context) (runpodMyself, error)
 	DeployPod(ctx context.Context, input runpodDeployInput) (runpodPod, error)
@@ -56,53 +56,29 @@ type runpodMyself struct {
 	SignedTermsOfService bool   `json:"signedTermsOfService"`
 }
 
-type runpodMachine struct {
-	PodHostID string `json:"podHostId"`
+type runpodDirectSSH struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
 }
 
-type runpodRuntimePort struct {
-	IP          string `json:"ip"`
-	PrivatePort int    `json:"privatePort"`
-	PublicPort  int    `json:"publicPort"`
-	IsIPPublic  bool   `json:"isIpPublic"`
-	Type        string `json:"type"`
-}
-
-type runpodRuntime struct {
-	Ports []runpodRuntimePort `json:"ports"`
+type runpodSSH struct {
+	Direct *runpodDirectSSH `json:"direct"`
 }
 
 type runpodPod struct {
-	Env map[string]string `json:"env"`
-
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	ImageName     string         `json:"imageName"`
-	Image         string         `json:"image"`
-	DesiredStatus string         `json:"desiredStatus"`
-	Status        string         `json:"status"`
-	MachineID     string         `json:"machineId"`
-	Machine       runpodMachine  `json:"machine"`
-	Runtime       *runpodRuntime `json:"runtime"`
-	PublicIP      string         `json:"publicIp"`
-	PortMappings  map[string]int `json:"portMappings"`
-	CostPerHr     any            `json:"costPerHr"`
+	Env    map[string]string `json:"env"`
+	ID     string            `json:"id"`
+	Name   string            `json:"name"`
+	Image  string            `json:"image"`
+	Status string            `json:"status"`
+	SSH    runpodSSH         `json:"ssh"`
 }
 
-// SSHEndpoint returns the best SSH endpoint available for the pod.
-// Crabbox requires a public TCP port because RunPod's basic SSH proxy does not
-// support the SCP/SFTP behavior rsync needs.
+// Only the direct endpoint supports rsync. The proxy is shell-only.
 func (p runpodPod) SSHEndpoint() runpodSSHEndpoint {
-	if port := p.PortMappings["22"]; p.PublicIP != "" && port != 0 {
-		return runpodSSHEndpoint{Host: p.PublicIP, Port: port, Kind: "public-tcp", Public: true}
-	}
-	if p.Runtime == nil {
-		return runpodSSHEndpoint{}
-	}
-	for _, prt := range p.Runtime.Ports {
-		if prt.PrivatePort == 22 && prt.IsIPPublic && prt.IP != "" && prt.PublicPort != 0 && strings.EqualFold(prt.Type, "tcp") {
-			return runpodSSHEndpoint{Host: prt.IP, Port: prt.PublicPort, Kind: "public-tcp", Public: true}
-		}
+	if direct := p.SSH.Direct; direct != nil && direct.Host != "" && direct.Port > 0 {
+		return runpodSSHEndpoint{Host: direct.Host, Port: direct.Port, Kind: "public-tcp", Public: true}
 	}
 	return runpodSSHEndpoint{}
 }
@@ -128,6 +104,9 @@ func newRunpodClient(cfg core.Config, rt core.Runtime) (runpodAPI, error) {
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
+	}
+	if (strings.EqualFold(parsed.Hostname(), "rest.runpod.io") || strings.EqualFold(parsed.Hostname(), "api.runpod.io")) && parsed.Path == "/v1" {
+		return nil, core.Exit(2, "RunPod REST v1 retires on 2026-11-15; remove the API URL override or set it to %s (fixed leases bound to the old endpoint require manual recovery)", core.RunpodConfigDefaultAPIURL)
 	}
 	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
@@ -158,26 +137,26 @@ func (c *runpodClient) do(ctx context.Context, method, path string, body any, ou
 		return shared.ErrorWithMessage(shared.RedactErrorSecrets(err.Error(), c.apiKey, url.QueryEscape(c.apiKey)), err)
 	}
 	return shared.DecodeBoundedJSONResponse(resp, runpodMaxResponseBytes, out, providerName, func(code int, status, body string) error {
-		return &runpodAPIError{StatusCode: code, Status: status, Body: shared.RedactErrorSecrets(body, c.apiKey)}
+		apiErr := &runpodAPIError{StatusCode: code, Status: status, Body: shared.RedactErrorSecrets(body, c.apiKey)}
+		var problem struct {
+			Title  string   `json:"title"`
+			Detail string   `json:"detail"`
+			Errors []string `json:"errors"`
+		}
+		if json.Unmarshal([]byte(body), &problem) == nil && (problem.Title != "" || problem.Detail != "") {
+			message := strings.TrimSpace(problem.Title + ": " + problem.Detail)
+			if len(problem.Errors) > 0 {
+				message += "; " + strings.Join(problem.Errors, "; ")
+			}
+			apiErr.Body = shared.RedactErrorSecrets(message, c.apiKey)
+		}
+		return apiErr
 	})
-}
-
-func normalizeRunpodPod(pod runpodPod) runpodPod {
-	if pod.ImageName == "" {
-		pod.ImageName = pod.Image
-	}
-	if pod.DesiredStatus == "" {
-		pod.DesiredStatus = pod.Status
-	}
-	if pod.PortMappings == nil {
-		pod.PortMappings = map[string]int{}
-	}
-	return pod
 }
 
 func (c *runpodClient) Whoami(ctx context.Context) (runpodMyself, error) {
 	identity := *c
-	identity.apiURL = strings.TrimSuffix(c.apiURL, "/v1")
+	identity.apiURL = strings.TrimSuffix(strings.TrimSuffix(c.apiURL, "/v2"), "/v1")
 	if c.apiURL == core.RunpodConfigDefaultAPIURL {
 		identity.apiURL = "https://api.runpod.io"
 	}
@@ -194,13 +173,6 @@ func (c *runpodClient) Whoami(ctx context.Context) (runpodMyself, error) {
 		return runpodMyself{}, core.Exit(2, "RunPod GraphQL account identity is missing or unavailable")
 	}
 	return result.Data.Myself, nil
-}
-
-func cpuFlavorID(instanceID string) string {
-	if idx := strings.Index(instanceID, "-"); idx > 0 {
-		return instanceID[:idx]
-	}
-	return instanceID
 }
 
 func runpodInstanceIDs(instanceID string) []string {
@@ -221,12 +193,15 @@ func runpodInstanceIDs(instanceID string) []string {
 
 func runpodDeployPayload(input runpodDeployInput) map[string]any {
 	payload := map[string]any{
-		"name":              input.Name,
-		"imageName":         input.ImageName,
-		"cloudType":         input.CloudType,
-		"containerDiskInGb": input.ContainerDiskInGb,
-		"ports":             []string{input.Ports},
-		"supportPublicIp":   true,
+		"name":     input.Name,
+		"image":    input.ImageName,
+		"cloud":    input.CloudType,
+		"disk":     input.ContainerDiskInGb,
+		"ports":    []string{input.Ports},
+		"startSsh": true,
+	}
+	if input.CloudType == "" {
+		payload["cloud"] = "SECURE"
 	}
 	if input.TemplateID != "" {
 		payload["templateId"] = input.TemplateID
@@ -243,15 +218,18 @@ func runpodDeployPayload(input runpodDeployInput) map[string]any {
 	}
 	instanceIDs := runpodInstanceIDs(input.InstanceID)
 	if strings.HasPrefix(strings.ToLower(instanceIDs[0]), "cpu") {
-		payload["computeType"] = "CPU"
-		payload["cpuFlavorIds"] = []string{cpuFlavorID(instanceIDs[0])}
-		payload["cpuFlavorPriority"] = "availability"
+		flavor, count, hasCount := strings.Cut(instanceIDs[0], "-")
+		vcpus := 2
+		if hasCount {
+			// Validation in deployPod ensures this suffix is a power-of-two count.
+			vcpus, _ = strconv.Atoi(count)
+		}
+		payload["cpu"] = map[string]any{"id": flavor, "vcpuCount": vcpus}
 		return payload
 	}
-	payload["computeType"] = "GPU"
-	payload["gpuTypeIds"] = instanceIDs
-	payload["gpuTypePriority"] = "availability"
-	payload["gpuCount"] = 1
+	payload["gpu"] = map[string]any{"id": instanceIDs[0], "count": 1}
+	// v1 implicitly supplied this volume; preserve the existing GPU storage contract.
+	payload["mounts"] = map[string]any{"persistent": map[string]any{"size": 20, "path": "/workspace"}}
 	return payload
 }
 
@@ -280,11 +258,20 @@ func (c *runpodClient) DeployPod(ctx context.Context, input runpodDeployInput) (
 }
 
 func (c *runpodClient) deployPod(ctx context.Context, input runpodDeployInput) (runpodPod, error) {
+	ids := runpodInstanceIDs(input.InstanceID)
+	if strings.HasPrefix(strings.ToLower(ids[0]), "cpu") {
+		_, count, hasCount := strings.Cut(ids[0], "-")
+		if hasCount {
+			n, err := strconv.Atoi(count)
+			if err != nil || n < 2 || n&(n-1) != 0 {
+				return runpodPod{}, fmt.Errorf("RunPod CPU instance must be a flavor ID or <flavor>-<power-of-two vCPU count>, minimum 2")
+			}
+		}
+	}
 	var pod runpodPod
 	if err := c.do(ctx, http.MethodPost, "/pods", runpodDeployPayload(input), &pod); err != nil {
 		return runpodPod{}, err
 	}
-	pod = normalizeRunpodPod(pod)
 	if strings.TrimSpace(pod.ID) == "" {
 		return runpodPod{}, fmt.Errorf("create pod returned empty id")
 	}
@@ -304,7 +291,7 @@ func isRunpodCapacityError(err error) bool {
 	if ok := errors.As(err, &apiErr); !ok {
 		return false
 	}
-	return apiErr.StatusCode == http.StatusInternalServerError && strings.Contains(strings.ToLower(apiErr.Body), "no instances currently available")
+	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Body), "no instances currently available")
 }
 
 func (c *runpodClient) GetPod(ctx context.Context, podID string) (runpodPod, error) {
@@ -315,7 +302,6 @@ func (c *runpodClient) GetPod(ctx context.Context, podID string) (runpodPod, err
 	if err := c.do(ctx, http.MethodGet, "/pods/"+url.PathEscape(podID), nil, &pod); err != nil {
 		return runpodPod{}, err
 	}
-	pod = normalizeRunpodPod(pod)
 	if strings.TrimSpace(pod.ID) == "" {
 		return runpodPod{}, fmt.Errorf("pod %s not found", podID)
 	}
@@ -324,13 +310,41 @@ func (c *runpodClient) GetPod(ctx context.Context, podID string) (runpodPod, err
 
 func (c *runpodClient) ListPods(ctx context.Context) ([]runpodPod, error) {
 	var pods []runpodPod
-	if err := c.do(ctx, http.MethodGet, "/pods", nil, &pods); err != nil {
-		return nil, err
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		var page struct {
+			Pods       *[]runpodPod `json:"pods"`
+			Pagination *struct {
+				NextCursor  *string `json:"nextCursor"`
+				HasNextPage *bool   `json:"hasNextPage"`
+			} `json:"pagination"`
+		}
+		path := "/pods?limit=1000"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+		if page.Pods == nil || page.Pagination == nil || page.Pagination.HasNextPage == nil {
+			return nil, fmt.Errorf("RunPod list response missing pods or pagination; refusing incomplete inventory")
+		}
+		for _, pod := range *page.Pods {
+			if strings.TrimSpace(pod.ID) == "" || strings.TrimSpace(pod.Name) == "" {
+				return nil, fmt.Errorf("RunPod list response contains a pod without identity; refusing incomplete inventory")
+			}
+		}
+		pods = append(pods, (*page.Pods)...)
+		if !*page.Pagination.HasNextPage {
+			return pods, nil
+		}
+		if page.Pagination.NextCursor == nil || *page.Pagination.NextCursor == "" || seen[*page.Pagination.NextCursor] {
+			return nil, fmt.Errorf("RunPod list response has missing or repeated next cursor; refusing incomplete inventory")
+		}
+		cursor = *page.Pagination.NextCursor
+		seen[cursor] = true
 	}
-	for i := range pods {
-		pods[i] = normalizeRunpodPod(pods[i])
-	}
-	return pods, nil
 }
 
 func (c *runpodClient) TerminatePod(ctx context.Context, podID string) error {
@@ -338,59 +352,4 @@ func (c *runpodClient) TerminatePod(ctx context.Context, podID string) error {
 		return fmt.Errorf("terminatePod: podId is required")
 	}
 	return c.do(ctx, http.MethodDelete, "/pods/"+url.PathEscape(podID), nil, nil)
-}
-
-func decodePortMappings(raw map[string]any) map[string]int {
-	ports := make(map[string]int, len(raw))
-	for key, value := range raw {
-		switch v := value.(type) {
-		case float64:
-			ports[key] = int(v)
-		case int:
-			ports[key] = v
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				ports[key] = parsed
-			}
-		}
-	}
-	return ports
-}
-
-func (p *runpodPod) UnmarshalJSON(data []byte) error {
-	var aux struct {
-		Env map[string]string `json:"env"`
-
-		ID            string         `json:"id"`
-		Name          string         `json:"name"`
-		ImageName     string         `json:"imageName"`
-		Image         string         `json:"image"`
-		DesiredStatus string         `json:"desiredStatus"`
-		Status        string         `json:"status"`
-		MachineID     string         `json:"machineId"`
-		Machine       runpodMachine  `json:"machine"`
-		Runtime       *runpodRuntime `json:"runtime"`
-		PublicIP      string         `json:"publicIp"`
-		PortMappings  map[string]any `json:"portMappings"`
-		CostPerHr     any            `json:"costPerHr"`
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return fmt.Errorf("decode runpod response: %w", err)
-	}
-	*p = runpodPod{
-		Env:           aux.Env,
-		ID:            aux.ID,
-		Name:          aux.Name,
-		ImageName:     aux.ImageName,
-		Image:         aux.Image,
-		DesiredStatus: aux.DesiredStatus,
-		Status:        aux.Status,
-		MachineID:     aux.MachineID,
-		Machine:       aux.Machine,
-		Runtime:       aux.Runtime,
-		PublicIP:      aux.PublicIP,
-		CostPerHr:     aux.CostPerHr,
-	}
-	p.PortMappings = decodePortMappings(aux.PortMappings)
-	return nil
 }

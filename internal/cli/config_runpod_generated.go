@@ -17,7 +17,7 @@ type fileRunpodConfig struct {
 	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
-const RunpodConfigDefaultAPIURL string = "https://rest.runpod.io/v1"
+const RunpodConfigDefaultAPIURL string = "https://api.runpod.io/v2"
 const RunpodConfigDefaultCloudType string = "SECURE"
 const RunpodConfigDefaultInstanceID string = "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500"
 const RunpodConfigDefaultImage string = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
