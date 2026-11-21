@@ -118,6 +118,11 @@ The exit node must already advertise exit-node capability and be approved in the
 Tailscale admin console, and the tailnet policy must grant the lease's tags (for
 example `tag:crabbox`) access to `autogroup:internet` through exit nodes.
 
+Fresh nodes join the tailnet before selecting the exit node, so MagicDNS names
+can resolve against their peers. Enrollment completes only after selection
+succeeds. Islo recovery preserves a stopped daemon's exit-node preferences and
+keeps an incomplete selection unavailable to later workloads until a retry succeeds.
+
 When an exit node is selected, `network: auto` prefers the tailnet host for bootstrap
 because the provider/public SSH path can become asymmetric once the lease routes
 outbound traffic through the exit node. Before sync or the remote command, Crabbox

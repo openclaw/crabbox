@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,11 +148,11 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		t.Fatal("stopped-daemon restart must keep the saved exit node on tailscale up")
 	}
 	failedSet := strings.Index(isloTailscaleBringUp, `if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"`)
-	stopAt := strings.Index(isloTailscaleBringUp[max(0, failedSet):], "stop_lease_tailscaled")
+	stopAt := strings.Index(isloTailscaleBringUp[max(0, failedSet):], `down >/dev/null`)
 	failureExit := strings.Index(isloTailscaleBringUp, "tailscale exit-node selection failed")
 	reportedIP := strings.LastIndex(isloTailscaleBringUp, `echo "CRABBOX_TS_IP=${ts_ip}"`)
 	if failedSet < 0 || stopAt < 0 || failureExit < failedSet || reportedIP < failureExit {
-		t.Fatal("failed exit-node selection must stop this lease daemon before reporting an address")
+		t.Fatal("failed exit-node selection must take this lease offline before reporting an address")
 	}
 	if strings.Contains(isloTailscaleBringUp, "pkill") {
 		t.Fatal("bring-up script must target only the daemon for this lease")
@@ -196,6 +197,111 @@ func TestIsloTailscaleBringUpScriptIsValidBash(t *testing.T) {
 	cmd.Stdin = strings.NewReader(isloTailscaleBringUp)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bring-up script syntax: %v\n%s", err, out)
+	}
+}
+
+func TestIsloTailscaleExitNodeEnrollment(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, exitNode string
+		failSelection         bool
+	}{
+		{"fresh name", "NeedsLogin", "exit.example.ts.net", false},
+		{"fresh IP", "NeedsLogin", "100.64.0.1", false},
+		{"stopped preferences", "Stopped", "exit.example.ts.net", false},
+		{"failed selection and retry", "NeedsLogin", "exit.example.ts.net", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Keep the socket path below Darwin's Unix-domain socket limit.
+			dir, err := os.MkdirTemp("", "cbx-ts-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			listener, err := net.Listen("unix", filepath.Join(dir, "tailscaled.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			binDir := filepath.Join(dir, "bin")
+			if err := os.Mkdir(binDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "state"), []byte(tc.state), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Model the CLI's peer-dependent validation and saved preference check.
+			fake := `#!/bin/bash
+set -e
+shift
+command="$1"; shift
+printf '%s %s\n' "$command" "$*" >>"$TS_STATE_DIR/commands"
+state="$(cat "$TS_STATE_DIR/state")"
+case "$command" in
+  status) printf '{"BackendState":"%s"}\n' "$state" ;;
+  ip) test "$state" = Running; echo 100.64.0.2 ;;
+  up)
+    if [ "$state" = NeedsLogin ] && [[ "$*" = *--exit-node=* ]]; then
+      echo 'cannot resolve exit node by hostname while Tailscale is starting up' >&2; exit 1
+    fi
+    if [ "$state" = Stopped ]; then
+      [[ "$*" = *--exit-node=exit.example.ts.net* ]] && [[ "$*" = *--exit-node-allow-lan-access* ]] || exit 1
+    fi
+    echo Running >"$TS_STATE_DIR/state" ;;
+  set)
+    test "$state" = Running
+    test "$FAIL_SELECTION" != true ;;
+  down) exit 1 ;; # Even a failed stop must not let the next health check pass.
+  *) exit 2 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(binDir, "tailscale"), []byte(fake), 0700); err != nil {
+				t.Fatal(err)
+			}
+			start := strings.Index(isloTailscaleBringUp, "tailscale_ip_if_ready() {")
+			if start < 0 {
+				t.Fatal("missing enrollment script")
+			}
+			// Execute the enrollment owner with an already installed CLI and socket.
+			script := `set -e
+TS_SOCKET="$TS_STATE_DIR/tailscaled.sock"
+TS_BIN_DIR="$TS_STATE_DIR/bin"
+TS_PID_FILE="$TS_STATE_DIR/tailscaled.pid"
+TS_HAS_AUTH=true
+TS_AUTH_VALUE=synthetic
+` + isloTailscaleBringUp[start:]
+			run := func(script string, fail bool) (string, error) {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "bash", "-c", script)
+				cmd.Env = append(os.Environ(), "TS_STATE_DIR="+dir, "TS_HOST=test-node", "TS_TAGS=tag:test", "TS_LOGIN_SERVER=", "TS_EXIT_NODE="+tc.exitNode, "TS_EXIT_NODE_ALLOW_LAN=true", fmt.Sprintf("FAIL_SELECTION=%t", fail))
+				out, err := cmd.CombinedOutput()
+				return string(out), err
+			}
+			out, err := run(script, tc.failSelection)
+			if tc.failSelection {
+				if err == nil || strings.Contains(out, "CRABBOX_TS_IP=") {
+					t.Fatalf("failed selection admitted workload: err=%v output=%s", err, out)
+				}
+				if out, err := run(isloTailscaleHealthCheck, false); err == nil {
+					t.Fatalf("health accepted incomplete enrollment: %s", out)
+				}
+				if out, err := run(script, true); err == nil || strings.Contains(out, "CRABBOX_TS_IP=") {
+					t.Fatalf("retry accepted incomplete enrollment: err=%v output=%s", err, out)
+				}
+				out, err = run(script, false)
+			}
+			if err != nil || !strings.Contains(out, "CRABBOX_TS_IP=100.64.0.2") {
+				t.Fatalf("enrollment: err=%v output=%s", err, out)
+			}
+			if out, err := run(isloTailscaleHealthCheck, false); err != nil {
+				t.Fatalf("health rejected completed enrollment: err=%v output=%s", err, out)
+			}
+			commands, err := os.ReadFile(filepath.Join(dir, "commands"))
+			if err != nil || !strings.Contains(string(commands), "set --exit-node="+tc.exitNode+" --exit-node-allow-lan-access") {
+				t.Fatalf("missing exit-node selection: err=%v commands=%s", err, commands)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
+
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 
