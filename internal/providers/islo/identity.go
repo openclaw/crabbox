@@ -268,3 +268,22 @@ func isloReportedResourceID(mismatched bool, resourceID, claimedID string) strin
 	}
 	return core.Blank(resourceID, claimedID)
 }
+
+// Endpoint refreshes retain acquisition metadata only for the same resource.
+// Creator attribution remains the original diagnostic baseline, not a fresh read.
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, _ string, server core.Server, _ bool) (core.Server, error) {
+	if provider != isloProvider || existing.Provider != isloProvider ||
+		(existing.CloudID != "" && server.CloudID != existing.CloudID) ||
+		(existing.CloudImmutableID != "" && server.ImmutableID != existing.CloudImmutableID) {
+		return core.Server{}, core.Exit(2, "refusing to retarget islo lease %s during endpoint refresh", existing.LeaseID)
+	}
+	server.Labels = shared.CloneLabels(server.Labels)
+	for _, key := range []string{isloSandboxNameLabel, isloCreatedByLabel, isloCreatedByEntityLabel} {
+		if original, ok := existing.Labels[key]; ok {
+			server.Labels[key] = original
+		} else {
+			delete(server.Labels, key)
+		}
+	}
+	return server, nil
+}
