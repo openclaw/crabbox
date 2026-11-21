@@ -12,6 +12,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &spritesBackend{} }
+
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, _, err := validateSpritesAPIURL(core.Blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
 	if err != nil {
