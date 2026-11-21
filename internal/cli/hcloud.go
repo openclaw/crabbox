@@ -95,21 +95,22 @@ func (p *privateNet) UnmarshalJSON(data []byte) error {
 }
 
 type Server struct {
-	LifetimePolicy      *LeaseLifetimePolicy `json:"lifetimePolicy,omitempty"`
-	CloudID             string
-	Provider            string
-	HostID              string
-	ImmutableID         string `json:"-"` // Provider-generated identity for same-name replacement checks.
-	claimSnapshot       leaseClaim
-	claimSnapshotSet    bool
-	claimSnapshotExists bool
-	ID                  int64             `json:"id"`
-	Name                string            `json:"name"`
-	Status              string            `json:"status"`
-	Labels              map[string]string `json:"labels"`
-	ProviderMetadata    map[string]any    `json:"provider_metadata,omitempty"`
-	ImageEvidence       *ImageEvidence    `json:"imageEvidence,omitempty"`
-	PublicNet           struct {
+	coordinatorCreatedAt string
+	LifetimePolicy       *LeaseLifetimePolicy `json:"lifetimePolicy,omitempty"`
+	CloudID              string
+	Provider             string
+	HostID               string
+	ImmutableID          string `json:"-"` // Provider-generated identity for same-name replacement checks.
+	claimSnapshot        leaseClaim
+	claimSnapshotSet     bool
+	claimSnapshotExists  bool
+	ID                   int64             `json:"id"`
+	Name                 string            `json:"name"`
+	Status               string            `json:"status"`
+	Labels               map[string]string `json:"labels"`
+	ProviderMetadata     map[string]any    `json:"provider_metadata,omitempty"`
+	ImageEvidence        *ImageEvidence    `json:"imageEvidence,omitempty"`
+	PublicNet            struct {
 		IPv4 struct {
 			IP string `json:"ip"`
 		} `json:"ipv4"`
@@ -414,7 +415,7 @@ func (c *HetznerClient) DeleteImage(ctx context.Context, imageID int64) error {
 }
 
 func (c *HetznerClient) SetLabels(ctx context.Context, id int64, labels map[string]string) error {
-	return c.do(ctx, http.MethodPut, fmt.Sprintf("/servers/%d", id), map[string]any{"labels": labels}, nil)
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/servers/%d", id), map[string]any{"labels": hetznerTailscaleLabels(labels)}, nil)
 }
 
 func summarizeJSON(data []byte) string {
@@ -433,4 +434,21 @@ func summarizeJSON(data []byte) string {
 
 func SummarizeJSON(data []byte) string {
 	return summarizeJSON(data)
+}
+
+// Diagnostics must never invalidate the same write that renews lifecycle labels.
+func hetznerTailscaleLabels(labels map[string]string) map[string]string {
+	out := cloneStringMap(labels)
+	if value, ok := out["tailscale_error"]; ok && value != "" {
+		out["tailscale_error"] = sanitizeProviderLabelValue(value)
+	}
+	if value, ok := out["tailscale_fqdn"]; ok {
+		value = strings.TrimSuffix(value, ".")
+		if len(value) > 63 {
+			delete(out, "tailscale_fqdn")
+		} else {
+			out["tailscale_fqdn"] = value
+		}
+	}
+	return out
 }

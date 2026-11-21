@@ -202,7 +202,7 @@ jobs:
 
   desktop-resize:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.desktop-resize-only }}
-    # Playwright 1.55.1 cannot install Chromium dependencies on ubuntu-latest (26.04).
+    # Keep runner OS changes separate from Chromium and its system dependencies.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

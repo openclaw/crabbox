@@ -130,6 +130,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     [
       "v1/whoami",
       "v1/capacity",
+      "v1/capacity/run-logs",
       "v1/leases",
       "v1/admin/leases",
       "v1/admin/retained-reconcile",

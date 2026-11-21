@@ -148,7 +148,9 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	}
 	server := serverFromInstance(instance, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "tencentcloud bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "tencentcloud bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	readyLabels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, now)
@@ -349,7 +351,7 @@ func (b *Backend) targetFromInstance(item instance, req core.ResolveRequest, acc
 		}
 	}
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(cfgForRun(b.Cfg), server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	cfg := cfgForRun(b.Cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)

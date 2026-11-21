@@ -748,7 +748,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		if *controllerOwned {
 			server, resolvedTarget, leaseID, err = a.resolveNetworkLeaseTargetReadOnly(ctx, cfg, *id, expectedIdentity.Identity)
 		} else {
-			server, resolvedTarget, leaseID, err = a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
+			server, resolvedTarget, leaseID, err = a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, true, *reclaim)
 		}
 		if err != nil {
 			return err
@@ -1015,7 +1015,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if expectedIdentity.set {
 		server, target, leaseID, err = a.resolveNetworkLeaseTargetReadOnly(ctx, cfg, *id, expectedIdentity.Identity)
 	} else {
-		server, target, leaseID, err = a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+		server, target, leaseID, err = a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
 	}
 	if err != nil {
 		return err
@@ -1160,7 +1160,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return Exit(2, "webvnc reset requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
 	if err != nil {
 		return err
 	}
@@ -3239,7 +3239,7 @@ func (a App) resolveWebVNCLeaseTarget(ctx context.Context, cfg Config, id string
 	if noProviderSideEffects {
 		server, target, leaseID, err = a.resolveNetworkLeaseTargetReadOnly(ctx, cfg, id, expected.Identity)
 	} else {
-		server, target, leaseID, err = a.resolveNetworkLeaseTargetForRepo(ctx, cfg, id, false, reclaim)
+		server, target, leaseID, err = a.resolveNetworkLeaseTargetForRepo(ctx, cfg, id, true, reclaim)
 	}
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
@@ -3506,7 +3506,7 @@ func (a App) directSSHWebVNCStatus(ctx context.Context, cfg Config, id, localPor
 	if expected.set {
 		server, target, leaseID, err = a.resolveNetworkLeaseTargetReadOnly(ctx, cfg, id, expected.Identity)
 	} else {
-		server, target, leaseID, err = a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+		server, target, leaseID, err = a.resolveNetworkLeaseTarget(ctx, cfg, id, true)
 	}
 	if err != nil {
 		return err
@@ -3625,7 +3625,7 @@ func verifyDirectSSHWebVNCListenerOwner(localPort string, expectedPID int) error
 }
 
 func (a App) directSSHWebVNCReset(ctx context.Context, cfg Config, id string, openViewer, takeControl bool) error {
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, true)
 	if err != nil {
 		return err
 	}

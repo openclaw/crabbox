@@ -562,6 +562,9 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		if err == nil && lease.PolicyNotice != "" {
 			fmt.Fprintln(b.rt.Stderr, lease.PolicyNotice)
 		}
+		if err == nil && lease.PricingFallback != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: cost estimate fallback reason=%s: %s\n", lease.PricingFallback.Reason, lease.PricingFallback.Message)
+		}
 	}()
 	started := time.Now()
 	timeout := coordinatorCreateLeaseTimeoutForConfig(cfg)
@@ -1110,6 +1113,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ServerType:                   lease.ServerType,
 		Host:                         lease.Host,
 		Network:                      resolved.Network,
+		NetworkFallbackReason:        resolved.FallbackReason,
 		NetworkDiagnostics:           lease.Network,
 		Tailscale:                    lease.Tailscale,
 		SSHHost:                      target.Host,

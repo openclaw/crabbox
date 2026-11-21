@@ -1153,7 +1153,7 @@ func TestDirectTailscaleFeatureRequiresMetadataBackend(t *testing.T) {
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
 		spec := provider.Spec()
-		if !spec.Features.Has(core.FeatureTailscale) || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		if !spec.Features.Has(core.FeatureTailscale) || spec.Kind != core.ProviderKindSSHLease {
 			continue
 		}
 		cfg, ok := offlineConformanceConfig(name)
