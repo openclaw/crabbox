@@ -127,6 +127,10 @@ crabbox run --tailscale --tailscale-exit-node 100.100.100.100 -- curl -4 https:/
 rejects the request before provisioning so the requested egress route cannot be
 silently omitted. `exitNodeAllowLanAccess` maps to Tailscale's LAN-access flag and
 requires `exitNode`, even when Tailscale is disabled.
+These dependencies are checked after lease-creation flags are resolved. Config
+and environment settings can keep exit-node defaults with Tailscale disabled
+and enable them per lease with `--tailscale`; unrelated commands such as
+`config show`, `list`, and `status` can still load those defaults.
 The exit node must already advertise exit-node capability and be approved in the
 Tailscale admin console, and the tailnet policy must grant the lease's tags (for
 example `tag:crabbox`) access to `autogroup:internet` through exit nodes.

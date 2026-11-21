@@ -128,7 +128,7 @@ func applyNetworkFlagOverrides(cfg *Config, fs *flag.FlagSet, values networkFlag
 		cfg.Tailscale.ExitNodeAllowLANAccess = *values.TailscaleExitNodeAllowLAN
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
-	return validateNetworkConfig(*cfg)
+	return validateNetworkRequest(*cfg)
 }
 
 func parseNetworkMode(value string) (NetworkMode, error) {
@@ -144,8 +144,10 @@ func parseNetworkMode(value string) (NetworkMode, error) {
 	}
 }
 
-func validateNetworkConfig(cfg Config) error {
-	if _, err := parseNetworkMode(string(cfg.Network)); err != nil {
+// Enforce routing dependencies after lease flags resolve; config files may hold
+// exit-node defaults for commands that enable Tailscale with --tailscale.
+func validateNetworkRequest(cfg Config) error {
+	if err := validateNetworkConfig(cfg); err != nil {
 		return err
 	}
 	if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
@@ -153,6 +155,13 @@ func validateNetworkConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.Tailscale.ExitNode) != "" && !cfg.Tailscale.Enabled {
 		return Exit(2, "tailscale.exitNode requires tailscale.enabled; pass --tailscale to enable the requested exit-node routing")
+	}
+	return nil
+}
+
+func validateNetworkConfig(cfg Config) error {
+	if _, err := parseNetworkMode(string(cfg.Network)); err != nil {
+		return err
 	}
 	if cfg.Tailscale.Enabled {
 		if len(cfg.Tailscale.Tags) == 0 {

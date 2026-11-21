@@ -155,8 +155,10 @@ tailnet reachability after lease creation.
 `tailscale.enabled: true`) and routes the runner's outbound traffic
 through a chosen exit node. `--tailscale-exit-node-allow-lan-access` keeps
 LAN reachable while doing so (the latter requires an exit node to be set, or the
-config fails validation). When an exit node is configured, `auto` mode prefers
-the tailnet path during bootstrap so traffic uses the node, and Crabbox runs a
+lease request fails validation after flags are resolved). An exit-node default
+in config or the environment does not block unrelated commands; pass
+`--tailscale` when creating a lease to use it. When an exit node is configured,
+`auto` mode prefers the tailnet path during bootstrap so traffic uses the node, and Crabbox runs a
 remote egress check: it confirms the exit node is selected in `tailscale debug
 prefs` and that the runner can fetch its public IP. If the node is joined but
 internet egress fails, the command exits with code 5 and a message naming the

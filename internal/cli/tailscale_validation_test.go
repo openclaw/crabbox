@@ -160,6 +160,96 @@ func TestTailscaleExitNodeLoadedFlagPrecedence(t *testing.T) {
 	}
 }
 
+func TestTailscaleExitNodeDefaultsLoadWithoutEnrollment(t *testing.T) {
+	for _, source := range []string{"environment", "file"} {
+		t.Run(source, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			config := "target: linux\nprovider: hetzner\n"
+			if source == "file" {
+				config += "tailscale:\n  exitNode: 100.100.100.100\n  exitNodeAllowLanAccess: true\n"
+			} else {
+				t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE", "100.100.100.100")
+				t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS", "true")
+			}
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for name, load := range map[string]func() (Config, error){
+				"cli": loadConfig,
+				"controller": func() (Config, error) {
+					return loadControllerRunnerConfig(path, "hetzner", t.TempDir())
+				},
+			} {
+				cfg, err := load()
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if cfg.Tailscale.Enabled || cfg.Tailscale.ExitNode != "100.100.100.100" || !cfg.Tailscale.ExitNodeAllowLANAccess {
+					t.Fatalf("%s did not preserve disabled Tailscale defaults: %+v", name, cfg.Tailscale)
+				}
+			}
+		})
+	}
+}
+
+func TestTailscaleExitNodeDefaultsBuiltBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"environment", "file"} {
+		t.Run(source, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			env := []string{"HOME=" + root, "CRABBOX_CONFIG=" + path, "XDG_CONFIG_HOME=" + root, "XDG_STATE_HOME=" + root}
+			config := "target: linux\nprovider: hetzner\n"
+			if source == "file" {
+				config += "tailscale:\n  exitNode: 100.100.100.100\n  exitNodeAllowLanAccess: true\n"
+			} else {
+				env = append(env, "CRABBOX_TAILSCALE_EXIT_NODE=100.100.100.100", "CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS=true")
+			}
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, stderr, code := runDescribeTestBinary(binary, root, env, "config", "show", "--json")
+			if code != 0 {
+				t.Fatalf("non-lease command exit=%d stderr=%s", code, stderr)
+			}
+			controller := &execControllerWorkspaceRunner{}
+			for _, args := range [][]string{
+				{"warmup"},
+				{"run", "--", "true"},
+				{"prewarm", "--no-hydrate"},
+				controller.warmupArgs("cbx_abcdef123456", "test-lease", controllerWorkspaceRequest{}),
+			} {
+				_, stderr, code := runDescribeTestBinary(binary, root, env, args...)
+				if code != 2 || !strings.Contains(string(stderr), "requires tailscale.enabled") {
+					t.Fatalf("%v must reject before provisioning: exit=%d stderr=%s", args, code, stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestTailscaleBlacksmithCapabilityBuiltBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	env := []string{"HOME=" + root, "CRABBOX_CONFIG=" + filepath.Join(root, "missing.yaml"), "XDG_CONFIG_HOME=" + root}
+	for _, args := range [][]string{
+		{"warmup", "--provider", "blacksmith", "--tailscale"},
+		{"run", "--provider", "blacksmith", "--tailscale", "--", "true"},
+		{"prewarm", "--provider", "blacksmith", "--tailscale"},
+	} {
+		_, stderr, code := runDescribeTestBinary(binary, root, env, args...)
+		if code != 2 || !strings.Contains(string(stderr), "--tailscale is not supported for provider=blacksmith") {
+			t.Fatalf("%v must reject before provisioning: exit=%d stderr=%s", args, code, stderr)
+		}
+	}
+}
+
 func TestTailscaleTagMetadataRejectsPartialAndLegacyCorruption(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Tailscale.Enabled = true
