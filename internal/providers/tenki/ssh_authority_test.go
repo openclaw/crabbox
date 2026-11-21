@@ -57,7 +57,7 @@ func authorityTestSetup(t *testing.T) authorityTestMaterial {
 	t.Setenv("TENKI_API_KEY", "")
 	t.Setenv("TENKI_API_ENDPOINT", "")
 	ca, client := authorityTestSigner(t), authorityTestSigner(t)
-	cert := &ssh.Certificate{Key: client.PublicKey(), CertType: ssh.UserCert, ValidBefore: ssh.CertTimeInfinity}
+	cert := &ssh.Certificate{Key: client.PublicKey(), CertType: ssh.UserCert, ValidPrincipals: []string{"tenki"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestTenkiSSHAuthorityRejectsInvalidCA(t *testing.T) {
 
 func TestTenkiSSHAuthorityRejectsInvalidClientCertificateBeforeRequest(t *testing.T) {
 	material := authorityTestSetup(t)
-	hostCert := &ssh.Certificate{Key: material.clientKey, CertType: ssh.HostCert, ValidBefore: ssh.CertTimeInfinity}
+	hostCert := &ssh.Certificate{Key: material.clientKey, CertType: ssh.HostCert, ValidPrincipals: []string{"sandbox"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := hostCert.SignCert(rand.Reader, authorityTestSigner(t)); err != nil {
 		t.Fatal(err)
 	}

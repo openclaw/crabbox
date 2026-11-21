@@ -83,6 +83,8 @@ func TestFixedScalewayPublicImageCreateThroughSDK(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/metadata":
+			_ = json.NewEncoder(w).Encode(scw.ApiMetadata{Domain: "scw.cloud", Partition: "scw", Platform: "external"})
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/images/"):
 			_ = json.NewEncoder(w).Encode(&instance.GetImageResponse{Image: &instance.Image{Zone: scw.ZoneFrPar1, RootVolume: &instance.VolumeSummary{ID: "public-snapshot", Size: 10_000_000_000}}})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/servers"):

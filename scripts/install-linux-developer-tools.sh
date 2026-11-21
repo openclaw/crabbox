@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
+pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.28.13}"
 node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
-trufflehog_version="3.99.4"
-docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24.22.1-bookworm}"
+trufflehog_version="3.100.0"
+docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24.22.3-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
 apt_keyrings_dir="${CRABBOX_LINUX_APT_KEYRINGS_DIR:-/etc/apt/keyrings}"
@@ -24,22 +24,28 @@ google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 public_toolchain_archive_dir="/opt/crabbox/toolchain-archives"
 node_toolcache_root="/opt/hostedtoolcache"
 node_link_dir="/usr/local/bin"
-pinned_node_version="24.22.1"
+pinned_node_version="24.22.3"
 # Retire only aliases owned by the released predecessor image, never arbitrary Node trees.
 previous_pinned_node_version="24.19.0"
+# Migration-only slots from the preceding recipe; never used for new installs.
+released_node_version="24.22.1"
+released_go_version="1.27.3"
+released_bun_version="1.4.4"
+released_rust_version="1.98.1"
+released_uv_version="0.13.5"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
-pinned_go_version="1.27.3"
+pinned_go_version="1.27.4"
 bun_bin_dir="/usr/local/bin"
 bun_toolchain_root="/opt/crabbox/toolchains/bun"
-pinned_bun_version="1.4.4"
+pinned_bun_version="1.4.5"
 # Retire only aliases owned by the released predecessor image.
 previous_pinned_bun_version="1.4.0"
 rust_toolchain_root="/opt/crabbox/toolchains/rust"
 uv_toolchain_root="/opt/crabbox/toolchains/uv"
 developer_bin_dir="/usr/local/bin"
-pinned_rust_version="1.98.1"
-pinned_uv_version="0.13.5"
+pinned_rust_version="1.100.0"
+pinned_uv_version="0.13.9"
 previous_pinned_uv_version="0.12.19"
 
 log() {
@@ -254,26 +260,26 @@ EOF
 toolchain_archive_spec() {
   # Digests bind upstream bytes, not a mutable installation or Corepack metadata.
   case "$1" in
-    rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz)
-      printf '%s\n' "sha256 5326b36c53de11d148c8f8dab6553a3d1006c2cfd32123683073fad3c302605b https://static.rust-lang.org/dist/$1" ;;
-    uv-0.13.5-x86_64-unknown-linux-gnu.tar.gz)
-      printf '%s\n' "sha256 f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
-    go1.27.3.linux-amd64.tar.gz)
-      printf '%s\n' "sha256 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 https://go.dev/dl/$1" ;;
-    node-v24.22.1-linux-x64.tar.xz)
-      printf '%s\n' "sha256 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 https://nodejs.org/dist/v24.22.1/$1" ;;
-    pnpm-11.22.0.tgz)
-      printf '%s\n' "sha512 1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621 https://registry.npmjs.org/pnpm/-/$1" ;;
-    pnpm-12.15.0.tgz)
-      printf '%s\n' "sha512 b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61 https://registry.npmjs.org/pnpm/-/$1" ;;
-    exe.linux-x64-12.15.0.tgz)
-      printf '%s\n' "sha512 c9cf9095947ef7e9ebdbd2787d1ce13286a98314c10e776affea5eca8ab55d4b9f9d01677db5d4305b9d0c82b31e2e78e658a71aa98e9977e7d0da2e7cd81c3a https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
-    bun-v1.4.4-linux-x64.zip)
-      printf '%s\n' "sha256 bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip" ;;
-    bun-v1.4.4-linux-x64-baseline.zip)
-      printf '%s\n' "sha256 e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip" ;;
-    bun-v1.4.4-linux-aarch64.zip)
-      printf '%s\n' "sha256 baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip" ;;
+    rust-1.100.0-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 98ee6bec240e1cfe944f17e7092412dc5ef6e008484bb668c6936d35a7d15acd https://static.rust-lang.org/dist/$1" ;;
+    uv-0.13.9-x86_64-unknown-linux-gnu.tar.gz)
+      printf '%s\n' "sha256 a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5 https://github.com/astral-sh/uv/releases/download/0.13.9/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
+    go1.27.4.linux-amd64.tar.gz)
+      printf '%s\n' "sha256 7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 https://go.dev/dl/$1" ;;
+    node-v24.22.3-linux-x64.tar.xz)
+      printf '%s\n' "sha256 4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb https://nodejs.org/dist/v24.22.3/$1" ;;
+    pnpm-11.28.13.tgz)
+      printf '%s\n' "sha512 d5caa9cdcd6067ac2902f9f44daa00b1288a73babf1e98f4f375b3a7583b1894b4d49f7527da8f5e1530198bb10e03adba321a1f015429dc2946ce8a7a9a8c65 https://registry.npmjs.org/pnpm/-/$1" ;;
+    pnpm-12.21.0.tgz)
+      printf '%s\n' "sha512 66fd8278ee28935ce951792d34367ff3af5c432a2756445823029533835b8da529bbe0be5130afd56ed0713fb8789e47bad82d93bd5ae2fe54b15562d6276ef0 https://registry.npmjs.org/pnpm/-/$1" ;;
+    exe.linux-x64-12.21.0.tgz)
+      printf '%s\n' "sha512 f1eb9f0a31d7b2929b352fe487cab843482a2683aebc2e10e69828b3a5d2f01cbf9c032d3fe8dff05d42c3d7abf38d247c05fe3c9fedb3e03daa72c4f75aef5d https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
+    bun-v1.4.5-linux-x64.zip)
+      printf '%s\n' "sha256 94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64.zip" ;;
+    bun-v1.4.5-linux-x64-baseline.zip)
+      printf '%s\n' "sha256 dcb23a18a1c2fff12d57bcef696dbbb42eb67fde29f43816ecb595459a24c463 https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64-baseline.zip" ;;
+    bun-v1.4.5-linux-aarch64.zip)
+      printf '%s\n' "sha256 18656a3bf0ea5641f5796ae4213b75255579a70a0fded2f337933785568cdf84 https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-aarch64.zip" ;;
     *) log "no reviewed public toolchain archive: $1"; return 1 ;;
   esac
 }
@@ -343,7 +349,7 @@ cache_public_toolchain_archives() (
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
   if [[ "$#" -eq 0 ]]; then
-    set -- node-v24.22.1-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.15.0.tgz exe.linux-x64-12.15.0.tgz
+    set -- node-v24.22.3-linux-x64.tar.xz pnpm-11.28.13.tgz pnpm-12.21.0.tgz exe.linux-x64-12.21.0.tgz
   fi
   for name in "$@"; do
     stage_toolchain_archive "$name" "$staging" 1 || return $?
@@ -404,7 +410,7 @@ install_pinned_go() (
   umask 022
   local staging destination
   destination="$go_toolcache_root/go/$pinned_go_version/x64"
-  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" --previous-bin-dir "$go_toolcache_root/go/$released_go_version/x64/bin" go gofmt || return $?
   staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
@@ -413,18 +419,18 @@ install_pinned_go() (
   tar --no-same-owner -xzf "$staging/go$pinned_go_version.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1 || return $?
   rm -f "$destination.complete" || return $?
   check_go_toolchain "$staging/go" "$staging/check" || return $?
-  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" --previous-bin-dir "$go_toolcache_root/go/$released_go_version/x64/bin" go gofmt || return $?
   install -d -m 0755 "$(dirname "$destination")" "$go_link_dir" || return $?
   # This image-owned slot is always rebuilt from authenticated private bytes.
   rm -rf "$destination" || return $?
   mv "$staging/go" "$destination" || return $?
-  public_tool_links publish "$go_link_dir" "$destination/bin" go gofmt || return $?
+  public_tool_links publish "$go_link_dir" "$destination/bin" --previous-bin-dir "$go_toolcache_root/go/$released_go_version/x64/bin" go gofmt || return $?
   touch "$destination.complete"
 )
 
 install_go_toolchain() {
   if linux_x64_supported; then
-    public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+    public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" --previous-bin-dir "$go_toolcache_root/go/$released_go_version/x64/bin" go gofmt || return $?
     cache_public_toolchain_archives "go$pinned_go_version.linux-amd64.tar.gz" || return $?
     install_pinned_go
   fi
@@ -438,9 +444,9 @@ offline_go_probe() (
   staging="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive go1.27.3.linux-amd64.tar.gz "$staging"
+  stage_toolchain_archive go1.27.4.linux-amd64.tar.gz "$staging"
   mkdir "$staging/go"
-  tar --no-same-owner -xzf "$staging/go1.27.3.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
+  tar --no-same-owner -xzf "$staging/go1.27.4.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
   check_go_toolchain "$staging/go" "$staging/check"
 )
 
@@ -450,7 +456,7 @@ go_smoke_script() {
   declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive check_go_toolchain offline_go_probe
   # shellcheck disable=SC2016
   printf '%s\n' 'if linux_x64_supported; then' \
-    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.3 linux/amd64" ]]' \
+    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.4 linux/amd64" ]]' \
     '  command -v gofmt' '  offline_go_probe' 'fi'
 }
 
@@ -463,10 +469,10 @@ seed_offline_pnpm() {
   stage_toolchain_archive "pnpm-$version.tgz" "$staging" || return 1
   mkdir -p "$destination" || return 1
   tar --no-same-owner -xzf "$staging/pnpm-$version.tgz" -C "$destination" --strip-components=1 || return 1
-  if [[ "$version" == "12.15.0" ]]; then
-    stage_toolchain_archive exe.linux-x64-12.15.0.tgz "$staging" || return 1
+  if [[ "$version" == "12.21.0" ]]; then
+    stage_toolchain_archive exe.linux-x64-12.21.0.tgz "$staging" || return 1
     mkdir "$staging/native" || return 1
-    tar --no-same-owner -xzf "$staging/exe.linux-x64-12.15.0.tgz" -C "$staging/native" || return 1
+    tar --no-same-owner -xzf "$staging/exe.linux-x64-12.21.0.tgz" -C "$staging/native" || return 1
     install -m 0755 "$staging/native/package/pnpm" "$destination/pnpm-native" || return 1
   fi
   # Corepack 0.35.0 does not authenticate cache hits or `install -g <pack.tgz>`.
@@ -491,17 +497,17 @@ import sys
 import tempfile
 
 action, link_dir, bin_dir, *tools = sys.argv[1:]
-previous_bin_dir = None
-if tools[:1] == ["--previous-bin-dir"]:
+previous_bin_dirs = []
+while tools[:1] == ["--previous-bin-dir"]:
     _, previous_bin_dir, *tools = tools
+    previous_bin_dirs.append(previous_bin_dir)
 if action not in ("check", "publish") or not os.path.isabs(bin_dir):
     sys.exit("invalid public tool link operation")
 
 def check(tool):
     link = os.path.join(link_dir, tool)
     targets = [os.path.join(bin_dir, tool)]
-    if previous_bin_dir is not None:
-        targets.append(os.path.join(previous_bin_dir, tool))
+    targets.extend(os.path.join(directory, tool) for directory in previous_bin_dirs)
     if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) not in targets):
         sys.exit("linux-tools: public tool conflict at " + link + "; resolve before rebake")
 
@@ -524,15 +530,15 @@ install_pinned_node() (
   local staging destination node_path
   destination="$node_toolcache_root/node/$pinned_node_version/x64"
   # Version 0.79.1 images own these exact predecessor aliases, including dangling links.
-  public_tool_links check "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
+  public_tool_links check "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$released_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
   staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive node-v24.22.1-linux-x64.tar.xz "$staging" || return $?
+  stage_toolchain_archive node-v24.22.3-linux-x64.tar.xz "$staging" || return $?
   install -d -m 0755 "$(dirname "$destination")" || return $?
   rm -f "$destination.complete" || return $?
   mkdir "$staging/node" || return $?
-  tar --no-same-owner -xJf "$staging/node-v24.22.1-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
+  tar --no-same-owner -xJf "$staging/node-v24.22.3-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
   node_path="$staging/node/bin:$PATH"
   [[ "$("$staging/node/bin/node" --version)" == "v$pinned_node_version" ]] || return 1
   env PATH="$node_path" "$staging/node/bin/npm" --version || return $?
@@ -542,7 +548,7 @@ install_pinned_node() (
   rm -rf "$destination" || return $?
   mv "$staging/node" "$destination" || return $?
   install -d -m 0755 "$node_link_dir" || return $?
-  public_tool_links publish "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
+  public_tool_links publish "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$released_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
   touch "$destination.complete"
 )
 
@@ -590,7 +596,7 @@ install_requested_node() {
     if [[ -L "$node_link_dir/$tool" ]]; then
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
       case "$link_target" in
-        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") retired_tools+=("$tool") ;;
+        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$released_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") retired_tools+=("$tool") ;;
       esac
     fi
   done
@@ -629,7 +635,7 @@ install_requested_node() {
       # Preserve operator replacements, including targets with trailing newlines.
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
       case "$link_target" in
-        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") rm -- "$node_link_dir/$tool" || return 1 ;;
+        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$released_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") rm -- "$node_link_dir/$tool" || return 1 ;;
       esac
     fi
   done
@@ -640,7 +646,7 @@ install_node_runtime() {
   local use_pinned_node=0
   if pinned_node_supported; then
     use_pinned_node=1
-    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
+    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$released_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
     cache_public_toolchain_archives "node-v$pinned_node_version-linux-x64.tar.xz" || return $?
     install_pinned_node || return $?
     export PATH="$node_link_dir:$PATH"
@@ -685,11 +691,11 @@ offline_node_pnpm_probe() (
   staging="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive node-v24.22.1-linux-x64.tar.xz "$staging"
+  stage_toolchain_archive node-v24.22.3-linux-x64.tar.xz "$staging"
   mkdir "$staging/node" "$staging/home"
-  tar --no-same-owner -xJf "$staging/node-v24.22.1-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
-  [[ "$("$staging/node/bin/node" --version)" == "v24.22.1" ]]
-  for version in 11.22.0 12.15.0; do
+  tar --no-same-owner -xJf "$staging/node-v24.22.3-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
+  [[ "$("$staging/node/bin/node" --version)" == "v24.22.3" ]]
+  for version in 11.28.13 12.21.0; do
     corepack_home="$staging/corepack-$version"
     seed_offline_pnpm "$version" "$staging" "$corepack_home"
     read -r algorithm digest url <<<"$(toolchain_archive_spec "pnpm-$version.tgz")"
@@ -755,7 +761,7 @@ bun_optimized_supported() {
 stage_bun_archive() {
   local name="$1" staging="$2" allow_download="${3:-0}"
   case "$name" in
-    bun-v1.4.4-linux-x64.zip|bun-v1.4.4-linux-x64-baseline.zip|bun-v1.4.4-linux-aarch64.zip) ;;
+    bun-v1.4.5-linux-x64.zip|bun-v1.4.5-linux-x64-baseline.zip|bun-v1.4.5-linux-aarch64.zip) ;;
     *) log "unsupported pinned Bun archive: $name"; return 1 ;;
   esac
   if [[ -L "$public_toolchain_archive_dir" ||
@@ -801,7 +807,7 @@ PY
 install_bun() {
   pinned_bun_supported || return 0
   local destination="$bun_toolchain_root/$pinned_bun_version/linux-x64-baseline" directory
-  public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
+  public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" --previous-bin-dir "$bun_toolchain_root/$released_bun_version/linux-x64-baseline" bun bunx || return $?
   # Check only this managed path's ancestors before any write can follow a symlink.
   directory="$destination"
   while [[ "$directory" != "/" ]]; do
@@ -835,12 +841,12 @@ PY
     # The installed image can move to a less capable guest. Keep its default baseline.
     chmod 0755 "$staging/linux-x64-baseline" || return $?
     ln -s bun "$staging/linux-x64-baseline/bunx" || return $?
-    public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
+    public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" --previous-bin-dir "$bun_toolchain_root/$released_bun_version/linux-x64-baseline" bun bunx || return $?
     (umask 022; install -d -m 0755 "$(dirname "$destination")" "$bun_bin_dir") || return $?
     # The exact image-owned slot may be incomplete; never reuse its executable bytes.
     rm -rf -- "$destination" || return $?
     mv "$staging/linux-x64-baseline" "$destination" || return $?
-    public_tool_links publish "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
+    public_tool_links publish "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" --previous-bin-dir "$bun_toolchain_root/$released_bun_version/linux-x64-baseline" bun bunx || return $?
   ) || return $?
   export PATH="$bun_bin_dir:$PATH"
   hash -r
@@ -1024,7 +1030,9 @@ install_rust_uv_toolchain() (
   esac
   link_arguments=("$developer_bin_dir" "$destination/bin")
   if [[ "$tool" == uv ]]; then
-    link_arguments+=(--previous-bin-dir "$uv_toolchain_root/$previous_pinned_uv_version/bin")
+    link_arguments+=(--previous-bin-dir "$uv_toolchain_root/$previous_pinned_uv_version/bin" --previous-bin-dir "$uv_toolchain_root/$released_uv_version/bin")
+  else
+    link_arguments+=(--previous-bin-dir "$rust_toolchain_root/$released_rust_version/bin")
   fi
   public_tool_links check "${link_arguments[@]}" "${commands[@]}" || return $?
   check_developer_toolchain_destination "$destination" || return $?
@@ -1099,8 +1107,8 @@ uv_smoke_script() {
 
 trufflehog_sha256_for_arch() {
   case "$1" in
-    amd64) printf '%s\n' "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1" ;;
-    arm64) printf '%s\n' "e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5" ;;
+    amd64) printf '%s\n' "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb" ;;
+    arm64) printf '%s\n' "aa61657049229ae523e8455fcbba87dff57b0a2ba6bdb391a38cf75e6d4016dd" ;;
     *)
       log "unsupported TruffleHog architecture: $1"
       return 1

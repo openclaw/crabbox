@@ -68,7 +68,7 @@ for (const command of ["Chocolatey", "pnpm"]) {
   test(`Windows ${command} downloads retry nonzero native exits`, async (t) => {
     await pullFixture(t, `
 $script:attempts = 0
-$PnpmVersion = '11.1.0'
+$PnpmVersion = '11.28.13'
 function choco {
   $script:attempts++
   $global:LASTEXITCODE = 0
@@ -155,9 +155,9 @@ $ErrorActionPreference = 'Stop'
 $env:TEMP = ${psQuote(dir)}
 $fixture = ${psQuote(binary)}
 ${compile}
-$TruffleHogVersion = '3.99.4'
+$TruffleHogVersion = '3.100.0'
 $TruffleHogInstallDir = Join-Path $env:TEMP 'install with spaces'
-$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.99.4'
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.100.0'
 $env:CRABBOX_TEST_STDERR = ''
 $env:CRABBOX_TEST_EXIT = '0'
 function Write-Log { param([string]$Message) Write-Host "windows-tools: $Message" }
@@ -205,7 +205,7 @@ $target = Join-Path $TruffleHogInstallDir 'trufflehog.exe'
 Copy-Item -LiteralPath $fixture -Destination $target
 Add-Content -LiteralPath $target -Value '# existing target'
 $before = (Get-FileHash $target).Hash
-$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.99.40'
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.100.00'
 $rejected = $false
 try { Install-TruffleHog } catch { $rejected = $_.Exception.Message -match 'did not report version' }
 if (-not $rejected) { throw 'wrong version was accepted' }
@@ -223,7 +223,7 @@ if ($valid.Count -ne 1 -or $valid[0] -isnot [bool] -or $valid[0]) { throw 'inval
 `);
   if (result) {
     assert.match(result.stdout, /exit code[=: ]+17/i);
-    assert.match(result.stdout, /trufflehog 3\.99\.4/);
+    assert.match(result.stdout, /trufflehog 3\.100\.0/);
     assert.match(result.stdout, /fixture loader diagnostic/);
   }
 });
@@ -231,7 +231,7 @@ if ($valid.Count -ne 1 -or $valid[0] -isnot [bool] -or $valid[0]) { throw 'inval
 test("TruffleHog accepts stderr version output and diagnoses launch failures", async (t) => {
   const result = await truffleHogFixture(t, `
 $env:CRABBOX_TEST_STDOUT = ''
-$env:CRABBOX_TEST_STDERR = 'trufflehog 3.99.4'
+$env:CRABBOX_TEST_STDERR = 'trufflehog 3.100.0'
 if (-not (Test-TruffleHogBinary $fixture)) { throw 'stderr version was rejected' }
 $invalid = Join-Path $env:TEMP 'invalid.exe'
 Set-Content -LiteralPath $invalid -Value 'not an executable'
@@ -284,8 +284,8 @@ for (const file of ["install-windows-developer-tools.ps1", "devtools-image-smoke
 test("Windows developer tools prep verifies a versioned Chocolatey package before installation", () => {
   assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_URL/);
   assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256/);
-  assert.match(script, /https:\/\/community\.chocolatey\.org\/api\/v2\/package\/chocolatey\/2\.7\.3/);
-  assert.match(script, /40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5/);
+  assert.match(script, /https:\/\/community\.chocolatey\.org\/api\/v2\/package\/chocolatey\/2\.7\.5/);
+  assert.match(script, /f86f99a18d236c2f99e6f67a20be7adc65c6c7756bf6cf3b43759e7ec0aa5839/);
   assert.match(script, /Get-FileHash -LiteralPath \$Path -Algorithm SHA256/);
   assert.match(script, /Assert-FileSHA256 -Path \$package -Expected \$SHA256 -Name "Chocolatey package"/);
   assert.match(script, /Expand-Archive -LiteralPath \$package -DestinationPath \$extractDir -Force/);
@@ -306,7 +306,7 @@ test("Windows developer tools prep verifies a versioned Chocolatey package befor
 
 test("Windows developer tools prep verifies the Node MSI before installation", () => {
   assert.match(script, /CRABBOX_WINDOWS_NODE_SHA256/);
-  assert.match(script, /3bda4baf1ee709b33cf920dd633106ddb23951e322bff9c03ec9f64ab8981b01/);
+  assert.match(script, /4a1ab5bdec5434bae58efae6c3e5077a011f6f1e76d2b47b7b10af043f7db545/);
   assert.match(
     script,
     /CRABBOX_WINDOWS_NODE_SHA256 is required when CRABBOX_WINDOWS_NODE_VERSION overrides \$DefaultNodeVersion/,
@@ -327,7 +327,7 @@ test("Windows developer tools prep verifies the Node MSI before installation", (
 
 test("Windows developer tools prep verifies the Docker archive before extraction and service registration", () => {
   assert.match(script, /CRABBOX_WINDOWS_DOCKER_SHA256/);
-  assert.match(script, /7008d54da30461fa745d4539beb87d3d14dd38c7ab0110657720526e16f5f2d3/);
+  assert.match(script, /bb894f67d85155e635ce71980fb2cf587e71dad8c41cc145c42a0de5160b6561/);
   assert.match(
     script,
     /CRABBOX_WINDOWS_DOCKER_SHA256 is required when CRABBOX_WINDOWS_DOCKER_VERSION overrides \$DefaultDockerVersion/,
@@ -352,9 +352,9 @@ test("Windows developer tools prep verifies the Docker archive before extraction
 });
 
 test("Windows developer tools prep verifies and atomically installs pinned TruffleHog archives", () => {
-  assert.match(script, /\$TruffleHogVersion = "3\.99\.4"/);
-  assert.match(script, /97749c11ec76ef93ca50a3a50bd2a40f25fb92dfee4366d4bff0ba0d951307a8/);
-  assert.match(script, /e56d8a6c60b69aa4d00753c202b3864a2d045bc1ee8538012b99c8f7352fcbc6/);
+  assert.match(script, /\$TruffleHogVersion = "3\.100\.0"/);
+  assert.match(script, /e3e854ded5b19ce1312fd103f3ca898f367e99f24f27c1170a711e0e9288f86d/);
+  assert.match(script, /89553c4dbe94eb712226083ddcc0acd72ce2a280f2d542ba8458e483eee3945f/);
   assert.match(script, /Resolve-TruffleHogAsset/);
 
   const start = script.indexOf("function Install-TruffleHog");

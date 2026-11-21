@@ -12576,6 +12576,7 @@ describe("fleet lease identity and idle", () => {
           onRecoverUnboundProvisioningResource(lease) {
             unboundReads += 1;
             if (unboundReads === 2) {
+              // oxlint-disable-next-line vitest/no-conditional-expect -- inspect the second recovery attempt.
               expect(lease.providerResourceID).toBe(captured.providerResourceID);
             }
             return captured;
@@ -39613,7 +39614,9 @@ describe("fleet lease identity and idle", () => {
         override async list<T>(options: Parameters<CoordinatorStorageView["list"]>[0] = {}) {
           const page = await super.list<T>(options);
           if (options.prefix === "runner:") {
+            // oxlint-disable-next-line vitest/no-conditional-expect -- runner scans require these storage options.
             expect(options.noCache).toBe(true);
+            // oxlint-disable-next-line vitest/no-conditional-expect -- runner scans require these storage options.
             expect(options.limit).toBe(128);
             this.pages.push(page.size);
             this.scanComplete = page.size < 128;

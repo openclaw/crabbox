@@ -295,10 +295,18 @@ func (f *frontDoor) serve(raw net.Conn, bound *frontLease, id string) {
 		}
 		f.mu.Unlock()
 	}()
-	config := &ssh.ServerConfig{MaxAuthTries: 3, PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	const maxAuthTries = 3
+	authAttempts := 0
+	config := &ssh.ServerConfig{MaxAuthTries: maxAuthTries, PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		denied := fmt.Errorf("lease authentication denied")
+		// MaxAuthTries excludes unsigned public-key probes in newer SSH releases.
+		authAttempts++
+		if authAttempts > maxAuthTries {
+			_ = raw.Close()
+			return nil, denied
+		}
 		if f.closed || meta.User() != "crabbox" {
 			return nil, denied
 		}

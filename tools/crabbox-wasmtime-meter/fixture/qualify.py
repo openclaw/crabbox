@@ -62,7 +62,7 @@ def validate(data, module_digest, budget, *, oracle=True):
     assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)', value['generatedAt'])
     assert datetime.datetime.fromisoformat(value['generatedAt'].replace('Z', '+00:00')).tzinfo is not None
     workload, meter, results = value['workload'], value['meter'], value['results']
-    expected_workload = dict(name=WORKLOAD, moduleSha256=module_digest, toolchain='go1.27.3', target='wasip1/wasm', argv=ARGV)
+    expected_workload = dict(name=WORKLOAD, moduleSha256=module_digest, toolchain='go1.27.4', target='wasip1/wasm', argv=ARGV)
     assert {key: workload[key] for key in expected_workload} == expected_workload
     assert meter['mechanism'] == 'wasmtime-fuel' and meter['engine'] == 'wasmtime'
     assert meter['engineVersion'] == '50.0.1'
@@ -79,7 +79,7 @@ def validate(data, module_digest, budget, *, oracle=True):
     assert row['exceeded'] is (row['measured'] > budget) and value['exceeded'] is row['exceeded']
     projection = dict(argv=ARGV, configuration=meter['configuration'], engine='wasmtime',
                       engineRevision=meter['engineRevision'], engineVersion=meter['engineVersion'],
-                      metric='fuel', target='wasip1/wasm', toolchain='go1.27.3', unit='fuel',
+                      metric='fuel', target='wasip1/wasm', toolchain='go1.27.4', unit='fuel',
                       wasiConfiguration=meter['wasiConfiguration'], workload=WORKLOAD)
     canonical = json.dumps(projection, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
     assert meter['comparisonKey'] == 'sha256:' + sha(canonical)
@@ -114,13 +114,13 @@ def probe_module(body, *, exit_code=None):
 def build_inputs(destination):
     destination.mkdir(parents=True, exist_ok=False)
     version = command(['go', 'version']).strip()
-    assert version.startswith('go version go1.27.3 ')
+    assert version.startswith('go version go1.27.4 ')
     source = ROOT / 'scripts/workflow_action_pins_test.go'
     original = source.read_bytes()
     manifest = dict(source=command(['git', 'rev-parse', 'HEAD']).strip(),
                     sourceTree=command(['git', 'rev-parse', 'HEAD^{tree}']).strip(),
                     go=version, target='wasip1/wasm', argv=ARGV, sourceTestSha256=sha(original))
-    env = dict(os.environ, GOOS='wasip1', GOARCH='wasm', GOTOOLCHAIN='go1.27.3', CGO_ENABLED='0')
+    env = dict(os.environ, GOOS='wasip1', GOARCH='wasm', GOTOOLCHAIN='go1.27.4', CGO_ENABLED='0')
     command(['go', 'test', '-c', '-trimpath', '-o', destination / 'baseline.wasm', './scripts'], env=env, timeout=600)
     marker = b'func TestCheckWorkflowNodeAcceptsImmutableUsesSyntaxes(t *testing.T) {\n'
     assert original.count(marker) == 1

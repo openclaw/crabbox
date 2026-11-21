@@ -149,11 +149,11 @@ class ConsumerContract(unittest.TestCase):
                      deterministic=True, initialFuel=qualify.INITIAL, remainingFuel=qualify.INITIAL - 12)
         projection = dict(argv=qualify.ARGV, configuration=meter['configuration'], engine='wasmtime',
                           engineRevision=meter['engineRevision'], engineVersion=meter['engineVersion'],
-                          metric='fuel', target='wasip1/wasm', toolchain='go1.27.3', unit='fuel',
+                          metric='fuel', target='wasip1/wasm', toolchain='go1.27.4', unit='fuel',
                           wasiConfiguration=meter['wasiConfiguration'], workload=workload)
         meter['comparisonKey'] = 'sha256:' + qualify.sha(json.dumps(projection, sort_keys=True, separators=(',', ':')).encode())
         return dict(schemaVersion=1, generatedAt='2026-01-01T00:00:00Z', provider='local-container',
-                    workload=dict(name=workload, moduleSha256='a' * 64, toolchain='go1.27.3', target='wasip1/wasm', argv=qualify.ARGV),
+                    workload=dict(name=workload, moduleSha256='a' * 64, toolchain='go1.27.4', target='wasip1/wasm', argv=qualify.ARGV),
                     meter=meter, results=[dict(metric='fuel', unit='fuel', measured=12, budget=12, exceeded=False)],
                     exceeded=False, guestOutput=dict(stdoutSha256=qualify.sha(b'PASS\n'), stderrSha256=qualify.sha(b'')))
 
@@ -163,8 +163,8 @@ class ConsumerContract(unittest.TestCase):
     def test_v2_identity_rejects_legacy_substitution(self):
         value = self.evidence()
         self.check(value)
-        current_key = 'sha256:158ee0686954ed1ad1e62deeb2d8b14b9ca8e133adb30d7c080ca82c1f174bb4'
-        legacy_key = 'sha256:38b199dc30e8b9603f9a4d5ddfa74929ed781459a346bd41593a1451ec79e065'
+        current_key = 'sha256:f63ac8120b361fae3b59bd6930350fb1b9217ed6100fa2faa034f5ca3e05ad57'
+        legacy_key = 'sha256:f2a5b3fe7f08a8eede658f289a923ff13fd53ce2245de9bcbc6c3260c07722d4'
         self.assertEqual(value['meter']['comparisonKey'], current_key)
         self.assertNotEqual(current_key, legacy_key)
         # Recomputed keys cannot make an old configuration or workload current.

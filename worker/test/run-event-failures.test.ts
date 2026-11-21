@@ -23,7 +23,6 @@ describe("run-event Worker boundary", () => {
       new Request("https://coordinator.test/v1/runs/run_example/events", {
         method,
         headers: { authorization: "Bearer test-shared", "content-type": "application/json" },
-        // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- the matrix contains only POST and PUT.
         body: JSON.stringify({ type: "stdout", data: "test output" }),
       }),
       env,

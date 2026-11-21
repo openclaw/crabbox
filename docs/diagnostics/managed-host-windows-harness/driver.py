@@ -44,7 +44,7 @@ if __name__=='__main__':
   (WORK/'coord.env').write_text('CRABBOX_ADMIN_TOKEN='+s['admin']+'\nCRABBOX_SHARED_TOKEN='+s['borrower']+'\nCRABBOX_SHARED_OWNER=borrower@example.com\nCRABBOX_DEFAULT_ORG=example-org\nDATABASE_URL=postgresql://postgres@db/postgres\nPORT=8080\nCRABBOX_PORTABLE_POOLS_ENABLED=true\n');(WORK/'coord.env').chmod(0o600)
   run(['docker','network','create',p]);run(['docker','run','-d','--name',p+'-db','--network',p,'--network-alias','db','-e','POSTGRES_HOST_AUTH_METHOD=trust','postgres:17-bookworm'])
   time.sleep(2)
-  run(['docker','run','-d','--name',p+'-coordinator','--network',p,'--env-file',WORK/'coord.env','-p','127.0.0.1::8080','-v',str(ROOT/'worker')+':/worker:ro','-w','/worker','node:24.22.1-bookworm','node','dist-node/server.mjs'])
+  run(['docker','run','-d','--name',p+'-coordinator','--network',p,'--env-file',WORK/'coord.env','-p','127.0.0.1::8080','-v',str(ROOT/'worker')+':/worker:ro','-w','/worker','node:24.22.3-bookworm','node','dist-node/server.mjs'])
   port=run(['docker','port',p+'-coordinator','8080/tcp']).split(':')[-1];s['url']='http://127.0.0.1:'+port;save(s)
   run(SSH+['-f','-N','-o','ExitOnForwardFailure=yes','-o','ControlMaster=yes','-o','ControlPath='+str(WORK/'tunnel.sock'),'-R',f"127.0.0.1:{s['remotePort']}:127.0.0.1:{port}",HOST])
   print(remote("$p='"+s['guest']+"'; New-Item -ItemType Directory -Path $p | Out-Null; $u=[Security.Principal.WindowsIdentity]::GetCurrent().Name; & icacls $p /inheritance:r /grant:r ($u+':(OI)(CI)F') '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null; if($LASTEXITCODE){throw 'ACL'}; 'PRIVATE_ROOT_READY'"))

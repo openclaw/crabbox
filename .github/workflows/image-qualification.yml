@@ -96,9 +96,9 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           go-version-file: harness/go.mod
           cache: false
       - name: Check out retained provenance as inert source data
@@ -109,9 +109,9 @@ jobs:
           path: retained
           persist-credentials: false
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 24.22.3
           package-manager-cache: false
       - name: Install protected Worker toolchain
         run: npm ci --prefix harness/worker --ignore-scripts
@@ -152,7 +152,7 @@ jobs:
             candidate "${{ runner.temp }}/image-qualification-candidate"
       - name: Upload immutable candidate bundle
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
@@ -176,7 +176,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Download candidate bytes as inert data
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
@@ -202,7 +202,7 @@ jobs:
         run: node scripts/image-qualification-control.mjs admit
       - name: Publish immutable nonsecret handoff
         id: handoff
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-handoff-${{ github.run_id }}-1
           path: ${{ runner.temp }}/image-qualification-handoff
@@ -244,13 +244,13 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Download candidate bytes as inert data
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
           merge-multiple: true
       - name: Download immutable preparation
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.admit.outputs.handoff_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-handoff
@@ -283,7 +283,7 @@ jobs:
         run: node scripts/image-qualification-control.mjs deploy
       - name: Upload deployment evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-deploy-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-deploy-proof
@@ -303,7 +303,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Download immutable preparation
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.admit.outputs.handoff_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-handoff
@@ -349,7 +349,7 @@ jobs:
         run: node scripts/image-qualification-control.mjs arm
       - name: Upload protected execution manifest
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-arm-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-arm-proof
@@ -373,12 +373,12 @@ jobs:
           path: harness
           persist-credentials: false
       - name: Set up protected executor runtime
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 24.22.3
           package-manager-cache: false
       - name: Download exact candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
@@ -402,7 +402,7 @@ jobs:
           [[ "$status" -eq 137 ]]
       - name: Upload sanitized execution evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-execute-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-execute-proof
@@ -424,7 +424,7 @@ jobs:
           persist-credentials: false
       - name: Download execution evidence as inert data
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image-qualification-execute-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-execute-proof
@@ -455,7 +455,7 @@ jobs:
         run: node scripts/image-qualification-control.mjs finalize
       - name: Upload bounded final evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-qualification-final-${{ github.run_id }}
           path: ${{ runner.temp }}/image-qualification-final-proof

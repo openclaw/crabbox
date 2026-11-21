@@ -549,11 +549,11 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 				write(filepath.Join(archives, archiveName), buf.String(), 0o644)
 				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
 			}
-			nodeDigest := pack("node", "24.22.1", "node-v24.22.1-linux-x64.tar.xz")
-			goDigest := pack("go", "1.27.3", "go1.27.3.linux-amd64.tar.gz")
-			nodeSlot := filepath.Join(image, "node", "24.22.1", "x64")
-			goSlot := filepath.Join(image, "go", "1.27.3", "x64")
-			destGo := filepath.Join(cache, "go", "1.27.3", "x64")
+			nodeDigest := pack("node", "24.22.3", "node-v24.22.3-linux-x64.tar.xz")
+			goDigest := pack("go", "1.27.4", "go1.27.4.linux-amd64.tar.gz")
+			nodeSlot := filepath.Join(image, "node", "24.22.3", "x64")
+			goSlot := filepath.Join(image, "go", "1.27.4", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.4", "x64")
 			workFolder := tc.workFolder
 			if workFolder == "" {
 				workFolder = "_work"
@@ -643,7 +643,7 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "archive":
-				write(filepath.Join(archives, "go1.27.3.linux-amd64.tar.gz"), "tampered", 0o644)
+				write(filepath.Join(archives, "go1.27.4.linux-amd64.tar.gz"), "tampered", 0o644)
 			case "tree":
 				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
 			case "extra":
@@ -697,8 +697,8 @@ esac
 			script := strings.NewReplacer(
 				"/opt/hostedtoolcache", image,
 				"/opt/crabbox/toolchain-archives", archives,
-				"6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6", nodeDigest,
-				"65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40", goDigest,
+				"4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb", nodeDigest,
+				"7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840", goDigest,
 			).Replace(githubActionsRunnerInstallScript("2.337.0", true) + "\n" + githubActionsRunnerStartScript(SSHTarget{TargetOS: targetLinux}))
 			// The installer runs in its own shell and must not alter the caller's umask.
 			cmd := exec.Command("bash", "-c", "umask 002; bash -c \"$1\"; result=$?; [ \"$(umask)\" = 0002 ] || exit 99; exit \"$result\"", "fixture", script)
@@ -749,7 +749,7 @@ esac
 				tool, version string
 				present       bool
 			}{
-				{"node", "24.22.1", tc.wantNode}, {"go", "1.27.3", tc.wantGo},
+				{"node", "24.22.3", tc.wantNode}, {"go", "1.27.4", tc.wantGo},
 			} {
 				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
 				_, err := os.Stat(slot + ".complete")

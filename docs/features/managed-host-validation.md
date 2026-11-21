@@ -75,7 +75,7 @@ a regression test checks ordering and refusal to return after a close failure.
 ## Recorded local qualification — 2026-10-26
 
 Runtime implementation: `15ea299ce9aa10d7ea3b73d0a23ef2188f9dbbe4`.
-Native macOS client, Linux arm64 Docker target, Node 24.22.1 coordinator,
+Native macOS client, Linux arm64 Docker target, Node 24.22.3 coordinator,
 PostgreSQL 17, synthetic operator/borrower identities. All ten scenario checks
 passed twice; the final run required both `crabbox stop` calls to succeed without
 an outer retry. Disposable resources were removed after each run.
@@ -147,7 +147,7 @@ records final built-binary SHA-256 digests and observed authority/cleanup result
 The [proof harness snapshot](../diagnostics/managed-host-windows-harness/README.md)
 contains the driver source and reproduction instructions.
 
-The macOS ARM64 CLI used a disposable loopback Node 24.22.1/PostgreSQL 17
+The macOS ARM64 CLI used a disposable loopback Node 24.22.3/PostgreSQL 17
 coordinator and a real Windows ARM64 build 28000.3231 target. The pinned MXC
 0.8.0 executor ran from a task-specific Interactive desktop agent; normal SSH
 was only the operator transport. No production broker or existing host-access
