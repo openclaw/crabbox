@@ -298,6 +298,7 @@ func daytonaListItemJSON(id, slug string) string {
 		"env": {},
 		"public": false,
 		"networkBlockAll": false,
+		"kvm": false,
 		"cpu": 2,
 		"gpu": 0,
 		"memory": 4,

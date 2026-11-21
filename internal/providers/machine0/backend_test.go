@@ -836,7 +836,7 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := &ssh.Certificate{Key: signer.PublicKey(), CertType: ssh.UserCert, ValidBefore: ssh.CertTimeInfinity}
+	cert := &ssh.Certificate{Key: signer.PublicKey(), CertType: ssh.UserCert, ValidPrincipals: []string{"test-user"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		t.Fatal(err)
 	}
