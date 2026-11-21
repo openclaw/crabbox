@@ -67,6 +67,10 @@ function main() {
   validateProviderCounts(rootReadme, providers, "README.md");
   validateProviderCounts(readme, providers, "docs/providers/README.md");
   validateProviderTargetCounts(readme, providers);
+  const tailscalePath = path.join(root, "docs", "features", "tailscale.md");
+  const tailscale = fs.readFileSync(tailscalePath, "utf8");
+  const nextTailscale = replaceGenerated(tailscale, renderTailscaleProviders(providers),
+    "<!-- BEGIN GENERATED TAILSCALE PROVIDERS -->", "<!-- END GENERATED TAILSCALE PROVIDERS -->", tailscalePath);
   const next = replaceGenerated(readme, generated, beginMarker, endMarker, readmePath);
   const lifecycleGuide = fs.readFileSync(lifecycleGuidePath, "utf8");
   const coverage = lifecycleCoverage(providers, metadata);
@@ -79,6 +83,9 @@ function main() {
   );
 
   if (check) {
+    if (nextTailscale !== tailscale) {
+      fail("Tailscale provider catalog is stale; run node scripts/generate-provider-matrix.mjs");
+    }
     if (next !== readme) {
       fail("provider decision matrix is stale; run node scripts/generate-provider-matrix.mjs");
     }
@@ -87,10 +94,29 @@ function main() {
     }
     console.log(`checked provider matrix: ${providers.length} providers`);
   } else {
+    fs.writeFileSync(tailscalePath, nextTailscale, "utf8");
     fs.writeFileSync(readmePath, next, "utf8");
     fs.writeFileSync(lifecycleGuidePath, nextLifecycleGuide, "utf8");
     console.log(`generated provider matrix: ${providers.length} providers`);
   }
+}
+
+export function renderTailscaleProviders(providers) {
+  const supported = providers.filter((provider) => provider.features.includes("tailscale"));
+  const links = (entries) => entries.map((provider) =>
+    `\u005b${provider.provider}\u005d(../providers/${provider.provider}.md)`).join(", ");
+  const peers = supported.filter((provider) => provider.reachability?.includes("tailnet-peer"));
+  const egress = supported.filter((provider) => provider.reachability?.includes("tailnet-egress"));
+  return [
+    "<!-- BEGIN GENERATED TAILSCALE PROVIDERS -->",
+    "",
+    `The compiled provider catalog declares Tailscale support for ${supported.length} providers.`,
+    "",
+    `- Bidirectional tailnet peers (including pond transport): ${links(peers)}.`,
+    `- Egress-only userspace access: ${links(egress)}. These providers do not advertise a bidirectional pond tailnet endpoint.`,
+    "",
+    "<!-- END GENERATED TAILSCALE PROVIDERS -->",
+  ].join("\n");
 }
 
 function readProviderMatrix() {

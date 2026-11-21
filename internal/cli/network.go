@@ -128,7 +128,7 @@ func applyNetworkFlagOverrides(cfg *Config, fs *flag.FlagSet, values networkFlag
 		cfg.Tailscale.ExitNodeAllowLANAccess = *values.TailscaleExitNodeAllowLAN
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
-	return validateNetworkConfig(*cfg)
+	return validateNetworkRequest(*cfg)
 }
 
 func parseNetworkMode(value string) (NetworkMode, error) {
@@ -142,6 +142,21 @@ func parseNetworkMode(value string) (NetworkMode, error) {
 	default:
 		return "", Exit(2, "network must be auto, tailscale, or public")
 	}
+}
+
+// Enforce routing dependencies after lease flags resolve; config files may hold
+// exit-node defaults for commands that enable Tailscale with --tailscale.
+func validateNetworkRequest(cfg Config) error {
+	if err := validateNetworkConfig(cfg); err != nil {
+		return err
+	}
+	if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
+		return Exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
+	}
+	if strings.TrimSpace(cfg.Tailscale.ExitNode) != "" && !cfg.Tailscale.Enabled {
+		return Exit(2, "tailscale.exitNode requires tailscale.enabled; pass --tailscale to enable the requested exit-node routing")
+	}
+	return nil
 }
 
 func validateNetworkConfig(cfg Config) error {
@@ -160,14 +175,8 @@ func validateNetworkConfig(cfg Config) error {
 		if strings.TrimSpace(cfg.Tailscale.HostnameTemplate) == "" {
 			return Exit(2, "tailscale.hostnameTemplate must not be empty")
 		}
-		if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
-			return Exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
-		}
 		if cfg.TargetOS != targetLinux {
 			return Exit(2, "--tailscale managed provisioning currently supports target=linux only")
-		}
-		if isBlacksmithProvider(cfg.Provider) {
-			return Exit(2, "--tailscale is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 		}
 		if isStaticProvider(cfg.Provider) {
 			return Exit(2, "--tailscale only provisions managed leases; set static.host to a MagicDNS name or 100.x address and use --network tailscale")
@@ -193,16 +202,21 @@ func validTailscaleTag(value string) bool {
 		return false
 	}
 	name := strings.TrimPrefix(value, "tag:")
-	if name == "" || len(name) > 63 {
+	// Match tailscale/tailcfg.CheckTag: ASCII letter first, then letters, digits, or dashes.
+	if name == "" || !asciiLetter(name[0]) {
 		return false
 	}
 	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
 			continue
 		}
 		return false
 	}
 	return true
+}
+
+func asciiLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 const maxTailscaleHostnameLength = 63
@@ -331,8 +345,10 @@ func serverTailscaleMetadata(server Server) TailscaleMetadata {
 		ExitNode:               labels["tailscale_exit_node"],
 		ExitNodeAllowLANAccess: labelBool(labels["tailscale_exit_node_allow_lan_access"]),
 	}
-	if tags := splitCommaList(labels["tailscale_tags"]); len(tags) > 0 {
-		meta.Tags = tags
+	var err error
+	meta.Tags, err = tailscaleTagsFromLabels(labels)
+	if err != nil {
+		meta.Error = firstNonEmpty(meta.Error, err.Error())
 	}
 	return meta
 }

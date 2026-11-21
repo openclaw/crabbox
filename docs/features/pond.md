@@ -57,7 +57,7 @@ instead.
 
 | Plane     | Feature flag       | Providers that advertise it (today)                                                                                       | What you get                                                |
 | --------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Tailscale | `FeatureTailscale` | AWS, Hetzner, Azure, GCP, Islo (userspace `tailscaled` via exec, opt-in with `--tailscale`)                               | tailnet membership; OS-routed peer mesh on managed Linux, userspace proxy path on Islo |
+| Tailscale | `FeatureTailscale` | [Compiled Tailscale provider catalog](tailscale.md#scope), opt-in with `--tailscale` | tailnet membership; OS-routed peer mesh on managed Linux, userspace egress on Islo (no bidirectional tailnet endpoint) |
 | Bridge    | `FeatureURLBridge` | Islo, E2B, Railway                                                                                                      | provider-native HTTP(S) endpoints for discovery and sharing |
 | SSH-mesh  | `FeatureSSH`       | any provider advertising SSH: Hetzner, Azure, GCP, AWS, Proxmox, static `ssh`, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect`           |
 
