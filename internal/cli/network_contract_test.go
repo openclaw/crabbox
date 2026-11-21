@@ -34,8 +34,8 @@ func TestNetworkBootstrapFallbackRestoresProviderRoute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Target.Host != target.Host || got.Network != NetworkPublic || got.FallbackReason != "tailscale_unreachable" || readyNetworkDisplay(cfg, server, got.Target) != NetworkPublic {
-				t.Fatalf("fallback=%#v display=%s", got, readyNetworkDisplay(cfg, server, got.Target))
+			if got.Target.Host != target.Host || got.Network != NetworkPublic || got.FallbackReason != "tailscale_unreachable" || got.Target.NetworkKind != NetworkPublic {
+				t.Fatalf("fallback=%#v", got)
 			}
 			if got.Target.User != target.User || got.Target.Key != target.Key || got.Target.ProxyCommand != target.ProxyCommand || got.Target.Port != target.Port || !reflect.DeepEqual(got.Target.FallbackPorts, target.FallbackPorts) {
 				t.Fatalf("provider route changed: %#v", got.Target)

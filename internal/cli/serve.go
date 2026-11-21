@@ -37,6 +37,28 @@ func NewCoordinatorClient(cfg Config) (*CoordinatorClient, error) {
 	}
 	return c, nil
 }
+
+// NewAdminCoordinatorClient prefers the explicitly configured admin credential.
+// Without one, the coordinator still decides whether the ordinary login is an admin.
+func NewAdminCoordinatorClient(cfg Config) (*CoordinatorClient, error) {
+	c, err := NewCoordinatorClient(adminCoordinatorConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	if !c.hasConfiguredAuth() {
+		return nil, Exit(2, "admin command requires broker authentication; run crabbox login or configure broker credentials")
+	}
+	return c, nil
+}
+
+func adminCoordinatorConfig(cfg Config) Config {
+	if cfg.CoordAdminToken != "" {
+		cfg.CoordToken = cfg.CoordAdminToken
+		cfg.CoordTokenCommand = nil
+	}
+	return cfg
+}
+
 func (c *CoordinatorClient) AgentRequest(ctx context.Context, method, path string, body, out any) error {
 	return c.do(ctx, method, path, body, out)
 }

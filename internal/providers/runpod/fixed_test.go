@@ -37,7 +37,7 @@ func (f *fixedPodAPI) DeployPod(context.Context, runpodDeployInput) (runpodPod, 
 func (f *fixedPodAPI) DeployFixedPod(_ context.Context, input runpodDeployInput) (runpodPod, error) {
 	f.creates++
 	f.input = input
-	pod := runpodPod{ID: "pod-fixed", Name: input.Name, Env: maps.Clone(input.Env), DesiredStatus: "RUNNING", PublicIP: "127.0.0.1", PortMappings: map[string]int{"22": f.port}}
+	pod := runpodPod{ID: "pod-fixed", Name: input.Name, Env: maps.Clone(input.Env), Status: "RUNNING", SSH: runpodSSH{Direct: &runpodDirectSSH{Host: "127.0.0.1", Port: f.port}}}
 	f.pods = append(f.pods, pod)
 	if f.lostReply {
 		return runpodPod{}, errors.New("create reply lost")

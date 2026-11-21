@@ -139,8 +139,15 @@ export function renderTailscaleHostname(
   for (const [key, replacement] of Object.entries(replacements)) {
     value = value.replaceAll(key, replacement);
   }
-  value = sanitizeDNSLabel(value).slice(0, 63);
-  return value || sanitizeDNSLabel(`crabbox-${leaseID.replaceAll("_", "-")}`).slice(0, 63);
+  return (
+    tailscaleHostnameLabel(value) ||
+    tailscaleHostnameLabel(`crabbox-${leaseID.replaceAll("_", "-")}`)
+  );
+}
+
+// Tailscale rejects a hostname ending in a hyphen, and truncating can leave one.
+function tailscaleHostnameLabel(value: string): string {
+  return sanitizeDNSLabel(value).slice(0, 63).replace(/-+$/, "");
 }
 
 export async function createTailscaleAuthKey(

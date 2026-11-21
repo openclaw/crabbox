@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -1597,8 +1600,18 @@ func newLocalEgressSessionID() string {
 	return "egress_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
+// localEgressConnSeq numbers the connections this process opens through a
+// bridge. Both bridge ends key per-connection state by the resulting ID, so it
+// must never repeat while connections are accepted concurrently.
+var localEgressConnSeq atomic.Uint64
+
+// newLocalEgressConnID returns a connection ID unique within this process: a
+// monotonic sequence number keeps concurrent accepts distinct, and random bytes
+// keep IDs from a restarted client distinct from ones a host may still hold.
 func newLocalEgressConnID() string {
-	return "conn_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	var nonce [6]byte
+	_, _ = rand.Read(nonce[:])
+	return "conn_" + strconv.FormatUint(localEgressConnSeq.Add(1), 36) + "_" + hex.EncodeToString(nonce[:])
 }
 
 func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {

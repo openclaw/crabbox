@@ -7,6 +7,12 @@ import { requestOrg } from "./org-identity";
 import { portablePoolGrantKey, type PoolAccessGrant } from "./ready-pool-access";
 import { serveRelayBackend, type ServeRelayDescriptor } from "./serve-relay";
 import { hostPrefix, hostOnlineMS, type SSHHost } from "./ssh-host";
+import {
+  authenticateHostCredential,
+  hostCredentialCurrent,
+  hostUsesCredential,
+  hostCredentialRequest,
+} from "./ssh-host-auth";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env, LeaseRecord } from "./types";
 interface HostRelay extends ServeRelayDescriptor {
@@ -17,6 +23,7 @@ interface HostRelay extends ServeRelayDescriptor {
   hostID: string;
   generation: number;
   accessGeneration: number;
+  credentialGeneration?: number;
   tokenHash: string;
   clientAttached?: boolean;
   agentAttached?: boolean;
@@ -57,6 +64,7 @@ async function active(
     h.leaseID === l.id &&
     h.generation === a.generation &&
     !h.quarantine &&
+    hostCredentialCurrent(h) &&
     Date.now() - h.lastHeartbeat < hostOnlineMS
   )
     return h;
@@ -81,7 +89,11 @@ export async function mintHostRelay(
   if (sessions.length >= 4) return json({ error: "serve_relay_capacity" }, { status: 429 });
   const token = crypto.randomUUID().replaceAll("-", "");
   const a = l.sshHostAllocation!;
-  const deadline = Math.min(Date.parse(l.expiresAt), Date.parse(a.accessDeadline));
+  const deadline = Math.min(
+    Date.parse(l.expiresAt),
+    Date.parse(a.accessDeadline),
+    h.credential ? Date.parse(h.credential.expiresAt) : Infinity,
+  );
   const record: HostRelay = {
     sessionID: crypto.randomUUID().replaceAll("-", ""),
     deadline,
@@ -93,6 +105,7 @@ export async function mintHostRelay(
     hostID: h.id,
     generation: a.generation,
     accessGeneration: a.accessGeneration,
+    ...(h.credential ? { credentialGeneration: h.credential.generation } : {}),
     tokenHash: await sha256Hex(token),
   };
   await backend.prepare(record, token);
@@ -109,14 +122,16 @@ export async function authorizeHostRelay(
   role: string,
 ): Promise<Response | undefined> {
   const row = await s.get<HostRelay>(prefix + id);
-  if (!row) return;
+  if (!row) return hostCredentialRequest(r) ? denied() : undefined;
   const backend = serveRelayBackend(env);
   if (
     !backend ||
     r.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
     !["agent", "client"].includes(role) ||
-    row.org !== requestOrg(r, env) ||
-    requestOwner(r) !== (role === "agent" ? row.operator : row.owner) ||
+    (role === "client" &&
+      (hostCredentialRequest(r) ||
+        row.org !== requestOrg(r, env) ||
+        requestOwner(r) !== row.owner)) ||
     Date.now() >= row.connectBy ||
     Date.now() >= row.deadline ||
     !(await backend.alive(id))
@@ -130,11 +145,15 @@ export async function authorizeHostRelay(
     h.id !== row.hostID ||
     h.owner !== row.operator ||
     h.generation !== row.generation ||
+    h.credential?.generation !== row.credentialGeneration ||
     l.sshHostAllocation?.accessGeneration !== row.accessGeneration ||
     (await borrower(s, l)) !== row.owner
   )
     return denied();
   if (role === "agent") {
+    if (hostUsesCredential(h) || hostCredentialRequest(r)) {
+      if (!(await authenticateHostCredential(r, h))) return denied();
+    } else if (row.org !== requestOrg(r, env) || requestOwner(r) !== row.operator) return denied();
     const token = r.headers.get("x-crabbox-relay-token") ?? "";
     if (
       row.agentAttached ||
@@ -171,6 +190,7 @@ export async function pendingHostRelays(s: CoordinatorStorageView, env: Env, l: 
 }
 export async function closeHostRelays(s: CoordinatorStorageView, env: Env, l: LeaseRecord) {
   const backend = serveRelayBackend(env);
+  if (!backend && l.serveRelaySessions?.length) throw new Error("serve_relay_unavailable");
   for (const id of (l.serveRelaySessions ?? []).slice(0, 4)) {
     await backend?.close(id);
     await s.delete(prefix + id);

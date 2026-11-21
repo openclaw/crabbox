@@ -17,6 +17,8 @@ Crabbox is a Go CLI with an optional coordinator on Cloudflare Workers or Node.j
 
 Use `docs/source-map.md` for the detailed code map. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
 
+Keep investigation plans, run-specific qualification checklists, operational receipts, and handoff notes in internal artifacts outside the tracked source tree. Commit executable tooling, tests, versioned build contracts, and the documentation needed to maintain or use them; do not add placeholder notes merely to create a qualification PR. See https://github.com/openclaw/crabbox/pull/3171 for the admission boundary and rationale.
+
 ## Product Positioning
 
 Crabbox is a generic remote software testing and execution tool. New code, docs, tests, and examples should not mention OpenClaw, Peter, or other project/person-specific workflows unless the file is explicitly about legacy compatibility or release history. Prefer neutral examples such as `example-org`, `alice@example.com`, `my-app`, `test:live`, and generic repository workflows.
