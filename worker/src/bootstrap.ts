@@ -897,11 +897,15 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     `--hostname=${shellQuote(config.tailscaleHostname)}`,
     `--advertise-tags=${shellQuote(config.tailscaleTags.join(","))}`,
   ];
+  // tailscale up rejects a MagicDNS name while this node is still starting
+  // and has no peers. Select the exit node only after an address is present.
+  let selectExitNode = "";
   if (config.tailscaleExitNode) {
-    upArgs.push(`--exit-node=${shellQuote(config.tailscaleExitNode)}`);
+    selectExitNode = `    tailscale set --exit-node=${shellQuote(config.tailscaleExitNode)}`;
     if (config.tailscaleExitNodeAllowLanAccess) {
-      upArgs.push("--exit-node-allow-lan-access");
+      selectExitNode += " --exit-node-allow-lan-access";
     }
+    selectExitNode += "\n";
   }
   return `    ${tailscaleInstallBootstrap(config)}
     systemctl enable --now tailscaled || service tailscaled start || true
@@ -924,7 +928,7 @@ function tailscaleBootstrap(config: LeaseConfig): string {
       sleep 5
     done
     test -n "$ts_ip"
-    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
+${selectExitNode}    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
     printf '%s\\n' ${shellQuote(config.tailscaleHostname)} > /var/lib/crabbox/tailscale-hostname
     tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version || true
     if [ -n ${shellQuote(config.tailscaleExitNode)} ]; then

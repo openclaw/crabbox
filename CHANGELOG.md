@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
+
 - Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning while allowing disabled exit-node defaults for unrelated commands; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.
 - Pond: require locally claimed members, preserve running forward ports during JSON inspection and repeated exports, retain daemon records on failed process inspection, and check recorded member ACL tags with accurate doctor documentation. [PR 3148](https://github.com/openclaw/crabbox/pull/3148). Thanks @coygeek.
 - Network/stop: restore provider SSH routes on automatic fallback, consistently report fallback notices, and prepare direct guest cleanup with the live endpoint and stored lease key. [PR 3153](https://github.com/openclaw/crabbox/pull/3153). Thanks @coygeek.
