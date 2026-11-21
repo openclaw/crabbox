@@ -120,20 +120,21 @@ describe("daytona coordinator client", () => {
     },
   );
 
-  it.each(["missing", "unreadable", "network"])(
-    "rejects a %s configured snapshot response",
-    async (failure) => {
-      const client = new DaytonaClient(baseEnv);
-      client.fetcher = vi.fn<typeof fetch>(async () => {
-        if (failure === "network") throw new TypeError("snapshot request failed");
-        return failure === "missing"
-          ? new Response("not found", { status: 404 })
-          : new Response("invalid JSON");
-      });
-      await expect(client.validateConfiguredSnapshot()).rejects.toThrow();
-      expect(client.fetcher).toHaveBeenCalledTimes(1);
-    },
-  );
+  it.each([
+    { failure: "missing", message: "404" },
+    { failure: "unreadable", message: "JSON" },
+    { failure: "network", message: "snapshot request failed" },
+  ])("rejects a $failure configured snapshot response", async ({ failure, message }) => {
+    const client = new DaytonaClient(baseEnv);
+    client.fetcher = vi.fn<typeof fetch>(async () => {
+      if (failure === "network") throw new TypeError("snapshot request failed");
+      return failure === "missing"
+        ? new Response("not found", { status: 404 })
+        : new Response("invalid JSON");
+    });
+    await expect(client.validateConfiguredSnapshot()).rejects.toThrow(message);
+    expect(client.fetcher).toHaveBeenCalledTimes(1);
+  });
 
   it("leaves an account-default snapshot unverified without a lookup", async () => {
     const client = new DaytonaClient({ ...baseEnv, CRABBOX_DAYTONA_SNAPSHOT: "  " });

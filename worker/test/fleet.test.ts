@@ -54940,7 +54940,7 @@ describe("fleet identity", () => {
       ],
     });
     expect(daytonaRequests).toHaveLength(2);
-    expect(daytonaRequests.every((request) => request.method === "GET")).toBe(true);
+    expect(daytonaRequests.every((providerRequest) => providerRequest.method === "GET")).toBe(true);
     expect(daytonaRequests[0]?.method).toBe("GET");
     expect(daytonaRequests[0]?.headers.get("authorization")).toBe("Bearer live-key");
     expect(new URL(daytonaRequests[0]!.url).pathname).toBe("/api/sandbox");
@@ -55043,7 +55043,7 @@ describe("fleet identity", () => {
       expect(await response.text()).not.toContain("creation unresolved");
       expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
       const attempt = storage.value<CreateAttemptRecord>(`create-attempt:${leaseID}`);
-      if (method === "POST") expect(attempt).toBeDefined();
+      expect(Boolean(attempt)).toBe(method === "POST");
       expect(attempt?.canonicalLeaseID).toBeUndefined();
       expect(attempt?.cloudID).toBeUndefined();
       expect(attempt?.generation).toBeUndefined();
