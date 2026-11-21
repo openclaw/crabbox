@@ -171,6 +171,7 @@ import {
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import {
   AzureClient,
+  azureDeferredCleanupKey,
   AzureProvisioningRejectedError,
   azureRegionCandidates,
   azureSnapshotNotFound,
@@ -26204,10 +26205,6 @@ function passthroughProviderImage(image: ProviderImage): ProviderImage {
 
 function allowProviderImageDelete(): Promise<undefined> {
   return Promise.resolve(undefined);
-}
-
-function azureDeferredCleanupKey(request: AzureDeferredCleanupRequest): string {
-  return `${azureDeferredCleanupPrefix}${encodeURIComponent(request.subscription)}:${encodeURIComponent(request.resourceGroup)}:${encodeURIComponent(request.location)}:${encodeURIComponent(request.name)}`;
 }
 
 export function recordAzureDeferredCleanup(

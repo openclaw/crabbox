@@ -1,7 +1,7 @@
 import {
   AzureClient,
   azureDefiniteAllocationRejection,
-  azureOwnedDeleteClaimKey,
+  azureHasOutstandingCleanup,
   azureCrabboxSSHRulesMatch,
   azureAttemptNameSeed,
   azureDiskAttachmentsMatchVM,
@@ -304,13 +304,16 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
   ): Promise<void> {
     const data = plan.data as AzureProvisioningPlan;
     for (const candidate of data.candidates) {
-      const key = `azure-cleanup:${encodeURIComponent(data.subscription)}:${encodeURIComponent(data.resourceGroup)}:${encodeURIComponent(candidate.region)}:${encodeURIComponent(candidate.name)}`;
       // oxlint-disable-next-line eslint/no-await-in-loop -- bounded admission reads share one transaction.
-      const [deferred, deletion] = await Promise.all([
-        storage.get(key),
-        storage.get(azureOwnedDeleteClaimKey(plan.scope, candidate.name, lease.id)),
-      ]);
-      if (deferred || deletion) throw new AzureContinuationError("existing_cleanup_debt");
+      const outstanding = await azureHasOutstandingCleanup(storage, {
+        subscription: data.subscription,
+        resourceGroup: data.resourceGroup,
+        location: candidate.region,
+        name: candidate.name,
+        leaseID: lease.id,
+        providerScope: plan.scope,
+      });
+      if (outstanding) throw new AzureContinuationError("existing_cleanup_debt");
     }
   }
 

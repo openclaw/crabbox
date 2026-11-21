@@ -12,6 +12,7 @@ import {
   type LeaseProvisioningOperation,
 } from "../src/lease-provisioning";
 import { orgKeyForLabel } from "../src/org-identity";
+import type { FrozenProvisioningPlan } from "../src/provider-provisioning";
 import {
   openProvisioningMaterial,
   provisioningMaterialKey,
@@ -484,6 +485,44 @@ async function publicLease(storage: ProvisioningTestStorage, azure: AzureFixture
 }
 
 describe("durable Azure admission and reconstruction", () => {
+  it.each(["delete claim", "deferred cleanup record"])(
+    "refuses admission with an outstanding %s in the transaction view",
+    async (kind) => {
+      const storage = new ProvisioningTestStorage();
+      const azure = new AzureFixture();
+      const current = fleet(storage, azure);
+      const response = await current.coordinator.fetch(request("POST", "/v1/leases", input()));
+      expect(response.status).toBe(202);
+      const lease = (await storage.get<LeaseRecord>(`lease:${id}`))!;
+      const operation = (await storage.get<LeaseProvisioningOperation>(
+        provisioningOperationKey(id),
+      ))!;
+      const plan = (await storage.get<FrozenProvisioningPlan>(
+        provisioningPlanKey(operation.operationID),
+      ))!;
+      const data = plan.data as {
+        subscription: string;
+        resourceGroup: string;
+        candidates: Array<{ region: string; name: string }>;
+      };
+      const candidate = data.candidates.at(-1)!;
+      const key =
+        kind === "delete claim"
+          ? azureOwnedDeleteClaimKey(plan.scope, candidate.name, lease.id)
+          : `azure-cleanup:${encodeURIComponent(data.subscription)}:${encodeURIComponent(data.resourceGroup)}:${encodeURIComponent(candidate.region)}:${encodeURIComponent(candidate.name)}`;
+      const capability = new AzureResumableProvisioning(env, azure.fetch, storage);
+      await expect(
+        storage.transaction(async (transaction) => {
+          await transaction.put(key, { pending: true });
+          // The record exists only in this uncommitted transaction snapshot.
+          expect(await storage.get(key)).toBeUndefined();
+          await capability.validateAdmission(transaction, plan, lease);
+        }),
+      ).rejects.toThrow("existing_cleanup_debt");
+      expect(azure.mutations).toEqual([]);
+    },
+  );
+
   it("starts durable idle expiry only when slow provisioning is published", async () => {
     vi.useFakeTimers();
     const admitted = Date.parse("2026-09-28T08:00:00Z");
