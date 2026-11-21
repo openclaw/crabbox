@@ -71,6 +71,8 @@ export interface LeaseConfig {
   awsRegion: string;
   awsAMI: string;
   awsUseStockImage?: boolean;
+  /** AWS Linux: launch with CpuOptions.NestedVirtualization so the guest has /dev/kvm. */
+  awsNestedVirtualization?: boolean;
   awsPromotedAMIs: Record<string, string>;
   awsSnapshot: string;
   awsSGID: string;
@@ -307,21 +309,37 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     }
   }
   const machineClass = input.class ?? "beast";
+  const awsNestedVirtualization = validatedAWSNestedVirtualization(input, {
+    provider,
+    target,
+    windowsMode,
+    architecture,
+    machineClass,
+  });
   const azureOSDisk = normalizeAzureOSDiskMode(input.azureOSDisk ?? defaults.azureOSDisk);
   const azureSnapshot = input.azureSnapshot ?? "";
   const serverTypeAzureOSDisk = azureSnapshot ? "managed" : azureOSDisk;
+  const defaultServerType = awsNestedVirtualization
+    ? (awsNestedVirtualizationInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass)
+    : serverTypeForConfig(
+        provider,
+        target,
+        windowsMode,
+        machineClass,
+        architecture,
+        serverTypeAzureOSDisk,
+      );
+  // A class-selected serverType from a client that resolved it without nested
+  // virtualization is replaced, so the lease stays inside supported families.
+  const requestedServerType =
+    awsNestedVirtualization &&
+    !input.serverTypeExplicit &&
+    input.serverType &&
+    !awsInstanceTypeProvidesLinuxKVM(input.serverType)
+      ? undefined
+      : input.serverType;
   const serverType =
-    provider === "daytona"
-      ? "snapshot"
-      : (input.serverType ??
-        serverTypeForConfig(
-          provider,
-          target,
-          windowsMode,
-          machineClass,
-          architecture,
-          serverTypeAzureOSDisk,
-        ));
+    provider === "daytona" ? "snapshot" : (requestedServerType ?? defaultServerType);
   if (input.serverType && provider !== "daytona") {
     validateArchitectureServerType(
       provider,
@@ -338,6 +356,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
       : validCIDRs(input.awsSSHCIDRs ?? []);
   const awsInstanceTypes = validatedAWSInstanceTypes(input.awsInstanceTypes ?? []);
+  if (awsNestedVirtualization) {
+    const unsupported = awsInstanceTypes.filter((value) => !awsInstanceTypeProvidesLinuxKVM(value));
+    if (unsupported.length > 0) {
+      throw new InvalidAWSNestedVirtualizationError(
+        `awsNestedVirtualization requires awsInstanceTypes with AWS nested virtualization or *.metal* sizes; ${unsupported.join(", ")} not supported`,
+      );
+    }
+  }
   const capacityRequirements = normalizeCapacityRequirements(input.capacity);
   if (capacityRequirements && (provider !== "aws" || target !== "linux")) {
     throw new InvalidCapacityRequirementsError(
@@ -411,6 +437,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsRegion,
     awsAMI: input.awsAMI ?? "",
     awsUseStockImage,
+    ...(awsNestedVirtualization ? { awsNestedVirtualization } : {}),
     awsPromotedAMIs: {},
     awsSnapshot: input.awsSnapshot ?? "",
     awsSGID: input.awsSGID ?? "",
@@ -1267,7 +1294,15 @@ export function awsInstanceTypeCandidatesForTargetClass(
   machineClass: string,
   windowsMode: WindowsMode = "normal",
   architecture: Architecture = "amd64",
+  nestedVirtualization = false,
 ): string[] {
+  if (nestedVirtualization && target === "linux") {
+    const candidates = awsNestedVirtualizationInstanceTypeCandidatesForClass(machineClass);
+    if (candidates.length > 0) return candidates;
+    return !isCanonicalProviderClass(machineClass) && awsInstanceTypeProvidesLinuxKVM(machineClass)
+      ? [machineClass]
+      : [];
+  }
   if (target === "macos") {
     return awsMacOSInstanceTypeCandidates;
   }
@@ -1520,4 +1555,166 @@ export function clampLeaseDurations(
       ? `Lease policy clamped lifetime to ${ttlSeconds}s and idle timeout to ${idleTimeoutSeconds}s (maximum ${policy.maxTTLSeconds}s; extension ${policy.extension}).`
       : undefined;
   return { ttlSeconds, idleTimeoutSeconds, ...(policyNotice ? { policyNotice } : {}) };
+}
+
+// AWS virtual instance families that accept CpuOptions.NestedVirtualization=enabled:
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html
+// Keep in sync with awsNestedVirtualizationFamilies in internal/cli/aws.go.
+export const awsNestedVirtualizationFamilies: readonly string[] = [
+  "c7i",
+  "c7i-flex",
+  "c8i",
+  "c8id",
+  "c8i-flex",
+  "i7i",
+  "i7ie",
+  "m7i",
+  "m7i-flex",
+  "m8i",
+  "m8id",
+  "m8i-flex",
+  "r7i",
+  "r7iz",
+  "r8i",
+  "r8id",
+  "r8i-flex",
+  "x8i",
+];
+
+const awsNestedVirtualizationFamilySet = new Set(awsNestedVirtualizationFamilies);
+
+function awsInstanceTypeParts(instanceType: string): { family: string; size: string } {
+  const normalized = instanceType.trim().toLowerCase();
+  const dot = normalized.indexOf(".");
+  return dot < 0
+    ? { family: normalized, size: "" }
+    : { family: normalized.slice(0, dot), size: normalized.slice(dot + 1) };
+}
+
+/** Bare-metal sizes expose hardware virtualization without the CPU option. */
+export function awsInstanceTypeIsBareMetal(instanceType: string): boolean {
+  return awsInstanceTypeParts(instanceType).size.startsWith("metal");
+}
+
+/** Virtual instance types that accept CpuOptions.NestedVirtualization=enabled. */
+export function awsInstanceTypeSupportsNestedVirtualization(instanceType: string): boolean {
+  const { family, size } = awsInstanceTypeParts(instanceType);
+  return awsNestedVirtualizationFamilySet.has(family) && size !== "" && !size.startsWith("metal");
+}
+
+/** Instance types an awsNestedVirtualization Linux lease can use. */
+export function awsInstanceTypeProvidesLinuxKVM(instanceType: string): boolean {
+  return (
+    awsInstanceTypeSupportsNestedVirtualization(instanceType) ||
+    awsInstanceTypeIsBareMetal(instanceType)
+  );
+}
+
+// Mirrors the default Linux amd64 class sizes using nested-virtualization families.
+// Keep in sync with AWSNestedVirtualizationInstanceTypeCandidatesForClass in internal/cli/aws.go.
+const awsNestedVirtualizationInstanceTypeCandidates: Readonly<Record<string, readonly string[]>> = {
+  tiny: ["m8i.large", "m7i.large", "c8i.xlarge", "c7i.xlarge"],
+  small: ["c8i.2xlarge", "c7i.2xlarge", "m8i.xlarge", "m7i.xlarge", "c8i.xlarge", "c7i.xlarge"],
+  standard: [
+    "c8i.8xlarge",
+    "c7i.8xlarge",
+    "m8i.8xlarge",
+    "m7i.8xlarge",
+    "c8i.4xlarge",
+    "c7i.4xlarge",
+  ],
+  fast: [
+    "c8i.16xlarge",
+    "c7i.16xlarge",
+    "m8i.16xlarge",
+    "m7i.16xlarge",
+    "c8i.12xlarge",
+    "c7i.12xlarge",
+    "c8i.8xlarge",
+  ],
+  large: [
+    "c8i.24xlarge",
+    "c7i.24xlarge",
+    "m8i.24xlarge",
+    "m7i.24xlarge",
+    "r8i.24xlarge",
+    "r7i.24xlarge",
+    "c8i.16xlarge",
+    "c7i.16xlarge",
+  ],
+  beast: [
+    "c8i.48xlarge",
+    "c7i.48xlarge",
+    "m8i.48xlarge",
+    "m7i.48xlarge",
+    "r8i.48xlarge",
+    "r7i.48xlarge",
+    "c8i.32xlarge",
+    "c8i.24xlarge",
+    "c7i.24xlarge",
+  ],
+};
+
+export function awsNestedVirtualizationInstanceTypeCandidatesForClass(
+  machineClass: string,
+): string[] {
+  return [...(awsNestedVirtualizationInstanceTypeCandidates[machineClass] ?? [])];
+}
+
+/** Last-resort candidate for noncanonical selectors, like t3.small for ordinary Linux. */
+export const awsNestedVirtualizationFallbackInstanceType = "m7i.large";
+
+export class InvalidAWSNestedVirtualizationError extends Error {}
+
+/**
+ * Returns true only for AWS Linux leases that need CpuOptions-based nested
+ * virtualization. Windows WSL2 already enables it and is accepted unchanged.
+ */
+function validatedAWSNestedVirtualization(
+  input: LeaseRequest,
+  config: {
+    provider: Provider;
+    target: TargetOS;
+    windowsMode: WindowsMode;
+    architecture: Architecture;
+    machineClass: string;
+  },
+): boolean {
+  const value: unknown = input.awsNestedVirtualization;
+  if (value === undefined || value === false) return false;
+  if (value !== true) {
+    throw new InvalidAWSNestedVirtualizationError("awsNestedVirtualization must be a boolean");
+  }
+  if (config.provider !== "aws") {
+    throw new InvalidAWSNestedVirtualizationError(
+      `awsNestedVirtualization requires provider=aws; provider=${config.provider} is not supported`,
+    );
+  }
+  if (config.target === "windows" && config.windowsMode === "wsl2") return false;
+  if (config.target !== "linux") {
+    throw new InvalidAWSNestedVirtualizationError(
+      `awsNestedVirtualization requires target=linux; target=${config.target} windowsMode=${config.windowsMode} is not supported`,
+    );
+  }
+  if (config.architecture !== "amd64") {
+    throw new InvalidAWSNestedVirtualizationError(
+      "awsNestedVirtualization requires architecture=amd64; AWS supports nested virtualization only on Intel instance families",
+    );
+  }
+  const families = awsNestedVirtualizationFamilies.join(", ");
+  if (input.serverTypeExplicit && input.serverType) {
+    if (!awsInstanceTypeProvidesLinuxKVM(input.serverType)) {
+      throw new InvalidAWSNestedVirtualizationError(
+        `awsNestedVirtualization requires an instance type with AWS nested virtualization (${families}) or a *.metal* size; ${input.serverType} is not supported`,
+      );
+    }
+  } else if (
+    !isCanonicalProviderClass(config.machineClass) &&
+    !awsInstanceTypeProvidesLinuxKVM(config.machineClass)
+  ) {
+    throw new InvalidAWSNestedVirtualizationError(
+      `awsNestedVirtualization requires a canonical class or an instance type with AWS nested virtualization (${families}); class=${config.machineClass} is not supported`,
+    );
+  }
+  return true;
 }

@@ -46,6 +46,8 @@ type fixedAWSCreateIntentMachine struct {
 	SubnetID           string `json:"subnetID,omitempty" configFields:"AWSSubnetID"`
 	InstanceProfile    string `json:"instanceProfile,omitempty" configFields:"AWSProfile"`
 	RootGB             int32  `json:"rootGB" configFields:"AWSRootGB"`
+	// Omitted when false so existing intents keep their digest.
+	NestedVirtualization bool `json:"nestedVirtualization,omitempty" configFields:"AWSNestedVirtualization"`
 }
 
 type fixedAWSCreateIntentNetwork struct {
@@ -134,20 +136,21 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 		Provider:      strings.TrimSpace(cfg.Provider),
 		Profile:       strings.TrimSpace(cfg.Profile),
 		Machine: fixedAWSCreateIntentMachine{
-			TargetOS:           strings.TrimSpace(cfg.TargetOS),
-			Architecture:       effectiveArchitectureForConfig(cfg),
-			OSImage:            osImage,
-			WindowsMode:        strings.TrimSpace(cfg.WindowsMode),
-			Class:              strings.TrimSpace(cfg.Class),
-			ServerType:         strings.TrimSpace(cfg.ServerType),
-			ServerTypeExplicit: cfg.ServerTypeExplicit,
-			HostID:             hostID,
-			Region:             strings.TrimSpace(cfg.AWSRegion),
-			AMI:                strings.TrimSpace(cfg.AWSAMI),
-			Snapshot:           strings.TrimSpace(cfg.AWSSnapshot),
-			SubnetID:           strings.TrimSpace(cfg.AWSSubnetID),
-			InstanceProfile:    strings.TrimSpace(cfg.AWSProfile),
-			RootGB:             cfg.AWSRootGB,
+			TargetOS:             strings.TrimSpace(cfg.TargetOS),
+			Architecture:         effectiveArchitectureForConfig(cfg),
+			OSImage:              osImage,
+			WindowsMode:          strings.TrimSpace(cfg.WindowsMode),
+			Class:                strings.TrimSpace(cfg.Class),
+			ServerType:           strings.TrimSpace(cfg.ServerType),
+			ServerTypeExplicit:   cfg.ServerTypeExplicit,
+			HostID:               hostID,
+			Region:               strings.TrimSpace(cfg.AWSRegion),
+			AMI:                  strings.TrimSpace(cfg.AWSAMI),
+			Snapshot:             strings.TrimSpace(cfg.AWSSnapshot),
+			SubnetID:             strings.TrimSpace(cfg.AWSSubnetID),
+			InstanceProfile:      strings.TrimSpace(cfg.AWSProfile),
+			RootGB:               cfg.AWSRootGB,
+			NestedVirtualization: cfg.AWSNestedVirtualization,
 		},
 		Capabilities: fixedCreateIntentFeatures{
 			Desktop:           cfg.Desktop,

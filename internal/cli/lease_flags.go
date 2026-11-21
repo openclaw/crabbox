@@ -302,6 +302,11 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	// Other providers ignore AWS provider flags; reject this one so a KVM
+	// request is never silently dropped.
+	if flagWasSet(fs, "aws-nested-virtualization") && cfg.Provider != "aws" {
+		return Exit(2, "--aws-nested-virtualization requires provider=aws; provider=%s is not supported", cfg.Provider)
+	}
 	prepareProviderDefaults(cfg)
 	applySingleProviderTargetDefault(cfg)
 	applyOSImageProviderDefaults(cfg, false)

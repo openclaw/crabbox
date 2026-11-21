@@ -1265,6 +1265,9 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if cfg.Provider == "aws" && cfg.AWSStockImage {
 		req["awsUseStockImage"] = true
 	}
+	if cfg.Provider == "aws" && cfg.AWSNestedVirtualization {
+		req["awsNestedVirtualization"] = true
+	}
 	if contributor, ok := provider.(ProviderCoordinatorRequest); ok {
 		for key, value := range contributor.CoordinatorRequestFields(cfg) {
 			req[key] = value

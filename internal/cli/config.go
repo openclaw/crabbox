@@ -81,6 +81,7 @@ type Config struct {
 	imageExplicit                 bool
 	AWSRegion                     string
 	AWSStockImage                 bool
+	AWSNestedVirtualization       bool
 	AWSAMI                        string
 	AWSSnapshot                   string
 	AWSSGID                       string
@@ -1929,15 +1930,16 @@ type fileHetznerConfig struct {
 }
 
 type fileAWSConfig struct {
-	Region          string   `yaml:"region,omitempty"`
-	AMI             string   `yaml:"ami,omitempty"`
-	StockImage      *bool    `yaml:"stockImage,omitempty"`
-	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
-	SubnetID        string   `yaml:"subnetId,omitempty"`
-	InstanceProfile string   `yaml:"instanceProfile,omitempty"`
-	RootGB          int32    `yaml:"rootGB,omitempty"`
-	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
-	MacHostID       string   `yaml:"macHostId,omitempty"`
+	Region               string   `yaml:"region,omitempty"`
+	AMI                  string   `yaml:"ami,omitempty"`
+	StockImage           *bool    `yaml:"stockImage,omitempty"`
+	NestedVirtualization *bool    `yaml:"nestedVirtualization,omitempty"`
+	SecurityGroupID      string   `yaml:"securityGroupId,omitempty"`
+	SubnetID             string   `yaml:"subnetId,omitempty"`
+	InstanceProfile      string   `yaml:"instanceProfile,omitempty"`
+	RootGB               int32    `yaml:"rootGB,omitempty"`
+	SSHCIDRs             []string `yaml:"sshCIDRs,omitempty"`
+	MacHostID            string   `yaml:"macHostId,omitempty"`
 }
 
 type fileParallelsConfig struct {
@@ -2812,6 +2814,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.AWS.StockImage != nil {
 			cfg.AWSStockImage = *file.AWS.StockImage
+			recordConfigInput(cfg, "aws", inputSource, true)
+		}
+		if file.AWS.NestedVirtualization != nil {
+			cfg.AWSNestedVirtualization = *file.AWS.NestedVirtualization
 			recordConfigInput(cfg, "aws", inputSource, true)
 		}
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
@@ -4181,6 +4187,10 @@ func applyEnv(cfg *Config) error {
 		cfg.AWSStockImage = value
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 	}
+	if value, ok := getenvBool("CRABBOX_AWS_NESTED_VIRTUALIZATION"); ok {
+		cfg.AWSNestedVirtualization = value
+		recordConfigInput(cfg, "aws", configInputEnvironment, true)
+	}
 	cfg.AWSAMI = configInputEnvString(cfg, "aws", cfg.AWSAMI, "CRABBOX_AWS_AMI")
 	cfg.AWSSGID = configInputEnvString(cfg, "aws", cfg.AWSSGID, "CRABBOX_AWS_SECURITY_GROUP_ID")
 	cfg.AWSSubnetID = configInputEnvString(cfg, "aws", cfg.AWSSubnetID, "CRABBOX_AWS_SUBNET_ID")
@@ -5390,6 +5400,12 @@ func awsInstanceTypeCandidatesForConfig(cfg Config) []string {
 }
 
 func awsClassCandidatesForConfig(cfg Config) ([]string, bool) {
+	if awsLinuxNestedVirtualization(cfg) {
+		if candidates := AWSNestedVirtualizationInstanceTypeCandidatesForClass(cfg.Class); len(candidates) > 0 {
+			return candidates, true
+		}
+		return filterAWSLinuxKVMInstanceTypes(appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, cfg.Class)), false
+	}
 	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
 		return candidates, true
 	}

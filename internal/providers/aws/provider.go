@@ -70,8 +70,28 @@ func (Provider) Spec() core.ProviderSpec {
 		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
-func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
-func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
+
+type flagValues struct {
+	NestedVirtualization *bool
+}
+
+func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
+	return flagValues{
+		NestedVirtualization: fs.Bool("aws-nested-virtualization", defaults.AWSNestedVirtualization, "AWS Linux: enable nested virtualization (/dev/kvm) on a supported Intel instance family (config: aws.nestedVirtualization, env: CRABBOX_AWS_NESTED_VIRTUALIZATION)"),
+	}
+}
+
+func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	flags, _ := values.(flagValues)
+	if fs == nil || flags.NestedVirtualization == nil || !core.FlagWasSet(fs, "aws-nested-virtualization") {
+		return nil
+	}
+	if cfg.AWSNestedVirtualization != *flags.NestedVirtualization && !cfg.ServerTypeExplicit {
+		// Class selection depends on this option; let lease flags re-resolve it.
+		cfg.ServerType = ""
+	}
+	cfg.AWSNestedVirtualization = *flags.NestedVirtualization
+	core.RecordProviderFlagInputs(cfg, true, "aws")
 	return nil
 }
 
@@ -161,6 +181,15 @@ func awsClassProfile(class, target, windowsMode string, architecture core.Provid
 }
 
 func awsCandidatesForConfig(cfg core.Config) []string {
+	if cfg.AWSNestedVirtualization && cfg.TargetOS == core.TargetLinux {
+		if candidates := core.AWSNestedVirtualizationInstanceTypeCandidatesForClass(cfg.Class); len(candidates) > 0 {
+			return candidates
+		}
+		if core.IsCanonicalProviderClass(cfg.Class) || !core.AWSInstanceTypeProvidesLinuxKVM(cfg.Class) {
+			return nil
+		}
+		return []string{cfg.Class}
+	}
 	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
 		return candidates
 	}
