@@ -10,10 +10,23 @@ import {
   tailscaleInstallConfig,
   tailscalePreflight,
   tailscaleTagOwnershipErrorMessage,
+  validateTailscaleTags,
 } from "../src/tailscale";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("requested Tailscale tags", () => {
+  it("keeps valid normalized tags and the empty-list default", () => {
+    expect(validateTailscaleTags([" TAG:CI-1 ", "tag:ci-1"], ["tag:ci-1"])).toEqual(["tag:ci-1"]);
+    expect(validateTailscaleTags([], ["tag:ci", "tag:staging"])).toEqual(["tag:ci", "tag:staging"]);
+  });
+
+  it("accepts long names allowed by Tailscale's CheckTag grammar", () => {
+    const tag = `tag:${"a".repeat(100)}`;
+    expect(validateTailscaleTags([tag], [tag])).toEqual([tag]);
+  });
 });
 
 describe("tailscale hostnames", () => {
