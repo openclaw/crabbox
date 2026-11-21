@@ -127,6 +127,7 @@ export interface Env {
   CRABBOX_DURABLE_PROVISIONING_ADMISSION?: string;
   CRABBOX_USER_TOKEN_TTL_SECONDS?: string;
   CRABBOX_RUN_RETENTION_DAYS?: string;
+  CRABBOX_RUN_LOG_BUDGET_BYTES?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
   CRABBOX_GITHUB_CLIENT_SECRET?: string;
   CRABBOX_GITHUB_ALLOWED_ORG?: string;
@@ -1155,6 +1156,8 @@ export interface RunRecord {
   durationMs?: number;
   logBytes: number;
   logTruncated: boolean;
+  logEvicted?: "storage_pressure" | "retention";
+  storedLogBytes?: number;
   blockedStage?: string;
   retryLikely?: string;
   results?: TestResultSummary;

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Authentication: share positive GitHub membership checks across Worker isolates through the regional Cache API while preserving authorization expiry and the Node fallback. [PR 3216](https://github.com/openclaw/crabbox/pull/3216). Thanks @mkusaka.
+- Coordinator: bound stored run logs, evict oldest terminal payloads under pressure while preserving run records, and expose capacity warnings with faster retention pruning. [PR 3217](https://github.com/openclaw/crabbox/pull/3217). Thanks @mkusaka.
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 

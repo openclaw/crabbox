@@ -699,6 +699,7 @@ type CoordinatorRun struct {
 	DurationMs                int64                      `json:"durationMs,omitempty"`
 	LogBytes                  int64                      `json:"logBytes"`
 	LogTruncated              bool                       `json:"logTruncated"`
+	LogEvicted                string                     `json:"logEvicted,omitempty"`
 	BlockedStage              string                     `json:"blockedStage,omitempty"`
 	RetryLikely               string                     `json:"retryLikely,omitempty"`
 	Results                   *TestResultSummary         `json:"results,omitempty"`

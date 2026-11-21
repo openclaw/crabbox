@@ -290,3 +290,35 @@ func TestEventsCommandPrintsCoordinatorSteps(t *testing.T) {
 		}
 	}
 }
+
+func TestLogsJSONPreservesStoragePressureEviction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/run_evicted/logs":
+			_, _ = w.Write([]byte("log evicted under storage pressure\n"))
+		case "/v1/runs/run_evicted":
+			_, _ = w.Write([]byte(`{"run":{"id":"run_evicted","state":"succeeded","logBytes":123,"logEvicted":"storage_pressure"}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.logs(context.Background(), []string{"run_evicted", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Run map[string]any `json:"run"`
+		Log string         `json:"log"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Run["logEvicted"] != "storage_pressure" || result.Log != "log evicted under storage pressure\n" {
+		t.Fatalf("eviction state missing: %s", stdout.String())
+	}
+}

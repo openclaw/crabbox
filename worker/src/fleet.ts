@@ -56,6 +56,7 @@ import {
   retainedReconcileDue,
   retainedReconcileStatus,
 } from "./retained-lease-reconcile";
+import { RunLogStorage, runLogBudget } from "./run-log-storage";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
 import { SSHHostCoordinator } from "./ssh-host";
@@ -598,7 +599,7 @@ const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
-const terminalRunPruneBatchSize = 16;
+const terminalRunPruneBatchSize = 128;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
@@ -1265,6 +1266,15 @@ export class FleetCoordinator {
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readonly readyPoolBorrowLock = new AsyncMutex();
+  private logStorage?: RunLogStorage;
+
+  private runLogStorage(): RunLogStorage {
+    return (this.logStorage ??= new RunLogStorage(
+      this.state.storage,
+      runLogBudget(this.env.CRABBOX_RUN_LOG_BUDGET_BYTES),
+      (id) => this.activeRunLogReaders.has(id),
+    ));
+  }
   private readonly poolAccess: ReadyPoolAccess;
   private readonly bridgeTicketLock = new AsyncMutex();
   private readonly bridgeTickets: BridgeTickets;
@@ -1411,6 +1421,9 @@ export class FleetCoordinator {
       // This read must not trigger bridge reconciliation or other maintenance.
       if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") {
         return await this.capacity(request);
+      }
+      if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity/run-logs") {
+        return json(await this.runLogStorage().capacity());
       }
       const bridgeFailure = await this.prepareBridgeRequest(request);
       if (bridgeFailure) return bridgeFailure;
@@ -3565,6 +3578,9 @@ export class FleetCoordinator {
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.pruneTerminalRuns();
+    const logsPending = await this.runLogStorage().maintain();
+    if (logsPending) await this.state.storage.put("maintenance:run-log-pending", true);
+    else await this.state.storage.delete("maintenance:run-log-pending");
     await this.pruneExternalRunners();
     await this.maintainCheckpoints();
     await this.runAzureDeferredCleanups();
@@ -16280,8 +16296,9 @@ export class FleetCoordinator {
       | { kind: "duplicate"; run: RunRecord }
       | { kind: "conflict"; run: RunRecord }
       | { kind: "committed"; run: RunRecord; event: RunEventRecord };
+    const retained = await this.runLogStorage().reserve(terminalLogPrefix, logInput.bytes);
     try {
-      await writeTerminalRunLog(this.state.storage, terminalLogPrefix, logInput.log);
+      if (retained) await writeTerminalRunLog(this.state.storage, terminalLogPrefix, logInput.log);
       committed = await this.state.storage.transaction(async (storage) => {
         let current = await storage.get<RunRecord>(runKey(runID));
         if (admissionFingerprint) {
@@ -16321,6 +16338,7 @@ export class FleetCoordinator {
         if (!admissionFingerprint && !sameTerminalRunBinding(current, run)) {
           return { kind: "conflict" as const, run: current };
         }
+        await this.runLogStorage().account(storage, current);
         const next = { ...current };
         if (admissionFingerprint) next.admissionFailedBeforeWork = true;
         next.exitCode = exitCode;
@@ -16344,6 +16362,7 @@ export class FleetCoordinator {
         if (receipt) next.terminalReceipt = receipt;
         next.terminalFinishSHA256 = requestedFingerprint;
         next.terminalLogPrefix = terminalLogPrefix;
+        await this.runLogStorage().commit(storage, next, terminalLogPrefix, retained);
         const seq = (next.eventCount ?? 0) + 1;
         const event = boundedRunEvent(next.id, seq, endedAt, {
           type: admissionFingerprint ? "run.failed" : "command.finished",
@@ -16365,7 +16384,9 @@ export class FleetCoordinator {
           throw error;
         });
       if (current?.terminalLogPrefix !== terminalLogPrefix) {
-        await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+        await this.runLogStorage()
+          .discard(terminalLogPrefix)
+          .catch(() => undefined);
         throw error;
       }
       if (
@@ -16379,12 +16400,16 @@ export class FleetCoordinator {
         throw error;
       }
       committed = { kind: "duplicate", run: current };
+    } finally {
+      this.runLogStorage().release(terminalLogPrefix);
     }
     if (
       committed.kind !== "committed" &&
       (committed.kind === "missing" || committed.run.terminalLogPrefix !== terminalLogPrefix)
     ) {
-      await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+      await this.runLogStorage()
+        .discard(terminalLogPrefix)
+        .catch(() => undefined);
     }
     if (committed.kind === "missing") return notFound();
     if (committed.kind === "conflict") {
@@ -16393,11 +16418,18 @@ export class FleetCoordinator {
     if (committed.kind === "committed") {
       await this.broadcastRunEvent(committed.run, committed.event);
     }
+    await this.runLogStorage().warn();
     return json({ run: publicRunRecord(committed.run) });
   }
 
   private async *runLogChunks(runID: string, reverse = false): AsyncGenerator<string> {
     const run = await this.getRun(runID);
+    if (run?.logEvicted) {
+      yield run.logEvicted === "storage_pressure"
+        ? "log evicted under storage pressure\n"
+        : "log expired under retention policy\n";
+      return;
+    }
     const terminalPrefix = run?.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))
       ? run.terminalLogPrefix
       : undefined;
@@ -19314,6 +19346,9 @@ export class FleetCoordinator {
     if (runPruneCursor !== undefined) {
       retainAlarm(now + 1000, "run-prune", runPruneCursor, now);
     }
+    if (await this.state.storage.get("maintenance:run-log-pending")) {
+      retainAlarm(now + 1000, "run-log-storage", "maintenance:run-log-pending", now);
+    }
     const runnerPrune =
       await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
     if (runnerPrune) {
@@ -20810,6 +20845,7 @@ export class FleetCoordinator {
       return;
     }
     let deleted = 0;
+    let prunedBytes = 0;
     let lastScanned: string | undefined;
     for (const [key, run] of page) {
       lastScanned = key;
@@ -20818,7 +20854,8 @@ export class FleetCoordinator {
         // oxlint-disable-next-line eslint/no-await-in-loop -- each run and its artifacts are removed before advancing the maintenance cursor.
         await this.deleteTerminalRun(run.id, cutoff);
         deleted += 1;
-        if (deleted >= terminalRunPruneBatchSize) {
+        prunedBytes += run.storedLogBytes ?? run.logBytes;
+        if (deleted >= terminalRunPruneBatchSize || prunedBytes >= 16 * 1024 * 1024) {
           break;
         }
       }
@@ -20832,26 +20869,7 @@ export class FleetCoordinator {
   }
 
   private async deleteTerminalRun(runID: string, cutoff: number): Promise<void> {
-    await this.state.runExclusive(async () => {
-      const current = await this.getRun(runID);
-      const terminalAt = current ? terminalRunTimestamp(current) : undefined;
-      if (
-        !current ||
-        terminalAt === undefined ||
-        terminalAt > cutoff ||
-        this.activeRunLogReaders.has(runID)
-      ) {
-        return;
-      }
-      await this.deleteStoragePrefix(runEventPrefix(runID));
-      await this.deleteStoragePrefix(`runevent-id:${runID}:`);
-      if (current.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))) {
-        await this.deleteStoragePrefix(current.terminalLogPrefix);
-      }
-      await this.deleteStoragePrefix(runLogChunkPrefix(runID));
-      await this.state.storage.delete(runLogKey(runID));
-      await this.state.storage.delete(runKey(runID));
-    });
+    await this.runLogStorage().evict(runID, "retention", cutoff);
   }
 
   private async deleteStoragePrefix(prefix: string): Promise<void> {
@@ -21406,6 +21424,7 @@ export class FleetCoordinator {
       const event = boundedRunEvent(runID, seq, now, input);
       const previousLeaseID = run.leaseID;
       applyRunEventSummary(run, event);
+      await this.runLogStorage().index(storage, run);
       if (
         validLeaseID(run.leaseID) &&
         (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))

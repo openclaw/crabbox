@@ -126,7 +126,7 @@ and retries transport failures, HTTP 429, and HTTP 5xx up to three times within
 the same event payload and stay ahead of later events in the bounded FIFO.
 The coordinator atomically commits the event, its sequence counter, and a small
 ID-to-sequence record. Matching retries return the original event; changed
-content conflicts. These IDs are removed with the run's normal retention cleanup.
+content conflicts. These IDs remain with the run record after log-payload retention cleanup.
 
 Before terminal recording, the CLI drains diagnostics for up to 30 seconds on
 these coordinators, then cancels remaining publication and joins the publisher.
