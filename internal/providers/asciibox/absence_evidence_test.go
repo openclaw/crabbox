@@ -158,3 +158,91 @@ func TestNativeBoxNotFoundPrefersJSONResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestFixedBoxReleaseReconcilesDisappearanceDuringStop(t *testing.T) {
+	nativeExit := boxNativeExit(t)
+	for _, test := range []struct {
+		name, inventory string
+		info            commandOutcome
+		inventoryErr    error
+		cancelOnAction  string
+		wantReleased    bool
+	}{
+		{name: "complete absence", inventory: `{"sandboxes":[]}`, wantReleased: true},
+		{name: "incomplete inventory", inventory: `{"sandboxes":[],"pageInfo":{"hasMore":true}}`},
+		{name: "inventory unavailable", inventoryErr: errors.New("inventory unavailable")},
+		{name: "still in inventory", inventory: `{"sandboxes":[{"id":"bx_1","createdAt":"2026-08-30T12:00:00Z"}]}`},
+		{name: "changed identity", inventory: `{"sandboxes":[{"id":"bx_1","createdAt":"2026-08-31T12:00:00Z"}]}`},
+		{name: "lookup denied", info: commandOutcome{result: core.LocalCommandResult{ExitCode: 1, Stdout: `{"status":403}`}, err: nativeExit}},
+		{name: "cancelled during confirmation", inventory: `{"sandboxes":[]}`, cancelOnAction: "list"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, _, req, _ := fixedBoxFixture(t)
+			lease, err := b.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			present := commandOutcome{result: core.LocalCommandResult{Stdout: `{"sandbox":{"id":"bx_1","createdAt":"2026-08-30T12:00:00Z"}}`}}
+			missing := test.info
+			if missing.err == nil {
+				missing = commandOutcome{result: core.LocalCommandResult{ExitCode: 1, Stdout: `{"status":404}`}, err: nativeExit}
+			}
+			runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+				"info": {present, present, present, present, present, present},
+				"stop": {{result: core.LocalCommandResult{}}},
+				"list": {{result: core.LocalCommandResult{Stdout: test.inventory}, err: test.inventoryErr}},
+			}}
+			runner.onAction = func(action string) {
+				if action == "stop" {
+					runner.outcomes["info"] = []commandOutcome{missing, missing}
+				}
+				if action == test.cancelOnAction {
+					cancel()
+				}
+			}
+			withFakeAPI(t, &client{apiKey: "box_test", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner})
+			outcome, err := b.ReleaseLeaseWithOutcome(ctx, core.ReleaseLeaseRequest{Lease: lease})
+			if (err == nil) != test.wantReleased || outcome.Terminal != test.wantReleased {
+				t.Fatalf("release err=%v terminal=%t, want released=%t", err, outcome.Terminal, test.wantReleased)
+			}
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || (claim.FixedCreateIntent.State == "released") != test.wantReleased {
+				t.Fatalf("claim state=%q err=%v", claim.FixedCreateIntent.State, err)
+			}
+			if claim.FixedCreateIntent.Attempt["deletion_operation_id"] != "" || claim.FixedCreateIntent.Attempt["deletion_completed"] != "" {
+				t.Fatal("disappearance invented a native deletion receipt")
+			}
+			stops := 0
+			for _, command := range runner.commands {
+				if strings.Contains(command, " stop ") {
+					stops++
+				}
+				if strings.Contains(command, " delete ") || strings.Contains(command, " extend ") {
+					t.Fatalf("disappearance caused another mutation: %s", command)
+				}
+			}
+			if stops != 1 {
+				t.Fatalf("stop count=%d, want 1", stops)
+			}
+		})
+	}
+}
+
+func TestFixedBoxReleaseRejectsAnotherBoxNotFound(t *testing.T) {
+	b, f, req, _ := fixedBoxFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.releaseHook = func(string) error { return &boxNotFoundError{id: "bx_other"} }
+	f.listHook = func() ([]boxData, error) { t.Fatal("wrong ID reached absence inventory"); return nil, nil }
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("another sandbox's 404 released the claim")
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent.State == "released" {
+		t.Fatalf("claim state=%q err=%v", claim.FixedCreateIntent.State, err)
+	}
+}
