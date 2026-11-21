@@ -2,31 +2,46 @@
 
 ## Unreleased
 
+## 0.84.0 - 2026-11-21
+
+### Highlights
+
+- **Keep coordinator control state available as run logs grow.** A storage budget evicts the oldest finished logs first, preserves run records, and explicitly reports evicted output. [PR 3217](https://github.com/openclaw/crabbox/pull/3217).
+- **Avoid repeated GitHub membership lookups during sign-in.** Positive organization checks are shared across coordinator isolates, reducing rate-limit failures. [PR 3216](https://github.com/openclaw/crabbox/pull/3216).
+- **Trust capacity and Spot cost decisions.** Capacity indexes recover across restarts, and AWS Spot quotes use the required IAM permission and expose failures instead of silently approving spend. [PR 3149](https://github.com/openclaw/crabbox/pull/3149), [PR 3151](https://github.com/openclaw/crabbox/pull/3151).
+- **Keep tailnet routing, ownership, and connections intact.** Validate Tailscale requests, preserve lease metadata and fallback access, enroll named exit nodes reliably, and report Pond health accurately. [PR 3154](https://github.com/openclaw/crabbox/pull/3154), [PR 3150](https://github.com/openclaw/crabbox/pull/3150), [PR 3153](https://github.com/openclaw/crabbox/pull/3153), [PR 3148](https://github.com/openclaw/crabbox/pull/3148), [PR 3152](https://github.com/openclaw/crabbox/pull/3152), [PR 3211](https://github.com/openclaw/crabbox/pull/3211), [PR 3208](https://github.com/openclaw/crabbox/pull/3208).
+- **Build and provision with refreshed dependencies and runtimes.** Update Go, coordinator packages, managed tools, and Actions pins; the coordinator dependency audit reports no known npm advisories. [PR 3219](https://github.com/openclaw/crabbox/pull/3219).
+
+### Upgrade notes
+
+- Run-log retention is a maximum, not a guarantee: storage pressure can evict the oldest finished run logs before their age limit. [PR 3217](https://github.com/openclaw/crabbox/pull/3217).
+- Operators maintaining custom coordinator AWS IAM policies must add `ec2:DescribeSpotPriceHistory` for Spot quotes. [PR 3151](https://github.com/openclaw/crabbox/pull/3151).
+- Source builds require Go 1.26.10 or newer; the pinned release toolchain is Go 1.27.4 and the managed Node.js version is 24.22.3. [PR 3219](https://github.com/openclaw/crabbox/pull/3219).
+- Lease requests with an exit node from flags, environment, or config must enable Tailscale; unrelated commands can still load disabled exit-node defaults. Malformed Tailscale tags are rejected before provisioning. [PR 3154](https://github.com/openclaw/crabbox/pull/3154).
+
+### Changed
+
+- Dependencies: refresh Go modules, coordinator packages, checksum-pinned managed runtimes and developer tools, and GitHub Actions pins; resolve the known coordinator npm advisories. [PR 3219](https://github.com/openclaw/crabbox/pull/3219). Thanks [Endor Labs](https://github.com/apps/endor-labs-pro).
+
 ### Fixed
 
-- Dependencies: refresh checksum-pinned developer tools and coordinator security dependencies while preserving owned toolchain upgrades. [PR 3219](https://github.com/openclaw/crabbox/pull/3219). Thanks [Endor Labs](https://github.com/apps/endor-labs-pro).
-- Islo: preserve acquisition-bound sandbox identity and creator attribution through SSH refreshes so non-kept runs clean up normally and stop advisories remain visible. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
-- Local history: omit unavailable execution exit codes after acquisition failures and show failed run status separately from recording state. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
-- Local Container: surface bounded bootstrap logs and process exit status before cleaning up failed acquisitions, even when the readiness budget has expired. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
-- Docs: name `tailscale debug prefs` in the exit-node troubleshooting guide. [PR 3163](https://github.com/openclaw/crabbox/pull/3163). Thanks @KrasimirKralev.
-
-- Pond: require unrestricted self-peering rules for healthy diagnostics and skip only complete policies during opt-in bootstrap. [PR 3208](https://github.com/openclaw/crabbox/pull/3208). Thanks @KrasimirKralev.
-
-- Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
-
-- Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning while allowing disabled exit-node defaults for unrelated commands; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.
-- Pond: require locally claimed members, preserve running forward ports during JSON inspection and repeated exports, retain daemon records on failed process inspection, and check recorded member ACL tags with accurate doctor documentation. [PR 3148](https://github.com/openclaw/crabbox/pull/3148). Thanks @coygeek.
-- Network/stop: restore provider SSH routes on automatic fallback, consistently report fallback notices, and prepare direct guest cleanup with the live endpoint and stored lease key. [PR 3153](https://github.com/openclaw/crabbox/pull/3153). Thanks @coygeek.
-- Tailscale: persist direct cloud metadata with lossless GCP labels, protect Hetzner lifecycle updates from diagnostic errors, prefer tailnet readiness for exit nodes with public fallback, and reject stale coordinator metadata after cleanup. [PR 3150](https://github.com/openclaw/crabbox/pull/3150). Thanks @coygeek.
-- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
-- Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
-- Checkpoints: reconcile pending AWS snapshot and AMI states in coordinator inventory, including existing checkpoints, with bounded polling and identity-checked verification writes. [PR 3146](https://github.com/openclaw/crabbox/pull/3146). Thanks @mkusaka.
-- Coordinator: recover capacity indexes at startup across retained lease history and restarts while preserving rollback completeness. [PR 3149](https://github.com/openclaw/crabbox/pull/3149). Thanks @mkusaka.
-- Authentication: share positive GitHub membership checks across Worker isolates through the regional Cache API while preserving authorization expiry and the Node fallback. [PR 3216](https://github.com/openclaw/crabbox/pull/3216). Thanks @mkusaka.
 - Coordinator: bound stored run logs, evict oldest terminal payloads under pressure while preserving run records, and expose capacity warnings with faster retention pruning. [PR 3217](https://github.com/openclaw/crabbox/pull/3217). Thanks @mkusaka.
-- Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
-- Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
+- Authentication: share positive GitHub membership checks across Worker isolates through the regional Cache API while preserving authorization expiry and the Node fallback. [PR 3216](https://github.com/openclaw/crabbox/pull/3216). Thanks @mkusaka.
+- Coordinator: recover capacity indexes at startup across retained lease history and restarts while preserving rollback completeness. [PR 3149](https://github.com/openclaw/crabbox/pull/3149). Thanks @mkusaka.
+- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
+- Checkpoints: reconcile pending AWS snapshot and AMI states in coordinator inventory, including existing checkpoints, with bounded polling and identity-checked verification writes. [PR 3146](https://github.com/openclaw/crabbox/pull/3146). Thanks @mkusaka.
+- Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
+- Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning while allowing disabled exit-node defaults for unrelated commands; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.
+- Tailscale: persist direct cloud metadata with lossless GCP labels, protect Hetzner lifecycle updates from diagnostic errors, prefer tailnet readiness for exit nodes with public fallback, and reject stale coordinator metadata after cleanup. [PR 3150](https://github.com/openclaw/crabbox/pull/3150). Thanks @coygeek.
+- Network/stop: restore provider SSH routes on automatic fallback, consistently report fallback notices, and prepare direct guest cleanup with the live endpoint and stored lease key. [PR 3153](https://github.com/openclaw/crabbox/pull/3153). Thanks @coygeek.
+- Pond: require locally claimed members, preserve running forward ports during JSON inspection and repeated exports, retain daemon records on failed process inspection, and check recorded member ACL tags with accurate doctor documentation. [PR 3148](https://github.com/openclaw/crabbox/pull/3148). Thanks @coygeek.
+- Islo and local diagnostics: preserve acquisition-bound sandbox identity and creator attribution through SSH refreshes, retain cleanup advisories, report unknown exit codes honestly, and surface bounded Local Container bootstrap logs before failed-acquisition cleanup. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+- Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
+- Pond: require unrestricted self-peering rules for healthy diagnostics and skip only complete policies during opt-in bootstrap. [PR 3208](https://github.com/openclaw/crabbox/pull/3208). Thanks @KrasimirKralev.
+- Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. [PR 3161](https://github.com/openclaw/crabbox/pull/3161). Thanks @etzelm.
+- Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment, credential management, and placement changes while preserving ordinary-user listing and scoped host-agent authentication. [PR 3199](https://github.com/openclaw/crabbox/pull/3199). Thanks @vincentkoc.
 - Daytona: verify configured snapshots are active before reporting readiness or attempting allocation, and report account-default snapshot readiness as unverified. [PR 3218](https://github.com/openclaw/crabbox/pull/3218). Thanks @vincentkoc.
+- Docs: name `tailscale debug prefs` in the exit-node troubleshooting guide. [PR 3163](https://github.com/openclaw/crabbox/pull/3163). Thanks @KrasimirKralev.
 
 ## 0.83.2 - 2026-11-15
 
