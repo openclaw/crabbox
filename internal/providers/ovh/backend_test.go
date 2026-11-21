@@ -39,6 +39,7 @@ type fakeAPI struct {
 	getInstanceFn        func(context.Context) (Instance, error)
 	deleteInstanceErr    error
 	deleteInstanceErrors []error
+	onDeleteInstance     func()
 	deleteKeyErr         error
 	listInstancesErr     error
 	listErrAfterCreate   bool
@@ -185,6 +186,9 @@ func (f *fakeAPI) CreateInstance(_ context.Context, _ string, req InstanceCreate
 
 func (f *fakeAPI) DeleteInstance(_ context.Context, _, instanceID string) error {
 	f.mutatingCalls++
+	if f.onDeleteInstance != nil {
+		f.onDeleteInstance()
+	}
 	f.deletedInstances = append(f.deletedInstances, instanceID)
 	if len(f.deleteInstanceErrors) > 0 {
 		err := f.deleteInstanceErrors[0]

@@ -120,6 +120,15 @@ POST   /cloud/project/{projectId}/instance
 DELETE /cloud/project/{projectId}/instance/{instanceId}
 ```
 
+Native checkpoints additionally need:
+
+```text
+POST   /cloud/project/{projectId}/instance/{instanceId}/snapshot
+GET    /cloud/project/{projectId}/snapshot
+GET    /cloud/project/{projectId}/snapshot/{snapshotId}
+DELETE /cloud/project/{projectId}/snapshot/{snapshotId}
+```
+
 If a live smoke fails with a permission error, keep the error output
 secret-safe and adjust the OVH credential grants before retrying. Do not broaden
 permissions inside scripts.
@@ -208,6 +217,77 @@ crabbox cleanup --provider ovh --dry-run
 crabbox cleanup --provider ovh
 ```
 
+## Native Checkpoints And Prebaked Images
+
+Direct Linux leases can capture an OVH Public Cloud **instance snapshot** as an
+`ovh-snapshot` checkpoint, so later leases boot from it instead of a stock
+Ubuntu or Debian image plus the full managed bootstrap:
+
+```sh
+crabbox warmup --provider ovh --slug my-app
+crabbox checkpoint create --provider ovh --id my-app --mode native
+crabbox checkpoint list --verify
+crabbox checkpoint fork <checkpoint-id>
+crabbox image delete <snapshot-id> --provider ovh --region BHS5
+```
+
+A lease that joined, or was asked to join, a tailnet (`--tailscale`) cannot be captured: guest preparation does not reset Tailscale state, so the snapshot would carry the source's tailnet identity and a fork would contend for it. Crabbox refuses before touching the guest or OVH; create the checkpoint from a lease without `--tailscale`.
+
+`--strategy image` is rejected: the OVH primitive is an instance snapshot, so
+use `--strategy disk-snapshot`. Retiring the source with `--retire-source` is
+unsupported; keep the source lease and stop it normally.
+
+Create re-reads the instance, requires the complete ownership predicate and the
+exact local lease claim, holds that claim fence while it runs
+`cloud-init clean --logs; sync` on the guest, and asks OVH to snapshot it. The
+snapshot is named `crabbox-<checkpoint-id>` (for example
+`crabbox-chk_0123abcd`); Crabbox refuses to start if that name already exists.
+OVH's snapshot request returns the new snapshot id; Crabbox checks that the
+snapshot carries the requested name (falling back to a unique-name lookup in the
+lease region if no id comes back) and journals its id in the local record before
+polling for `active`. `--wait=false` records the pending snapshot.
+
+**OVH snapshots carry no labels or tags.** Unlike Hetzner, ownership therefore
+rests on the local checkpoint record (checkpoint id, lease, source instance,
+project, and region) plus the exact snapshot name. Verify, fork, and delete
+re-read the snapshot and refuse any whose id, name, or region disagrees with the
+record, or when the configured `ovh.projectId` differs from the project that
+captured it. If the local record is lost, Crabbox will **not** delete the
+snapshot: it cannot prove ownership. List snapshots with the OVHcloud console or
+`GET /cloud/project/{projectId}/snapshot?region=<region>` and remove the
+`crabbox-chk_...` entry yourself.
+
+`checkpoint fork` pins the recorded region and boots through the normal OVH
+create path with the snapshot id as `ovh.image`. A Crabbox checkpoint snapshot
+is accepted as an image by exact id only when it is `active`, in the lease
+region, and named `crabbox-chk_...`; arbitrary private images still need to be
+Debian or Ubuntu public images. The flavor must have a disk at least as large
+as the source's; pass `--type` to choose another flavor. Because the snapshot
+already holds the installed baseline, the managed bootstrap verifies the baked
+readiness manifest and skips the baseline package transaction, as described in
+[Prebaked images](../features/prebaked-images.md).
+
+While a checkpoint of a lease is unresolved (for example OVH accepted the snapshot but the response was lost before its id was recorded), `stop` and `cleanup` refuse to delete that lease's instance, as for Hetzner and the other native checkpoints: core holds such a record as an unresolved capture and does not unlock it automatically. A definitive OVH rejection (an HTTP 4xx other than a throttle or timeout) proves nothing was submitted and drops the reservation instead; the delete also runs under the same claim fence as snapshot creation, so a release cannot remove the source mid-capture.
+
+`crabbox image delete <snapshot-id> --provider ovh` runs directly (no
+coordinator admin auth), rejects `--project`, and works only when exactly one
+local `ovh-snapshot` record claims that id. `checkpoint delete` removes the
+provider snapshot before the local record; `--local-only` keeps the snapshot.
+
+**Qualification and the reaper do not apply.** The image qualification workflow
+and its reaper mint and retire coordinator-managed AMIs through the Cloudflare
+broker. OVH is direct-only and has no coordinator image catalog, so it has no
+`image create`, `image promote`, or qualification path; the checkpoint lifecycle
+above is its whole image story, as for direct Hetzner.
+
+**What it saves.** A forked lease skips the stock-image bootstrap work that the
+baked snapshot already contains (OS package baseline, language toolchains,
+optional desktop and browser packages). It still pays instance creation, the
+snapshot restore, SSH readiness, and per-lease configuration. This is not
+measured here; compare `warmup` timing from a stock image and from a fork on
+your own project before relying on it. Snapshots are billed by OVH while they
+exist, so delete ones you no longer need.
+
 ## Guarded Live Smoke
 
 The repeatable live check is opt-in:
@@ -252,6 +332,8 @@ instance in `crabbox list --provider ovh --json` or the OVHcloud console.
 - **Tailscale**: yes through the standard Linux cloud-init path when a direct
   Tailscale auth key is configured.
 - **Desktop / browser / code**: not advertised in Phase 1.
+- **Checkpoint / fork / snapshot**: yes for direct Linux leases, as
+  `ovh-snapshot` (see above).
 - **Cleanup**: yes, claim-backed only.
 - **Coordinator**: never; direct CLI only.
 

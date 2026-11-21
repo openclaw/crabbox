@@ -748,6 +748,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCPDisk
 	case checkpointKindHetzner:
 		return checkpointKindHetzner
+	case checkpointKindOVH:
+		return checkpointKindOVH
 	case checkpointKindMachine0:
 		return checkpointKindMachine0
 	case checkpointKindDockerCommit:
@@ -768,6 +770,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCP
 	case "hetzner":
 		return checkpointKindHetzner
+	case "ovh":
+		return checkpointKindOVH
 	case "machine0":
 		return checkpointKindMachine0
 	case "parallels":
@@ -783,7 +787,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindOVH, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""

@@ -22,7 +22,7 @@ tools, caches, services. Stored in provider-managed or provider-specific
 artifact storage; cloud backends may incur storage costs. Recorded as one of
 `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
-`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
+`gcp-disk-snapshot`, `hetzner-snapshot`, `ovh-snapshot`, `machine0-image`,
 `parallels-snapshot`, `daytona-snapshot`, `incus-image`, or
 `cloudflare-container-snapshot`; Hyper-V uses `hyperv-vhdx`.
 

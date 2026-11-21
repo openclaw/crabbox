@@ -50,6 +50,13 @@ Provider-owned image storage is always the source of truth for image bytes:
   remain coordinator operations and are unsupported for Hetzner. Direct
   `image delete --provider hetzner` is limited to a snapshot claimed by exactly
   one local `hetzner-snapshot` checkpoint record.
+- **OVHcloud** — instance snapshots live in the Public Cloud project. A direct
+  native checkpoint creates, verifies, forks, and deletes one. Snapshots carry no
+  labels, so ownership is the local checkpoint record plus the
+  `crabbox-<checkpoint-id>` name. `image create`, `image promote`, and the image
+  qualification workflow are coordinator/AWS operations and do not apply. Direct
+  `image delete --provider ovh` is limited to a snapshot claimed by exactly one
+  local `ovh-snapshot` checkpoint record. See [OVHcloud](../providers/ovh.md).
 - **Delegated runners** (for example Blacksmith) — images are owned by the
   provider's runner infrastructure, not by Crabbox.
 
@@ -187,11 +194,11 @@ artifacts. The direct Hetzner deletion exception is described below.
   `--fsr-az <az>` and capability declarations.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.
-- `crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner]` — remove a
+- `crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner|ovh]` — remove a
   Crabbox-created provider image. Deletion requires stored Crabbox ownership
   metadata and refuses unrelated provider-native image or snapshot IDs. For
-  Hetzner, this runs directly and requires exactly one matching local native
-  checkpoint record; it does not provide general delete-by-ID access.
+  Hetzner and OVH, this runs directly and requires exactly one matching local
+  native checkpoint record; it does not provide general delete-by-ID access.
 
 Promoting a coordinator-managed AWS AMI or Azure snapshot creates a durable pin
 alongside each matching default, scoped catalog entry, or AWS catalog-only
