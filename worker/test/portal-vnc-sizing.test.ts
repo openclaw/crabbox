@@ -87,6 +87,7 @@ async function viewer(
     }
     set resizeSession(value: boolean) {
       // A request must never be issued before viewOnly is cleared.
+      // oxlint-disable-next-line vitest/no-conditional-expect -- only resize requests require controller access.
       if (value) expect(this.viewOnly).toBe(false);
       this.resize = value;
       this.changes.push(value);
