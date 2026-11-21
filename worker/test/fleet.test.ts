@@ -15145,6 +15145,9 @@ describe("fleet lease identity and idle", () => {
             if (url.origin !== "https://daytona.example") {
               throw new Error(`unexpected provider origin: ${url.origin}`);
             }
+            if (operation === "GET /api/snapshots/test-ready") {
+              return jsonResponse({ id: "snapshot-one", name: "test-ready", state: "active" });
+            }
             if (operation === "POST /api/sandbox") {
               createBody = (await providerRequest.json()) as Record<string, unknown>;
               const ttlMinutes = createBody["ttlMinutes"];
@@ -15300,6 +15303,9 @@ describe("fleet lease identity and idle", () => {
         expect.soft(Boolean(finalLease?.failureError)).toBe(responseLost);
         expect.soft(storage.alarm()).toBeUndefined();
         expect.soft(providerRequests).not.toContain("GET /api/sandbox");
+        expect(
+          providerRequests.filter((operation) => operation === "GET /api/snapshots/test-ready"),
+        ).toHaveLength(1);
         expect
           .soft(providerRequests.filter((operation) => operation === "POST /api/sandbox"))
           .toHaveLength(1);
@@ -54966,6 +54972,9 @@ describe("fleet identity", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const daytonaRequest = input instanceof Request ? input : new Request(input, init);
         daytonaRequests.push(daytonaRequest.clone());
+        if (new URL(daytonaRequest.url).pathname === "/api/snapshots/crabbox-ready") {
+          return Response.json({ id: "snapshot-one", name: "crabbox-ready", state: "active" });
+        }
         return Response.json({
           items: [
             {
@@ -55004,16 +55013,131 @@ describe("fleet identity", () => {
             control_plane: "coordinator",
             data_plane: "ssh-rsync",
             snapshot: "configured",
+            snapshot_state: "active",
             leases: "1",
           },
         },
       ],
     });
-    expect(daytonaRequests).toHaveLength(1);
+    expect(daytonaRequests).toHaveLength(2);
+    expect(daytonaRequests.every((providerRequest) => providerRequest.method === "GET")).toBe(true);
     expect(daytonaRequests[0]?.method).toBe("GET");
     expect(daytonaRequests[0]?.headers.get("authorization")).toBe("Bearer live-key");
     expect(new URL(daytonaRequests[0]!.url).pathname).toBe("/api/sandbox");
+    expect(new URL(daytonaRequests[1]!.url).pathname).toBe("/api/snapshots/crabbox-ready");
   });
+
+  it("reports the Daytona account-default snapshot as unverified without a lookup", async () => {
+    const operations: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const providerRequest = new Request(input, init);
+        operations.push(`${providerRequest.method} ${new URL(providerRequest.url).pathname}`);
+        return Response.json({ items: [] });
+      }),
+    );
+    const fleet = testFleet(
+      undefined,
+      {},
+      {
+        DAYTONA_CRABBOX_KEY: "synthetic-daytona-key",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+        CRABBOX_DAYTONA_SNAPSHOT: "  ",
+      },
+    );
+
+    const response = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      checks: [
+        {
+          status: "warning",
+          check: "daytona-fallback",
+          message: expect.stringContaining("snapshot=account-default-unverified"),
+          details: { snapshot: "account-default", snapshot_state: "unverified" },
+        },
+      ],
+    });
+    expect(operations).toEqual(["GET /api/sandbox"]);
+  });
+
+  it.each(
+    ["inactive", "missing", "unknown", "unreadable", "network"].flatMap((failure) =>
+      (["PUT", "POST"] as const).map((method) => ({ failure, method })),
+    ),
+  )(
+    "rejects a $failure Daytona snapshot before $method provider dispatch",
+    async ({ failure, method }) => {
+      const storage = new MemoryStorage();
+      const operations: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const providerRequest = new Request(input, init);
+          const operation = `${providerRequest.method} ${new URL(providerRequest.url).pathname}`;
+          operations.push(operation);
+          if (operation === "GET /api/sandbox") return Response.json({ items: [] });
+          if (operation !== "GET /api/snapshots/test-ready") {
+            throw new Error(`unexpected provider operation: ${operation}`);
+          }
+          if (failure === "missing") return new Response("not found", { status: 404 });
+          if (failure === "unreadable") return new Response("invalid JSON");
+          if (failure === "network") throw new TypeError("snapshot request failed");
+          return Response.json({
+            id: "snapshot-one",
+            name: "test-ready",
+            ...(failure === "inactive" ? { state: "inactive" } : {}),
+          });
+        }),
+      );
+      const fleet = testFleet(
+        storage,
+        {},
+        {
+          DAYTONA_CRABBOX_KEY: "synthetic-daytona-key",
+          CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+          CRABBOX_DAYTONA_SNAPSHOT: "  test-ready  ",
+        },
+      );
+      const readiness = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+      await expect(readiness.json()).resolves.toMatchObject({
+        checks: [{ status: "failed", check: "daytona-fallback" }],
+      });
+
+      const leaseID = "cbx_abcdef123499";
+      const response = await fleet.fetch(
+        request(method, method === "PUT" ? `/v1/leases/${leaseID}` : "/v1/leases", {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          body: {
+            leaseID,
+            slug: "snapshot-check",
+            provider: "daytona",
+            sshPublicKey: "ssh-ed25519 test",
+            ttlSeconds: 600,
+            idleTimeoutSeconds: 600,
+          },
+        }),
+      );
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain("creation unresolved");
+      expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+      const attempt = storage.value<CreateAttemptRecord>(`create-attempt:${leaseID}`);
+      expect(attempt).toMatchObject({
+        requestedLeaseID: leaseID,
+        version: method === "PUT" ? 2 : 1,
+        state: "pending",
+      });
+      expect(attempt?.canonicalLeaseID).toBeUndefined();
+      expect(attempt?.cloudID).toBeUndefined();
+      expect(attempt?.generation).toBeUndefined();
+      expect(operations).toEqual([
+        "GET /api/sandbox",
+        "GET /api/snapshots/test-ready",
+        "GET /api/snapshots/test-ready",
+      ]);
+    },
+  );
 
   it("reports AWS capacity quota readiness before a lease is requested", async () => {
     const ec2Actions: Array<string | null> = [];
