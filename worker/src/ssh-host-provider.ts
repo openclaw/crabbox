@@ -6,6 +6,7 @@ import { putLeaseRecord } from "./lease-record-store";
 import type { PoolAccessGrant, ProviderPoolAccess } from "./ready-pool-access";
 import { serveCloudProvider } from "./serve-provider";
 import { SSHHostCoordinator, hostOnlineMS, hostPrefix, type SSHHost } from "./ssh-host";
+import { hostCredentialCurrent } from "./ssh-host-auth";
 import type { Env, LeaseRecord, ReadyPoolImageIdentity } from "./types";
 
 class HostPoolAccess implements ProviderPoolAccess {
@@ -31,6 +32,7 @@ class HostPoolAccess implements ProviderPoolAccess {
       if (
         operation === "prepare" &&
         (h.quarantine ||
+          !hostCredentialCurrent(h) ||
           !h.enabled ||
           h.draining ||
           Date.now() - h.lastHeartbeat >= hostOnlineMS ||
