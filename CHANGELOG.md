@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Dependencies: refresh checksum-pinned developer tools and coordinator security dependencies while preserving owned toolchain upgrades. [PR 3219](https://github.com/openclaw/crabbox/pull/3219). Thanks [Endor Labs](https://github.com/apps/endor-labs-pro).
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 
