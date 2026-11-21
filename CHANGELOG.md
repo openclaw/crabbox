@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Docs: name `tailscale debug prefs` in the exit-node troubleshooting guide. [PR 3163](https://github.com/openclaw/crabbox/pull/3163). Thanks @KrasimirKralev.
+
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 
