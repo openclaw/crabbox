@@ -1398,6 +1398,8 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			return finish()
 		}
 		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) || coordinatorExpiryCleanupCompleted(released) {
+			// Failed or retrying cleanup may leave the resource and its guest files.
+			outcome.TeardownAccepted = !coordinatorReleaseCleanupFailed(released)
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
 			return false, nil
 		}
