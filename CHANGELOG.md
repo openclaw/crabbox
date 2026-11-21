@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Pond: require unrestricted self-peering rules for healthy diagnostics and skip only complete policies during opt-in bootstrap. [PR 3208](https://github.com/openclaw/crabbox/pull/3208). Thanks @KrasimirKralev.
+
 - Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
 
 - Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning while allowing disabled exit-node defaults for unrelated commands; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.

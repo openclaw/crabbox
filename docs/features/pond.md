@@ -283,6 +283,12 @@ policy shapes fail closed with the manual snippet below. If the control plane
 does not expose a Tailscale-compatible policy API (e.g. Headscale), lease
 creation is not blocked.
 
+A self-peering rule counts as present only when it admits every port and
+protocol between pond members: a grant with `"ip": ["*"]`, or an `acls` row to
+`<tag>:*` without `proto`, and neither restricted by `srcPosture`. A narrower
+existing rule (for example `"ip": ["tcp:22"]`) is left in place and the full
+rule is added next to it; until then `doctor --pond` reports the row as missing.
+
 Without the opt-in, `crabbox doctor --pond <name>` verifies the required policy
 row (using `TS_API_KEY` read-only) and points you at this document if it is
 missing. The broker never sees Tailscale credentials.

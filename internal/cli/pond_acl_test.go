@@ -703,3 +703,51 @@ func TestApplyLeaseCreateFlagsValidatesBeforePondACLBootstrap(t *testing.T) {
 		})
 	}
 }
+
+func TestPondACLRestrictedSelfPeeringRowsAreNotComplete(t *testing.T) {
+	tag := pondTailscaleTag("user", "alpha")
+	owners := `"tagOwners":{"` + tag + `":["autogroup:admin"]}`
+	for _, tc := range []struct {
+		name     string
+		row      string
+		complete bool
+	}{
+		{"grant wildcard", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"]}]`, true},
+		{"grant wildcard among entries", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["tcp:22","*"]}]`, true},
+		{"grant ssh only", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["tcp:22"]}]`, false},
+		{"grant source posture", `"grants":[{"src":["TAG"],"dst":["TAG"],"ip":["*"],"srcPosture":["posture:latest"]}]`, false},
+		{"acl wildcard", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"]}]`, true},
+		{"acl udp only", `"acls":[{"action":"accept","proto":"udp","src":["TAG"],"dst":["TAG:*"]}]`, false},
+		{"acl numeric tcp only", `"acls":[{"action":"accept","proto":6,"src":["TAG"],"dst":["TAG:*"]}]`, false},
+		{"acl source posture", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:*"],"srcPosture":["posture:latest"]}]`, false},
+		{"acl ssh only", `"acls":[{"action":"accept","src":["TAG"],"dst":["TAG:22"]}]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := strings.ReplaceAll(tc.row, "TAG", tag)
+			policy := "{" + owners + "," + row + "}"
+			if got := pondACLRowPresent(policy, tag); got != tc.complete {
+				t.Fatalf("pondACLRowPresent = %v, want %v", got, tc.complete)
+			}
+			stub := &stubPondTailnetACLClient{policy: policy, etag: `"v1"`}
+			if err := pondACLEnsure(context.Background(), stub, "-", "user", "alpha"); err != nil {
+				t.Fatalf("pondACLEnsure: %v", err)
+			}
+			wantPuts := int32(1)
+			if tc.complete {
+				wantPuts = 0
+			}
+			if got := atomic.LoadInt32(&stub.puts); got != wantPuts {
+				t.Fatalf("PUT count = %d, want %d", got, wantPuts)
+			}
+			if tc.complete {
+				return
+			}
+			if !strings.Contains(stub.lastBody, row[:len(row)-1]) {
+				t.Fatalf("existing row was not kept in place:\n%s", stub.lastBody)
+			}
+			if !pondACLRowPresent(stub.lastBody, tag) {
+				t.Fatalf("ensured policy still lacks the full self-peering row:\n%s", stub.lastBody)
+			}
+		})
+	}
+}
