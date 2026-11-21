@@ -359,7 +359,8 @@ func (s *nativeRuntimeScope) afterRelease(ctx context.Context, lease string, bac
 		// remains usable until the late workspace-owner finalizer runs.
 		return nil
 	}
-	if outcome.Terminal && !preserves {
+	if (outcome.Terminal || outcome.TeardownAccepted && releaseErr == nil) && !preserves {
+		// Accepted asynchronous teardown deletes the guest with the resource.
 		return s.finalizeLease(ctx, lease, true, nil)
 	}
 	return s.finalizeLease(ctx, lease, false, errors.Join(errors.New("lease release was not confirmed; no further runtime cleanup attempted"), releaseErr))

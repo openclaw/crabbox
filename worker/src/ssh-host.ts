@@ -9,6 +9,17 @@ import { requestOrg } from "./org-identity";
 import { publicLeaseRecord } from "./org-records";
 import { poolPublicKey } from "./ready-pool-access";
 import { hostKeyFingerprint } from "./serve";
+import {
+  authenticateHostCredential,
+  hostCredentialCurrent,
+  hostUsesCredential,
+  hostCredentialRequest,
+  hostCredentialRouteAllowed,
+  sameHostCredential,
+  validHostCredential,
+  type HostCredential,
+  type HostCleanupBinding,
+} from "./ssh-host-auth";
 import { pendingHostRelays, closeHostRelays } from "./ssh-host-relay";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord, TargetOS } from "./types";
 
@@ -47,6 +58,30 @@ export interface SSHHost {
   leaseID?: string;
   quarantine?: string;
   frontDoor?: { hostKey: string; fingerprint: string };
+  authMode?: "host";
+  credential?: HostCredential;
+}
+function completedHostCleanup(
+  h: SSHHost,
+  l: LeaseRecord | undefined,
+  binding: HostCleanupBinding,
+): boolean {
+  const a = l?.sshHostAllocation;
+  return Boolean(
+    !h.leaseID &&
+    l &&
+    terminal(l) &&
+    leaseProviderCleanupConfirmed(l) &&
+    l.org === h.org &&
+    l.id === binding.leaseID &&
+    a?.hostID === h.id &&
+    a.operator === h.owner &&
+    h.generation === binding.generation &&
+    a.generation === binding.generation &&
+    a.accessGeneration === binding.accessGeneration &&
+    a.cleanGeneration === binding.accessGeneration &&
+    a.operation === "idle",
+  );
 }
 interface HostReport {
   leaseID: string;
@@ -69,9 +104,22 @@ function publicHost(h: SSHHost) {
     capabilities: h.capabilities,
     template: h.template,
     runtime: h.runtime,
+    authMode: hostUsesCredential(h) ? "host" : "operator",
     enabled: h.enabled,
     draining: h.draining,
-    online: Date.now() - h.lastHeartbeat < hostOnlineMS,
+    online: hostCredentialCurrent(h) && Date.now() - h.lastHeartbeat < hostOnlineMS,
+    ...(h.credential
+      ? {
+          credential: {
+            mode: "host",
+            purpose: h.credential.purpose,
+            version: h.credential.version,
+            generation: h.credential.generation,
+            expiresAt: h.credential.expiresAt,
+            revoked: Boolean(h.credential.revokedAt),
+          },
+        }
+      : {}),
     state: h.quarantine ? "quarantined" : h.leaseID ? "allocated" : "available",
     ...(h.quarantine ? { reason: h.quarantine } : {}),
   };
@@ -92,6 +140,11 @@ export class SSHHostCoordinator {
     );
   }
   async route(r: Request, parts: string[]): Promise<Response> {
+    if (hostCredentialRequest(r)) {
+      if (!hostCredentialRouteAllowed(r) || parts.length !== 4 || parts[3] !== "heartbeat")
+        return json({ error: "host_scope_forbidden" }, { status: 403 });
+      return this.heartbeat(r, parts[2]!, await readJson(r));
+    }
     if (!requestOwner(r) || requestOwner(r) === "unknown")
       return json({ error: "identity_required" }, { status: 403 });
     if (parts.length === 2 && r.method === "GET") {
@@ -102,8 +155,15 @@ export class SSHHostCoordinator {
     }
     if (parts.length === 2 && r.method === "POST") return this.enroll(r, await readJson(r));
     if (!idPattern.test(parts[2] ?? "")) return json({ error: "not_found" }, { status: 404 });
-    if (parts[3] === "heartbeat" && r.method === "POST")
+    if (parts.length === 4 && parts[3] === "heartbeat" && r.method === "POST")
       return this.heartbeat(r, parts[2]!, await readJson(r));
+    if (
+      parts.length === 5 &&
+      parts[3] === "credential" &&
+      r.method === "POST" &&
+      ["revoke", "reissue", "recover"].includes(parts[4]!)
+    )
+      return this.changeCredential(r, parts[2]!, parts[4]!, await readJson(r));
     if (parts.length === 3 && (r.method === "PATCH" || r.method === "DELETE")) {
       if (!isAdminRequest(r)) return json({ error: "forbidden" }, { status: 403 });
       const input =
@@ -123,6 +183,8 @@ export class SSHHostCoordinator {
           (input.draining !== undefined && typeof input.draining !== "boolean")
         )
           return json({ error: "invalid_host_policy" }, { status: 400 });
+        if (input.enabled && !hostCredentialCurrent(h))
+          return json({ error: "host_credential_inactive" }, { status: 409 });
         if (input.enabled !== undefined) h.enabled = input.enabled;
         if (input.draining !== undefined) h.draining = input.draining;
         await s.put(hostPrefix + h.id, h);
@@ -131,7 +193,10 @@ export class SSHHostCoordinator {
     }
     return json({ error: "not_found" }, { status: 404 });
   }
-  private async enroll(r: Request, input: Partial<SSHHost>): Promise<Response> {
+  private async enroll(
+    r: Request,
+    input: Partial<SSHHost> & { hostKey?: string },
+  ): Promise<Response> {
     if (!isAdminRequest(r)) return json({ error: "forbidden" }, { status: 403 });
     if (
       !idPattern.test(input.id ?? "") ||
@@ -147,11 +212,27 @@ export class SSHHostCoordinator {
         : input.runtime !== "native-user")
     )
       return json({ error: "invalid_host" }, { status: 400 });
+    let frontDoor: SSHHost["frontDoor"];
+    if (input.credential !== undefined) {
+      if (!validHostCredential(input.credential, 1) || !textValue(input.hostKey, 1024))
+        return json({ error: "invalid_host_credential" }, { status: 400 });
+      try {
+        frontDoor = {
+          hostKey: input.hostKey,
+          fingerprint: await hostKeyFingerprint(input.hostKey),
+        };
+      } catch {
+        return json({ error: "invalid_host_key" }, { status: 400 });
+      }
+    } else if (input.hostKey !== undefined)
+      return json({ error: "invalid_host_credential" }, { status: 400 });
     return this.commit(async (s) => {
       const key = hostPrefix + input.id;
       const prior = await s.get<SSHHost>(key);
       if (prior) {
         if (
+          !sameHostCredential(prior.credential, input.credential) ||
+          (input.credential !== undefined && prior.frontDoor?.hostKey !== input.hostKey) ||
           prior.owner !== requestOwner(r) ||
           prior.org !== requestOrg(r, this.env) ||
           prior.name !== input.name ||
@@ -162,7 +243,10 @@ export class SSHHostCoordinator {
           JSON.stringify(prior.capabilities) !== JSON.stringify(input.capabilities)
         )
           return json({ error: "host_enrollment_conflict" }, { status: 409 });
-        return json({ host: publicHost(prior) });
+        return json({
+          host: publicHost(prior),
+          ...(prior.credential ? { identity: this.identity(prior) } : {}),
+        });
       }
       const inventory = await s.list({ prefix: hostPrefix, limit: 1024 });
       if (inventory.size >= 1024) return json({ error: "host_inventory_limit" }, { status: 409 });
@@ -180,10 +264,141 @@ export class SSHHostCoordinator {
         draining: false,
         lastHeartbeat: 0,
         generation: 0,
+        ...(input.credential
+          ? {
+              authMode: "host",
+              credential: {
+                purpose: "agent",
+                version: 1,
+                generation: 1,
+                tokenHash: input.credential.tokenHash,
+                expiresAt: input.credential.expiresAt,
+              },
+              frontDoor: frontDoor!,
+            }
+          : {}),
       };
       await s.put(key, host);
-      return json({ host: publicHost(host) }, { status: 201 });
+      return json(
+        { host: publicHost(host), ...(host.credential ? { identity: this.identity(host) } : {}) },
+        { status: 201 },
+      );
     });
+  }
+  private identity(h: SSHHost) {
+    return {
+      id: h.id,
+      owner: h.owner,
+      org: h.org,
+      hostKey: h.frontDoor!.hostKey,
+      purpose: h.credential!.purpose,
+      ...(h.credential!.cleanup ? { cleanup: h.credential!.cleanup } : {}),
+      generation: h.credential!.generation,
+      expiresAt: h.credential!.expiresAt,
+    };
+  }
+  private async changeCredential(
+    r: Request,
+    id: string,
+    action: string,
+    input: { expectedGeneration?: number; credential?: HostCredential; hostKey?: string },
+  ): Promise<Response> {
+    if (!isAdminRequest(r)) return json({ error: "forbidden" }, { status: 403 });
+    const response = await this.commit(async (s) => {
+      const h = await s.get<SSHHost>(hostPrefix + id);
+      if (!h || h.org !== requestOrg(r, this.env))
+        return json({ error: "not_found" }, { status: 404 });
+      if (!h.credential) return json({ error: "host_credential_not_scoped" }, { status: 409 });
+      const recoveryLeaseID = action === "recover" ? input.credential?.cleanup?.leaseID : undefined;
+      const leaseID = h.leaseID ?? recoveryLeaseID;
+      const l = leaseID ? await s.get<LeaseRecord>(`lease:${leaseID}`) : undefined;
+      if (action === "reissue" || action === "recover") {
+        if (!h.draining || h.enabled)
+          return json({ error: "host_cleanup_required" }, { status: 409 });
+        const purpose = action === "recover" ? "cleanup" : "agent";
+        if (
+          !Number.isSafeInteger(input.expectedGeneration) ||
+          !validHostCredential(input.credential, input.expectedGeneration! + 1, purpose) ||
+          input.hostKey !== h.frontDoor?.hostKey
+        )
+          return json({ error: "invalid_host_credential" }, { status: 400 });
+        if (purpose === "cleanup") {
+          const bound = input.credential.cleanup!;
+          const a = l?.sshHostAllocation;
+          if (
+            !completedHostCleanup(h, l, bound) &&
+            (!l ||
+              !terminal(l) ||
+              !a ||
+              a.operation !== "clean" ||
+              l.id !== bound.leaseID ||
+              a.hostID !== h.id ||
+              h.generation !== bound.generation ||
+              a.generation !== bound.generation ||
+              a.accessGeneration !== bound.accessGeneration)
+          )
+            return json({ error: "host_recovery_custody_mismatch" }, { status: 409 });
+        } else if (h.leaseID || h.quarantine)
+          return json({ error: "host_cleanup_required" }, { status: 409 });
+        if (
+          h.credential.generation === input.expectedGeneration! + 1 &&
+          sameHostCredential(h.credential, input.credential)
+        )
+          return json({ host: publicHost(h), identity: this.identity(h) });
+        if (h.credential.generation !== input.expectedGeneration)
+          return json({ error: "host_credential_conflict" }, { status: 409 });
+        h.credential = {
+          purpose,
+          version: 1,
+          generation: input.credential.generation,
+          tokenHash: input.credential.tokenHash,
+          expiresAt: input.credential.expiresAt,
+          ...(input.credential.cleanup ? { cleanup: input.credential.cleanup } : {}),
+        };
+      } else {
+        h.credential.revokedAt ??= new Date().toISOString();
+      }
+      h.authMode = "host";
+      h.enabled = false;
+      h.lastHeartbeat = 0;
+      // Commit invalidation before contacting relay backends. Retain exact closure
+      // targets until every close succeeds, including when a Durable Object is down.
+      await s.put(hostPrefix + h.id, h);
+      return json({
+        host: publicHost(h),
+        identity: this.identity(h),
+        ...(l?.sshHostAllocation
+          ? {
+              custody: {
+                leaseID: l.id,
+                generation: l.sshHostAllocation.generation,
+                accessGeneration: l.sshHostAllocation.accessGeneration,
+              },
+            }
+          : {}),
+      });
+    });
+    if (!response.ok) return response;
+    try {
+      await this.commit(async (s) => {
+        const h = await s.get<SSHHost>(hostPrefix + id);
+        const l = h?.leaseID ? await s.get<LeaseRecord>(`lease:${h.leaseID}`) : undefined;
+        if (l) {
+          await closeHostRelays(s, this.env, l);
+          await putLeaseRecord(s, l);
+        }
+      });
+    } catch {
+      return json(
+        {
+          error: "host_relay_close_pending",
+          message:
+            "credential change applied; relay closure incomplete; retry the same admin operation",
+        },
+        { status: 503 },
+      );
+    }
+    return response;
   }
   private async heartbeat(
     r: Request,
@@ -200,13 +415,19 @@ export class SSHHostCoordinator {
     }
     return this.commit(async (s) => {
       const h = await s.get<SSHHost>(hostPrefix + id);
-      if (!h || h.owner !== requestOwner(r) || h.org !== requestOrg(r, this.env))
+      if (!h) return json({ error: "not_found" }, { status: 404 });
+      if (hostUsesCredential(h) || hostCredentialRequest(r)) {
+        if (!(await authenticateHostCredential(r, h)))
+          return json({ error: "host_credential_invalid" }, { status: 401 });
+      } else if (h.owner !== requestOwner(r) || h.org !== requestOrg(r, this.env))
         return json({ error: "not_found" }, { status: 404 });
       if (h.frontDoor && h.frontDoor.hostKey !== input.hostKey)
         return json({ error: "host_identity_changed" }, { status: 409 });
       h.frontDoor = { hostKey: input.hostKey!, fingerprint };
       h.lastHeartbeat = Date.now();
-      let l = h.leaseID ? await s.get<LeaseRecord>(`lease:${h.leaseID}`) : undefined;
+      const cleanup = h.credential?.purpose === "cleanup" ? h.credential.cleanup : undefined;
+      const leaseID = h.leaseID ?? cleanup?.leaseID;
+      let l = leaseID ? await s.get<LeaseRecord>(`lease:${leaseID}`) : undefined;
       if (
         h.leaseID &&
         (!l || !l.sshHostAllocation || l.sshHostAllocation.generation !== h.generation)
@@ -214,6 +435,39 @@ export class SSHHostCoordinator {
         h.quarantine = "allocation record missing or inconsistent";
         await s.put(hostPrefix + id, h);
         return json({ error: "host_quarantined" }, { status: 409 });
+      }
+      if (h.credential?.purpose === "cleanup") {
+        const a = l?.sshHostAllocation;
+        if (
+          input.report &&
+          (!cleanup ||
+            input.report.leaseID !== cleanup.leaseID ||
+            input.report.generation !== cleanup.generation ||
+            input.report.accessGeneration !== cleanup.accessGeneration ||
+            !["clean", "failed"].includes(input.report.state))
+        )
+          return json({ error: "host_recovery_report_invalid" }, { status: 409 });
+        // Replay only the exact completed receipt after a lost reply or local save.
+        if (cleanup && completedHostCleanup(h, l, cleanup))
+          return json({
+            assignment: null,
+            cleanupComplete: true,
+            relays: [],
+            identity: this.identity(h),
+            serverTime: Date.now(),
+          });
+        if (
+          !cleanup ||
+          !l ||
+          !terminal(l) ||
+          !a ||
+          a.operation !== "clean" ||
+          l.id !== cleanup.leaseID ||
+          a.hostID !== h.id ||
+          a.generation !== cleanup.generation ||
+          a.accessGeneration !== cleanup.accessGeneration
+        )
+          return json({ error: "host_recovery_custody_mismatch" }, { status: 409 });
       }
       if (l) {
         const a = l.sshHostAllocation!;
@@ -318,11 +572,14 @@ export class SSHHostCoordinator {
                   Date.parse(l.lastTouchedAt ?? l.createdAt) +
                     (l.idleTimeoutSeconds ?? 1800) * 1000,
                   Date.parse(l.sshHostAllocation!.accessDeadline),
+                  h.credential ? Date.parse(h.credential.expiresAt) : Infinity,
                 ),
                 target: l.target,
               }
             : null,
         serverTime: Date.now(),
+        ...(cleanup && !h.leaseID ? { cleanupComplete: true } : {}),
+        ...(h.credential ? { identity: this.identity(h) } : {}),
       });
     });
   }
@@ -392,6 +649,7 @@ export class SSHHostCoordinator {
           (h) =>
             h.org === requestOrg(r, this.env) &&
             h.enabled &&
+            hostCredentialCurrent(h) &&
             !h.draining &&
             !h.quarantine &&
             !h.leaseID &&
