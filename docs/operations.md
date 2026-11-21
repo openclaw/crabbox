@@ -621,7 +621,8 @@ CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for route-scoped access
 CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for route-scoped access
 DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
 CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
-CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
+CRABBOX_RUN_RETENTION_DAYS        maximum terminal log retention; default 30 days, minimum 1
+CRABBOX_RUN_LOG_BUDGET_BYTES      aggregate stored log budget; default 536870912 (512 MiB), positive integer bytes
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login; must differ from CRABBOX_SHARED_TOKEN
@@ -667,6 +668,24 @@ CRABBOX_AZURE_ORPHAN_SWEEP_DELETE   optional; set 1 to release coordinator-owned
 CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 ```
+
+Run-log retention is a maximum, not a guarantee: storage pressure evicts the oldest
+terminal log payloads first. Run records, results, receipts, events, and lease
+records remain; running logs are never evicted. The 512 MiB default leaves ample
+headroom below Cloudflare SQLite's 10 GB database limit. Keep this budget well
+below that limit to allow for metadata, events, and temporary writes; it bounds
+log payload bytes, not the total database size. Both Worker and Node runtimes
+honor it. `/v1/capacity/run-logs` returns `storedBytes`, `budgetBytes`,
+`accountingComplete`, and `pressure`; structured
+`coordinator.run_log_storage_pressure` warnings begin at 80% utilization.
+
+Existing payloads are accounted from run metadata in pages of 128 during
+maintenance. Until accounting completes, new terminal payloads are omitted with
+an explicit eviction marker, while run completion remains available. Maintenance
+continues once per second while migration or over-budget eviction is pending.
+Age pruning visits up to 128 records and removes up to 16 MiB of terminal log
+payloads per pass (one final log may cross that byte bound).
+
 
 Normal SSH-based AWS workspace bridges use a dedicated `crabbox-workspaces`
 security group, separate from ordinary runner ingress. Workers TCP egress has

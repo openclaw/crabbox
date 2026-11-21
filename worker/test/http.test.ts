@@ -8,6 +8,7 @@ import {
   adminGrantVersion,
   authenticateRequest,
   githubUserGrantIsCurrent,
+  issuePortalToken,
   issueUserToken,
   requestWithAuthContext,
   requestGitHubCredential,
@@ -55,6 +56,53 @@ describe("coordinator health", () => {
 });
 
 describe("coordinator auth", () => {
+  it.each(["/v1/admin/leases", "/v1/pool", "/v1/usage?scope=all"])(
+    "keeps %s bearer-only for signed-in portal admins",
+    async (path) => {
+      const env = {
+        CRABBOX_SESSION_SECRET: "session-secret",
+        CRABBOX_GITHUB_ADMIN_OWNERS: "github:12345",
+      } as Env;
+      const identity = {
+        owner: "github:12345",
+        ownerSource: "github-verified-email" as const,
+        org: "example-org",
+        login: "example-admin",
+        githubAccessToken: "github-access-token",
+      };
+      const portalToken = await issuePortalToken(env, identity);
+      const apiToken = await issueUserToken(env, identity);
+      const cookie = `__Host-crabbox_session=${encodeURIComponent(portalToken)}`;
+      const portal = await prepareCoordinatorRequest(
+        new Request("https://example.test/portal", { headers: { cookie } }),
+        env,
+        allowGitHubMembership,
+      );
+      expect(portal.authenticated).toBe(true);
+      if ("response" in portal) throw new Error("portal admin session was rejected");
+      expect(portal.request.headers.get("x-crabbox-admin")).toBe("true");
+
+      const url = `https://example.test${path}`;
+      const browser = await prepareCoordinatorRequest(
+        new Request(url, { headers: { cookie } }),
+        env,
+        allowGitHubMembership,
+      );
+      expect(browser).toMatchObject({ authenticated: false, response: { status: 401 } });
+      if (!("response" in browser)) throw new Error("portal cookie authorized an API request");
+      expect(await browser.response.json()).toEqual({ error: "unauthorized" });
+
+      const api = await prepareCoordinatorRequest(
+        new Request(url, { headers: { authorization: `Bearer ${apiToken}` } }),
+        env,
+        allowGitHubMembership,
+      );
+      expect(api.authenticated).toBe(true);
+      if ("response" in api) throw new Error("admin API bearer was rejected");
+      expect(api.request.headers.get("x-crabbox-admin")).toBe("true");
+    },
+  );
+
   it("keeps colliding org labels distinct after coordinator authentication", async () => {
     const sharedEnv = {
       CRABBOX_SHARED_TOKEN: "shared",

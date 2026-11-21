@@ -254,7 +254,9 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	waited.SSHKeyID = shared.FirstNonBlank(waited.SSHKeyID, createdKey.ID)
 	server := serverFromInstance(waited, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "ovh bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "ovh bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", core.ClockNow(b.RT.Clock).UTC())

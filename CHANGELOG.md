@@ -5,6 +5,13 @@
 ### Fixed
 
 - Network/stop: restore provider SSH routes on automatic fallback, consistently report fallback notices, and prepare direct guest cleanup with the live endpoint and stored lease key. [PR 3153](https://github.com/openclaw/crabbox/pull/3153). Thanks @coygeek.
+- Tailscale: persist direct cloud metadata with lossless GCP labels, protect Hetzner lifecycle updates from diagnostic errors, prefer tailnet readiness for exit nodes with public fallback, and reject stale coordinator metadata after cleanup. [PR 3150](https://github.com/openclaw/crabbox/pull/3150). Thanks @coygeek.
+- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
+- Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
+- Checkpoints: reconcile pending AWS snapshot and AMI states in coordinator inventory, including existing checkpoints, with bounded polling and identity-checked verification writes. [PR 3146](https://github.com/openclaw/crabbox/pull/3146). Thanks @mkusaka.
+- Coordinator: recover capacity indexes at startup across retained lease history and restarts while preserving rollback completeness. [PR 3149](https://github.com/openclaw/crabbox/pull/3149). Thanks @mkusaka.
+- Authentication: share positive GitHub membership checks across Worker isolates through the regional Cache API while preserving authorization expiry and the Node fallback. [PR 3216](https://github.com/openclaw/crabbox/pull/3216). Thanks @mkusaka.
+- Coordinator: bound stored run logs, evict oldest terminal payloads under pressure while preserving run records, and expose capacity warnings with faster retention pruning. [PR 3217](https://github.com/openclaw/crabbox/pull/3217). Thanks @mkusaka.
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
 
