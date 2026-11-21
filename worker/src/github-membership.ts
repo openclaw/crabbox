@@ -50,6 +50,7 @@ export type GitHubMembershipEnv = Pick<
   | "CRABBOX_GITHUB_ALLOWED_TEAMS"
   | "CRABBOX_GITHUB_REVOKED_USERS"
   | "CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS"
+  | "CRABBOX_SESSION_SECRET"
 >;
 
 const membershipCache = new Map<string, number>();
@@ -81,7 +82,8 @@ export async function requireCurrentGitHubMembership(
   env: GitHubMembershipEnv,
 ): Promise<void> {
   const policy = githubMembershipPolicy(identity, env);
-  const key = membershipCacheKey(identity, policy);
+  const ttlSeconds = membershipCacheSeconds(env);
+  const key = JSON.stringify([membershipCacheKey(identity, policy), ttlSeconds]);
   const now = Date.now();
   const cachedUntil = membershipCache.get(key) ?? 0;
   if (cachedUntil > now) {
@@ -92,18 +94,92 @@ export async function requireCurrentGitHubMembership(
   if (loading) {
     return loading;
   }
-  const load = requireFreshGitHubMembership(identity, env, policy)
-    .then(() => {
-      const ttlSeconds = membershipCacheSeconds(env);
-      if (ttlSeconds > 0) {
-        membershipCache.set(key, Date.now() + ttlSeconds * 1000);
-        trimMembershipCache();
+  const load = (async () => {
+    const shared = ttlSeconds > 0 ? await sharedMembershipCache(key, env) : undefined;
+    const sharedExpiry = shared ? await sharedMembershipExpiry(shared, ttlSeconds) : undefined;
+    if (sharedExpiry !== undefined) {
+      membershipCache.set(key, sharedExpiry);
+      trimMembershipCache();
+      return;
+    }
+    await requireFreshGitHubMembership(identity, env, policy);
+    if (ttlSeconds > 0) {
+      const expiresAt = Date.now() + ttlSeconds * 1000;
+      membershipCache.set(key, expiresAt);
+      trimMembershipCache();
+      if (shared) {
+        try {
+          await shared.cache.put(
+            shared.request,
+            new Response(String(expiresAt), {
+              headers: { "Cache-Control": `max-age=${ttlSeconds}` },
+            }),
+          );
+        } catch {
+          // Cache availability must not change a successful GitHub check.
+        }
       }
-      return undefined;
-    })
-    .finally(() => membershipLoads.delete(key));
+    }
+  })().finally(() => membershipLoads.delete(key));
   membershipLoads.set(key, load);
   return load;
+}
+
+interface SharedMembershipCache {
+  cache: Cache;
+  request: Request;
+}
+
+async function sharedMembershipCache(
+  key: string,
+  env: GitHubMembershipEnv,
+): Promise<SharedMembershipCache | undefined> {
+  // Node has no Cache API; its existing isolate-local behavior is unchanged.
+  if (typeof caches === "undefined" || !env.CRABBOX_SESSION_SECRET) return undefined;
+  try {
+    const encoder = new TextEncoder();
+    const hmacKey = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(env.CRABBOX_SESSION_SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign(
+      "HMAC",
+      hmacKey,
+      encoder.encode(`crabbox:github-membership:v1:${key}`),
+    );
+    const digest = [...new Uint8Array(signature)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    return {
+      cache: caches.default,
+      request: new Request(`https://crabbox.internal/github-membership/v1/${digest}`),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function sharedMembershipExpiry(
+  shared: SharedMembershipCache,
+  ttlSeconds: number,
+): Promise<number | undefined> {
+  try {
+    const response = await shared.cache.match(shared.request);
+    if (!response?.ok) return undefined;
+    const expiresAt = Number(await response.text());
+    const now = Date.now();
+    // Preserve the original deadline when promoting a regional hit into L1.
+    return Number.isSafeInteger(expiresAt) &&
+      expiresAt > now &&
+      expiresAt <= now + ttlSeconds * 1000
+      ? expiresAt
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function requireFreshGitHubMembership(
