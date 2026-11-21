@@ -72,6 +72,13 @@ it.each([
               stateReason: { code: describes > 1 ? (tc.reason ?? "") : "" },
               spotInstanceRequestId: tc.spot ? "sir-test" : "",
               ipAddress: describes > 1 ? (tc.ip ?? "") : "",
+              rootDeviceName: "/dev/sda1",
+              blockDeviceMapping: {
+                item: {
+                  deviceName: "/dev/sda1",
+                  ebs: { volumeId: "vol-0123456789abcdef0" },
+                },
+              },
             },
           },
         },
