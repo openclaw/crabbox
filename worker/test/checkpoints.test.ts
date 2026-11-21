@@ -10,6 +10,8 @@ import {
   checkpointEventKey,
   checkpointDeleteClaimTTLMS,
   checkpointKey,
+  checkpointImageBackfillKey,
+  checkpointImageRefreshIntervalMS,
   checkpointLimits,
   checkpointMaxAuditEvents,
   checkpointMaxCreateRecoveryAttempts,
@@ -39,6 +41,7 @@ import type {
 import { sha256Hex } from "../src/encoding";
 import { AWSProvider, AzureProvider, FleetCoordinator, GCPProvider } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
+import { storageRecordScanBatchSize } from "../src/storage-scan";
 import type {
   CoordinatorCheckpointProvider,
   CoordinatorCheckpointRecord,
@@ -399,7 +402,290 @@ async function bindCheckpointUseProvisioning(
   );
 }
 
+async function pendingAWSCheckpointFixture(strategy: "image" | "disk-snapshot" = "disk-snapshot") {
+  const fixture = await checkpointFixture();
+  const capture = vi.mocked(fixture.provider.createCheckpointImage).getMockImplementation()!;
+  let image!: ProviderImage;
+  vi.mocked(fixture.provider.createCheckpointImage).mockImplementation(async (...args) => {
+    image = { ...(await capture(...args)), state: "pending" };
+    return image;
+  });
+  const checkpointID = "chk_snapshot_state";
+  expect(
+    (await createCheckpoint(fixture.coordinator, checkpointID, { mode: "manual" }, strategy))
+      .status,
+  ).toBe(201);
+  return { ...fixture, checkpointID, image };
+}
+
 describe("coordinator-managed checkpoints", () => {
+  it("persists a completed AWS snapshot observed by verification in checkpoint inventory", async () => {
+    const { coordinator, provider, storage, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      image: { state: "pending" },
+    });
+    const observe = vi.spyOn(provider, "getImage").mockResolvedValue({
+      ...image,
+      state: "completed",
+    });
+
+    const verified = await coordinator.fetch(
+      checkpointRequest("GET", `/v1/checkpoints/${checkpointID}?verify=true`),
+    );
+    expect(verified.status).toBe(200);
+    await expect(verified.json()).resolves.toMatchObject({
+      image: { state: "completed" },
+      checkpoint: { image: { state: "completed" } },
+    });
+    const inventory = await coordinator.fetch(checkpointRequest("GET", "/v1/checkpoints"));
+    await expect(inventory.json()).resolves.toMatchObject({
+      checkpoints: [{ id: checkpointID, image: { state: "completed" } }],
+    });
+    expect(observe).toHaveBeenCalledExactlyOnceWith(image.id, image.kind);
+  });
+
+  it.each([
+    ["disk-snapshot", "completed"],
+    ["image", "available"],
+    ["disk-snapshot", "error"],
+    ["image", "failed"],
+  ] as const)(
+    "refreshes pending AWS %s to %s once due and stops polling",
+    async (strategy, state) => {
+      vi.useFakeTimers();
+      const { coordinator, provider, storage, checkpointID, image } =
+        await pendingAWSCheckpointFixture(strategy);
+      const observe = vi.spyOn(provider, "getImage").mockResolvedValue({ ...image, state });
+      const original = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      expect(Date.parse(original.imageRefreshAt!)).toBe(
+        Date.now() + checkpointImageRefreshIntervalMS,
+      );
+      await coordinator.alarm();
+      expect(observe).not.toHaveBeenCalled();
+
+      vi.setSystemTime(Date.parse(original.imageRefreshAt!) + 1);
+      await coordinator.alarm();
+      const updated = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      expect(updated).toMatchObject({ state: "ready", image: { state } });
+      expect(updated.imageRefreshAt).toBeUndefined();
+      expect(updated.nextSweepAt).toBeUndefined();
+      expect(updated.lastUsedAt).toBe(original.lastUsedAt);
+      expect(observe).toHaveBeenCalledExactlyOnceWith(image.id, image.kind);
+      vi.setSystemTime(Date.now() + checkpointImageRefreshIntervalMS);
+      await coordinator.alarm();
+      expect(observe).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("defers failed and mismatched observations without changing the stored image", async () => {
+    vi.useFakeTimers();
+    const { coordinator, provider, storage, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    const observe = vi
+      .spyOn(provider, "getImage")
+      .mockRejectedValueOnce(new Error("provider unavailable"))
+      .mockResolvedValueOnce({ ...image, immutableID: "wrong-image", state: "completed" })
+      .mockResolvedValueOnce({ ...image, state: "pending" })
+      .mockResolvedValue({ ...image, state: "completed" });
+    await [0, 1, 2].reduce(async (previousAttempt, attempt) => {
+      await previousAttempt;
+      const previous = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      vi.setSystemTime(Date.parse(previous.imageRefreshAt!) + 1);
+      await coordinator.alarm();
+      const current = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      expect(current.image?.state).toBe("pending");
+      expect(Date.parse(current.imageRefreshAt!)).toBe(
+        Date.now() + checkpointImageRefreshIntervalMS,
+      );
+      await coordinator.alarm();
+      expect(observe).toHaveBeenCalledTimes(attempt + 1);
+    }, Promise.resolve());
+    vi.setSystemTime(Date.now() + checkpointImageRefreshIntervalMS + 1);
+    await coordinator.alarm();
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      image: { state: "completed" },
+    });
+    expect(observe).toHaveBeenCalledTimes(4);
+  });
+
+  it("backfills legacy pending images beyond a bounded page of tombstones", async () => {
+    vi.useFakeTimers();
+    const { coordinator, provider, storage, runtime, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    const original = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    await storage.delete(checkpointDueKey(checkpointID, original.nextSweepAt!));
+    const legacy = { ...original };
+    delete legacy.nextSweepAt;
+    delete legacy.imageRefreshAt;
+    await storage.put(checkpointKey(checkpointID), legacy);
+    await Promise.all(
+      Array.from({ length: storageRecordScanBatchSize }, (_, index) => {
+        const id = `chk_aaa_${String(index).padStart(4, "0")}`;
+        return storage.put(checkpointKey(id), { ...legacy, id, state: "deleted" });
+      }),
+    );
+    const observe = vi
+      .spyOn(provider, "getImage")
+      .mockResolvedValue({ ...image, state: "completed" });
+    await coordinator.alarm();
+    expect(observe).not.toHaveBeenCalled();
+    expect(await storage.get(checkpointImageBackfillKey)).toMatchObject({ complete: false });
+    expect(runtime.alarmTime).toBeLessThanOrEqual(Date.now() + 1000);
+    vi.setSystemTime(runtime.alarmTime!);
+    await coordinator.alarm();
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      image: { state: "completed" },
+    });
+    expect(await storage.get(checkpointImageBackfillKey)).toMatchObject({ complete: true });
+    expect(observe).toHaveBeenCalledOnce();
+    expect(
+      storage.lists.filter((options) => options.prefix === "checkpoint:" && options.startAfter),
+    ).toContainEqual({
+      prefix: "checkpoint:",
+      limit: storageRecordScanBatchSize,
+      startAfter: "checkpoint:chk_aaa_0127",
+    });
+  });
+
+  it("bounds image observations to the maintenance batch and drains remaining images later", async () => {
+    vi.useFakeTimers();
+    const { coordinator, provider, storage, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    const original = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    await storage.delete(checkpointDueKey(checkpointID, original.nextSweepAt!));
+    await storage.delete(checkpointKey(checkpointID));
+    const legacy = { ...original };
+    delete legacy.imageRefreshAt;
+    delete legacy.nextSweepAt;
+    await Promise.all(
+      Array.from({ length: 40 }, (_, index) => {
+        const id = `chk_batch_${String(index).padStart(4, "0")}`;
+        return storage.put(checkpointKey(id), { ...legacy, id });
+      }),
+    );
+    const observe = vi
+      .spyOn(provider, "getImage")
+      .mockResolvedValue({ ...image, state: "completed" });
+    await coordinator.alarm();
+    expect(observe).toHaveBeenCalledTimes(32);
+    await coordinator.alarm();
+    expect(observe).toHaveBeenCalledTimes(40);
+    await coordinator.alarm();
+    expect(observe).toHaveBeenCalledTimes(40);
+  });
+
+  it.each(
+    (["verification", "maintenance"] as const).flatMap((source) =>
+      (["deletion", "recreation", "newer observation"] as const).map((race) => ({ source, race })),
+    ),
+  )("fences $source image observations raced by $race", async ({ source, race }) => {
+    vi.useFakeTimers();
+    const { coordinator, provider, storage, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    const original = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    const concurrent: CoordinatorCheckpointRecord =
+      race === "deletion"
+        ? {
+            ...original,
+            state: "deleting",
+            generation: original.generation + 1,
+            revision: original.revision + 1,
+          }
+        : race === "recreation"
+          ? {
+              ...original,
+              createdAt: "2099-01-01T00:00:00.000Z",
+              image: { ...original.image!, immutableID: "replacement" },
+            }
+          : {
+              ...original,
+              revision: original.revision + 1,
+              image: { ...original.image!, state: "completed" },
+            };
+    vi.spyOn(provider, "getImage").mockImplementation(async () => {
+      await storage.put(checkpointKey(checkpointID), concurrent);
+      return { ...image, state: "pending" };
+    });
+    let verified: Response | undefined;
+    if (source === "verification") {
+      verified = await coordinator.fetch(
+        checkpointRequest("GET", `/v1/checkpoints/${checkpointID}?verify=true`),
+      );
+    } else {
+      vi.setSystemTime(Date.parse(original.imageRefreshAt!) + 1);
+      await coordinator.alarm();
+    }
+    expect(verified?.status).toBe(source === "verification" ? 409 : undefined);
+    const body = await verified?.json();
+    expect(body?.error).toBe(
+      source === "verification" ? "checkpoint_observation_conflict" : undefined,
+    );
+    expect(await storage.get(checkpointKey(checkpointID))).toEqual(concurrent);
+  });
+
+  it.each([
+    { provider: "gcp" },
+    { kind: "aws-ami" },
+    { id: "snap-other" },
+    { resourceID: "snap-other" },
+    { immutableID: "snap-other" },
+    { region: "us-east-1" },
+    { accountID: "999999999999" },
+    { accountID: undefined },
+  ] satisfies Partial<ProviderImage>[])(
+    "rejects a mismatched provider image %j",
+    async (mismatch) => {
+      const { coordinator, provider, storage, checkpointID, image } =
+        await pendingAWSCheckpointFixture();
+      const original = await storage.get(checkpointKey(checkpointID));
+      vi.spyOn(provider, "getImage").mockResolvedValue({
+        ...image,
+        state: "completed",
+        ...mismatch,
+      });
+      const verified = await coordinator.fetch(
+        checkpointRequest("GET", `/v1/checkpoints/${checkpointID}?verify=true`),
+      );
+      expect(verified.status).toBe(409);
+      await expect(verified.json()).resolves.toMatchObject({ error: "checkpoint_source_mismatch" });
+      expect(await storage.get(checkpointKey(checkpointID))).toEqual(original);
+    },
+  );
+
+  it("rolls back the stored state and due marker if observation audit persistence fails", async () => {
+    const { coordinator, provider, storage, checkpointID, image } =
+      await pendingAWSCheckpointFixture();
+    const original = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    const originalMarker = await storage.get(checkpointDueKey(checkpointID, original.nextSweepAt!));
+    vi.spyOn(provider, "getImage").mockResolvedValue({ ...image, state: "completed" });
+    storage.failKey = checkpointEventKey(checkpointID, original.eventSequence + 1);
+    const failed = await coordinator.fetch(
+      checkpointRequest("GET", `/v1/checkpoints/${checkpointID}?verify=true`),
+    );
+    expect(failed.status).toBe(500);
+    expect(await storage.get(checkpointKey(checkpointID))).toEqual(original);
+    expect(await storage.get(checkpointDueKey(checkpointID, original.nextSweepAt!))).toEqual(
+      originalMarker,
+    );
+    storage.failKey = undefined;
+    const retried = await coordinator.fetch(
+      checkpointRequest("GET", `/v1/checkpoints/${checkpointID}?verify=true`),
+    );
+    expect(retried.status).toBe(200);
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      image: { state: "completed" },
+    });
+  });
+
   it.each(["creating", "failed"] as const)(
     "rejects fixed checkpoint admission while its real capture is %s without an image",
     async (state) => {

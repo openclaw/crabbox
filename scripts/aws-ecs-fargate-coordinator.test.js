@@ -255,6 +255,7 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
   const inspection = policyStatementBlock(role, "InspectWorkspaceResources");
   assert.match(inspection, /Effect: Allow/);
   assert.match(inspection, /ec2:DescribeInstanceTypes/);
+  assert.match(inspection, /ec2:DescribeSpotPriceHistory/);
   assert.match(inspection, /ec2:DescribeVolumes/);
   assert.match(inspection, /servicequotas:GetServiceQuota/);
   assert.match(inspection, /Resource: "\*"/);
@@ -297,7 +298,7 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
     "ec2:VolumeType",
   ]);
   assert.doesNotMatch(role, /Sid: LaunchBoundedPrivateWorkspace/);
-  assert.doesNotMatch(role, /spot-instances-request|DescribeSpotPriceHistory/);
+  assert.doesNotMatch(role, /spot-instances-request/);
 
   const image = policyStatementBlock(role, "LaunchFromCanonicalUbuntuImage");
   assertAllMatches(image, [
