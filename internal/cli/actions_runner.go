@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,71 +90,99 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 	}
 	labels := githubActionsRunnerLabels(cfg, leaseID, slug, extraLabels)
 	checkVersion := cfg.Actions.RunnerVersion != "" && cfg.Actions.RunnerVersion != "latest"
+	// Reserve part of the caller's deadline so a stalled setup still reports
+	// guest diagnostics instead of a bare timeout.
+	bootstrapCtx, cancelBootstrap := actionsRunnerBootstrapContext(ctx)
+	defer cancelBootstrap()
 	var updated leaseClaim
-	err := WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
-		if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) {
-			return Exit(2, "Actions runner lease claim changed or is missing")
-		}
-		fingerprint := actionsRunnerLeaseFingerprint(*claim)
-		binding := claim.ActionsRunner
-		guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
-		if err != nil {
-			return err
-		}
-		if guest.Settings != nil {
-			settings := guest.Settings
-			if binding == nil {
-				// Adopt shipped claims only through the exact remote configuration and
-				// the canonical lease label returned by GitHub, never a name sweep.
-				if settings.URL != actionsRunnerURL(scope) || settings.Name != name || settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && settings.Group != group {
-					return Exit(2, "existing guest runner does not match the requested registration")
-				}
-				binding = &ActionsRunnerBinding{Scope: scope, RunnerID: settings.ID, Name: settings.Name, Group: settings.Group, Ephemeral: settings.Ephemeral, LeaseFingerprint: fingerprint}
-			} else if !actionsRunnerSettingsMatch(settings, binding) {
-				return Exit(2, "guest runner does not match the recorded registration; refusing replacement")
+	// Registrations serialize on their own per-lease lock. The claim lock is held
+	// only for claim checks, the receipt write and listener start, never across
+	// the guest install, so lease renewals keep committing while setup runs.
+	err := withActionsRunnerRegistrationLock(ctx, leaseID, func() error {
+		var reserved *leaseClaim
+		var fingerprint string
+		err := WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+			// A lease heartbeat may advance lifecycle labels and last use between the
+			// caller's snapshot and this lock; any other change fails the snapshot.
+			if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) && !actionsClaimLifecycleOnlyChange(expected, *claim) {
+				return Exit(2, "Actions runner lease claim changed or is missing")
 			}
-		} else if *guest.Active {
-			return Exit(2, "runner listener is active without an identifiable registration; reconcile it before registering")
-		}
-		if binding != nil {
-			present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+			// Both activation paths below start a listener; a retiring lease must not gain one.
+			if actionsRunnerClaimRetiring(*claim) {
+				return Exit(2, "Actions runner lease is %s; refusing to activate a runner", strings.TrimSpace(claim.Labels["state"]))
+			}
+			fingerprint = actionsRunnerLeaseFingerprint(*claim)
+			binding := claim.ActionsRunner
+			guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
 			if err != nil {
 				return err
 			}
-			if present {
-				if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
-					return Exit(2, "existing runner does not have requested version %s; unregister it before changing runner version", cfg.Actions.RunnerVersion)
+			if guest.Settings != nil {
+				settings := guest.Settings
+				if binding == nil {
+					// Adopt shipped claims only through the exact remote configuration and
+					// the canonical lease label returned by GitHub, never a name sweep.
+					if settings.URL != actionsRunnerURL(scope) || settings.Name != name || settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && settings.Group != group {
+						return Exit(2, "existing guest runner does not match the requested registration")
+					}
+					binding = &ActionsRunnerBinding{Scope: scope, RunnerID: settings.ID, Name: settings.Name, Group: settings.Group, Ephemeral: settings.Ephemeral, LeaseFingerprint: fingerprint}
+				} else if !actionsRunnerSettingsMatch(settings, binding) {
+					return Exit(2, "guest runner does not match the recorded registration; refusing replacement")
 				}
-				if binding.LeaseFingerprint != fingerprint || guest.Settings == nil || binding.Scope != scope || binding.Name != name || binding.Ephemeral != cfg.Actions.Ephemeral || group != "" && binding.Group != group {
-					return Exit(2, "owned runner registration is still present; use actions unregister before changing its configuration")
-				}
-				claim.ActionsRunner = binding
-				if err := persist(); err != nil {
-					return err
-				}
-				updated = cloneLeaseClaim(*claim)
-				if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
-					return err
-				}
-				if !*guest.Active {
-					_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
-					return err
-				}
-				return nil
+			} else if *guest.Active {
+				return Exit(2, "runner listener is active without an identifiable registration; reconcile it before registering")
 			}
-			if *guest.Active {
-				return Exit(2, "owned runner listener is still active after registration removal; wait for it to stop before registering again")
+			if binding != nil {
+				present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+				if err != nil {
+					return err
+				}
+				if present {
+					if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
+						return Exit(2, "existing runner does not have requested version %s; unregister it before changing runner version", cfg.Actions.RunnerVersion)
+					}
+					if binding.LeaseFingerprint != fingerprint || guest.Settings == nil || binding.Scope != scope || binding.Name != name || binding.Ephemeral != cfg.Actions.Ephemeral || group != "" && binding.Group != group {
+						return Exit(2, "owned runner registration is still present; use actions unregister before changing its configuration")
+					}
+					claim.ActionsRunner = binding
+					if err := persist(); err != nil {
+						return err
+					}
+					updated = cloneLeaseClaim(*claim)
+					if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+						return err
+					}
+					if !*guest.Active {
+						fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+						_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+						return err
+					}
+					return nil
+				}
+				if *guest.Active {
+					return Exit(2, "owned runner listener is still active after registration removal; wait for it to stop before registering again")
+				}
 			}
-		}
-		previous := ActionsRunnerBinding{Name: name}
-		if binding != nil {
-			previous = *binding
-		}
-		if _, err := actionsRunnerControl(ctx, target, remoteClearActionsRunnerSettings(target, previous)); err != nil {
+			previous := ActionsRunnerBinding{Name: name}
+			if binding != nil {
+				previous = *binding
+			}
+			if _, err := actionsRunnerControl(ctx, target, remoteClearActionsRunnerSettings(target, previous)); err != nil {
+				return err
+			}
+			snapshot := cloneLeaseClaim(*claim)
+			reserved = &snapshot
+			return nil
+		})
+		if err != nil || reserved == nil {
 			return err
 		}
-		token, err := githubActionsRegistrationToken(ctx, scope, target.ChildEnvDenylist)
+		fmt.Fprintln(a.Stderr, "actions runner setup stage=registration-token")
+		token, err := githubActionsRegistrationToken(bootstrapCtx, scope, target.ChildEnvDenylist)
 		if err != nil {
+			if bootstrapCtx.Err() == context.DeadlineExceeded {
+				return Exit(5, "GitHub Actions runner setup timed out before registration token acquisition completed")
+			}
 			return err
 		}
 		script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
@@ -162,57 +192,174 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			script = "export RUNNER_GROUP=" + shellQuote(group) + "\n" + script
 		}
 		_, destination, _ := strings.Cut(scope, "/")
+		remote := githubActionsRunnerInstallRemoteCommand(target)
 		input := githubActionsRunnerInstallInput(destination, name, strings.Join(labels, ","), token, script)
-		installErr := runSSHInputQuiet(ctx, target, githubActionsRunnerInstallRemoteCommand(target), input)
+		// Windows OpenSSH intermittently wedges its per-connection event loop while
+		// forwarding a large stdin payload, stranding setup before its first stage.
+		// Copy the script instead; only the short credential lines use stdin.
+		cleanupScript := func() {}
+		if isWindowsNativeTarget(target) && windowsScriptNeedsFileTransport(script) {
+			remotePath, cleanup, err := uploadWindowsActionsRunnerScript(bootstrapCtx, target, script)
+			if err != nil {
+				return err
+			}
+			cleanupScript = cleanup
+			remote = githubActionsRunnerInstallRemoteCommandForUploadedScript(remotePath)
+			input = githubActionsRunnerCredentialInput(destination, name, strings.Join(labels, ","), token)
+		}
+		setup, installErr := runActionsRunnerSetup(bootstrapCtx, a.Stderr, func(stdout, stderr io.Writer) error {
+			return runSSHInput(bootstrapCtx, target, remote, strings.NewReader(input), stdout, stderr)
+		})
+		cleanupScript()
+		if installErr != nil {
+			diagnostics := redactActionsRunnerText(setup.Diagnostics, token)
+			if diagnostics == "" {
+				diagnostics = readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target, token)
+			}
+			if bootstrapCtx.Err() == context.DeadlineExceeded {
+				installErr = Exit(5, "GitHub Actions runner setup timed out on %s during stage=%s: %s", target.Host, blank(setup.LastStage, "bootstrap"), blank(diagnostics, "no diagnostics available"))
+			} else {
+				installErr = Exit(7, "register GitHub Actions runner on %s failed during stage=%s: %v: %s", target.Host, blank(setup.LastStage, "bootstrap"), installErr, blank(diagnostics, "no diagnostics available"))
+			}
+		}
 		// A lost SSH acknowledgement is not permission to register again. Recover
-		// the official identity even after cancellation so cleanup retains custody.
-		// This context may settle registration, but must never start the listener.
-		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		guest, err = readActionsRunnerGuest(settleCtx, target, checkVersion)
+		// the official local identity and verify its exact API object first. This
+		// runs even after cancellation (for example by the hydration heartbeat after
+		// a reassignment): configuration may already have created the GitHub runner,
+		// and cleanup needs its exact identity. It never starts the listener.
+		reconcileTimeout, readBudget := actionsRunnerReconcileBudgets(target)
+		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), reconcileTimeout)
+		defer cancelReconcile()
+		var canceled error
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
+		// A Windows guest that has just installed Git and configured the runner
+		// can miss one control call's deadline; keep asking within a budget that
+		// still leaves time for the GitHub check and the claim update below.
+		// Linux and WSL2 keep a single read, as before.
+		readCtx, cancelRead := context.WithTimeout(reconcileCtx, readBudget)
+		var guest actionsRunnerGuest
+		if isWindowsNativeTarget(target) {
+			guest, err = readActionsRunnerGuestUntil(readCtx, actionsRunnerReconcileRetryDelay, func(queryCtx context.Context) (string, error) {
+				return actionsRunnerControl(queryCtx, target, remoteReadActionsRunnerGuest(target, checkVersion))
+			})
+		} else {
+			guest, err = readActionsRunnerGuest(readCtx, target, checkVersion)
+		}
+		cancelRead()
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
 		if err != nil {
-			return errors.Join(installErr, ctx.Err(), err)
+			return errors.Join(installErr, canceled, Exit(ExitCodeForError(err, 7), "read runner identity after setup; listener was not started; a runner named %s may remain registered at %s: %v", name, actionsRunnerURL(scope), err))
 		}
 		if guest.Settings == nil || *guest.Active || guest.Settings.URL != actionsRunnerURL(scope) || guest.Settings.Name != name || guest.Settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && guest.Settings.Group != group {
-			return errors.Join(installErr, ctx.Err(), Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
+			return errors.Join(installErr, canceled, Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
 		}
 		if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
-			return errors.Join(installErr, ctx.Err(), Exit(7, "configured runner version is unconfirmed; listener was not started"))
+			return errors.Join(installErr, canceled, Exit(7, "configured runner version is unconfirmed; listener was not started"))
 		}
-		binding = &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
-		present, err := githubActionsRunnerPresent(settleCtx, *binding, leaseID, labels, target.ChildEnvDenylist)
+		binding := &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
+		present, err := githubActionsRunnerPresent(reconcileCtx, *binding, leaseID, labels, target.ChildEnvDenylist)
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
 		if err != nil {
-			return errors.Join(installErr, ctx.Err(), err)
+			return errors.Join(installErr, canceled, err)
 		}
 		if !present {
-			return errors.Join(installErr, ctx.Err(), Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
+			return errors.Join(installErr, canceled, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
 		}
-		claim.ActionsRunner = binding
-		if err := persist(); err != nil {
+		// Recheck the reservation before recording the runner. If the lease still
+		// authorizes it, record the receipt so cleanup keeps custody, even when the
+		// operation was canceled; start the listener only when it was not. Anything
+		// beyond a lease renewal while setup ran unlocked means this lease no longer
+		// owns the runner, so delete the exact configured ID instead.
+		persisted := false
+		err = WithDurableLeaseClaimLockContext(reconcileCtx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+			if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
+				return Exit(2, "Actions runner lease claim changed during runner setup")
+			}
+			claim.ActionsRunner = binding
+			if err := persist(); err != nil {
+				return err
+			}
+			persisted = true
+			updated = cloneLeaseClaim(*claim)
+			if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return errors.Join(installErr, context.Cause(ctx))
+			}
+			fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+			_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+			return err
+		})
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
+		if err != nil && !persisted {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			rollbackErr := deleteGitHubActionsRunner(rollbackCtx, *binding, leaseID, target.ChildEnvDenylist)
-			return errors.Join(ctx.Err(), Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
+			return errors.Join(canceled, Exit(ExitCodeForError(err, 7), "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
-		updated = cloneLeaseClaim(*claim)
-		if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
-			return errors.Join(ctx.Err(), err)
-		}
-		if err := ctx.Err(); err != nil {
-			return errors.Join(installErr, err)
-		}
-		_, err = actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 		return err
 	})
 	if err != nil {
 		return updated, err
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered scope=%s id=%d name=%s labels=%s ephemeral=%t\n", scope, updated.ActionsRunner.RunnerID, name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
+	if !isWindowsNativeTarget(target) {
+		return updated, nil
+	}
+	// A native Windows listener that never connects (for example one started
+	// under an SSH session that ended) would leave the dispatched job queued.
+	binding := *updated.ActionsRunner
+	onlineCtx, cancelOnline := boundedActionsRunnerOnlineContext(bootstrapCtx)
+	defer cancelOnline()
+	if err := waitForGitHubActionsRunnerOnline(onlineCtx, scope, binding.Name, 5*time.Second, func(lookupCtx context.Context) (githubActionsRunnerState, error) {
+		return githubActionsRunnerStateForBinding(lookupCtx, binding, target.ChildEnvDenylist)
+	}, a.Stderr); err != nil {
+		diagnostics := readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target)
+		return updated, Exit(ExitCodeForError(err, 5), "%v; guest diagnostics: %s", err, blank(diagnostics, "no diagnostics available"))
+	}
 	return updated, nil
 }
 
 func actionsRunnerSettingsMatch(settings *actionsRunnerSettings, binding *ActionsRunnerBinding) bool {
 	return settings.ID == binding.RunnerID && settings.Name == binding.Name && settings.URL == actionsRunnerURL(binding.Scope) && settings.Group == binding.Group && settings.Ephemeral == binding.Ephemeral
+}
+
+// withActionsRunnerRegistrationLock serializes registrations for one lease
+// without holding the claim lock that lease renewals need.
+func withActionsRunnerRegistrationLock(ctx context.Context, leaseID string, action func() error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLockContext(ctx, path+".actions-runner", false, action)
+}
+
+// actionsRunnerReservationHolds reports whether the claim still authorizes the
+// registration reserved before the unlocked install: same workspace owner, no
+// competing runner receipt, not retiring and, for strict callers, only
+// lease-renewal changes.
+func actionsRunnerReservationHolds(reserved, current leaseClaim, exists, strictSnapshot bool) bool {
+	if !exists || !sameActionsWorkspaceClaimOwner(current, reserved) || !reflect.DeepEqual(current.ActionsRunner, reserved.ActionsRunner) || actionsRunnerClaimRetiring(current) {
+		return false
+	}
+	return !strictSnapshot || reflect.DeepEqual(current, reserved) || actionsClaimLifecycleOnlyChange(reserved, current)
+}
+
+// actionsRunnerClaimRetiring reports a lifecycle state in which the lease must
+// not gain an active runner. Cleanup writers change only the state label, which
+// a heartbeat may also change, so check it explicitly.
+func actionsRunnerClaimRetiring(claim leaseClaim) bool {
+	state := strings.TrimSpace(claim.Labels["state"])
+	return strings.EqualFold(state, "cleanup") || claimEndpointInactiveState(state)
 }
 
 func githubActionsRunnerPresent(ctx context.Context, binding ActionsRunnerBinding, leaseID string, labels, denylist []string) (bool, error) {
@@ -340,6 +487,29 @@ func readActionsRunnerGuest(ctx context.Context, target SSHTarget, checkVersion 
 	if err != nil {
 		return actionsRunnerGuest{}, Exit(7, "inspect existing runner registration: %v", err)
 	}
+	return parseActionsRunnerGuest(out)
+}
+
+// readActionsRunnerGuestUntil repeats the read-only guest query until it
+// answers or ctx ends. Only transport failures are retried; an answer that is
+// not a valid identity is returned as is.
+func readActionsRunnerGuestUntil(ctx context.Context, delay time.Duration, query func(context.Context) (string, error)) (actionsRunnerGuest, error) {
+	for {
+		out, err := query(ctx)
+		if err == nil {
+			return parseActionsRunnerGuest(out)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return actionsRunnerGuest{}, Exit(7, "inspect existing runner registration: %v", err)
+		case <-timer.C:
+		}
+	}
+}
+
+func parseActionsRunnerGuest(out string) (actionsRunnerGuest, error) {
 	var guest actionsRunnerGuest
 	if err := json.Unmarshal([]byte(out), &guest); err != nil {
 		return guest, Exit(7, "invalid guest runner identity")
@@ -442,4 +612,547 @@ case "$state" in
 esac
 rm -f -- "$runner_dir/.runner" "$runner_dir/.credentials" "$runner_dir/.credentials_rsaparams"
 `, shellQuote(fmt.Sprint(binding.RunnerID)))
+}
+
+// windowsRunnerSetupBudget is the setup deadline for GitHub-runner hydration:
+// --wait-timeout (or the default) on native Windows, none on Linux and WSL2.
+func windowsRunnerSetupBudget(target SSHTarget, waitTimeout time.Duration) time.Duration {
+	if !isWindowsNativeTarget(target) {
+		return 0
+	}
+	if waitTimeout <= 0 {
+		return defaultActionsWaitTimeout
+	}
+	return waitTimeout
+}
+
+// windowsRunnerSetupContext bounds native Windows runner setup by budget and
+// leaves Linux and WSL2 setup without an overall deadline, as before.
+func windowsRunnerSetupContext(ctx context.Context, target SSHTarget, budget time.Duration) (context.Context, context.CancelFunc) {
+	if budget = windowsRunnerSetupBudget(target, budget); budget > 0 {
+		return context.WithTimeout(ctx, budget)
+	}
+	return context.WithCancel(ctx)
+}
+
+const (
+	defaultActionsWaitTimeout    = 20 * time.Minute
+	actionsRunnerStagePrefix     = "crabbox-runner-stage="
+	actionsRunnerDiagnosticLimit = 16 * 1024
+	maxActionsDiagnosticReserve  = 30 * time.Second
+	// actionsRunnerReconcileTimeout bounds the native Windows post-install
+	// identity read and GitHub check, which outlive cancellation of the
+	// registering operation. Linux and WSL2 keep a single read within
+	// actionsRunnerSettleTimeout.
+	actionsRunnerReconcileTimeout    = 2 * time.Minute
+	actionsRunnerSettleTimeout       = 30 * time.Second
+	actionsRunnerReconcileReadBudget = 75 * time.Second
+	actionsRunnerReconcileRetryDelay = 3 * time.Second
+)
+
+type actionsRunnerSetupResult struct {
+	LastStage   string
+	Diagnostics string
+}
+
+type githubRunnerHydrationHooks struct {
+	Register     func(context.Context) error
+	ClearState   func(context.Context) error
+	Inputs       func(context.Context) (map[string]bool, bool, error)
+	Dispatch     func(context.Context, []string) error
+	OnDispatched func()
+	Wait         func(context.Context, string) (actionsHydrationState, error)
+	Now          func() time.Time
+}
+
+// runGitHubRunnerHydration gives the marker wait the full waitTimeout from
+// workflow dispatch, as it always had. A positive setupTimeout (native Windows
+// only) separately bounds setup, registration through dispatch, so a slow setup
+// never shortens the marker wait; Linux and WSL2 setup has no overall deadline.
+func runGitHubRunnerHydration(
+	ctx context.Context,
+	workflow, ref, configuredJob string,
+	fields []string,
+	setupTimeout, waitTimeout time.Duration,
+	stderr io.Writer,
+	hooks githubRunnerHydrationHooks,
+) (actionsHydrationState, error) {
+	now := hooks.Now
+	if now == nil {
+		now = time.Now
+	}
+	parent := ctx
+	ctx, cancelSetup := context.WithCancel(parent)
+	if setupTimeout > 0 {
+		cancelSetup()
+		ctx, cancelSetup = context.WithDeadline(parent, now().Add(setupTimeout))
+	}
+	defer cancelSetup()
+	if err := hooks.Register(ctx); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := hooks.ClearState(ctx); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if inputs, ok, err := hooks.Inputs(ctx); err != nil {
+		fmt.Fprintf(stderr, "warning: inspect workflow inputs failed: %v\n", err)
+	} else if ok {
+		filtered, dropped := filterWorkflowInputs(fields, inputs)
+		for _, field := range dropped {
+			fmt.Fprintf(stderr, "warning: workflow %s does not declare input %s; omitting it\n", workflow, fieldName(field))
+		}
+		fields = filtered
+		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
+			if !inputs[required] {
+				return actionsHydrationState{}, Exit(2, "workflow %s at %s does not declare required hydrate input %s", workflow, ref, required)
+			}
+		}
+	}
+	expectedJob := configuredJob
+	if !workflowFieldsContain(fields, "crabbox_job") {
+		expectedJob = ""
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := hooks.Dispatch(ctx, fields); err != nil {
+		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
+			if err := ctx.Err(); err != nil {
+				return actionsHydrationState{}, err
+			}
+			fields = dropWorkflowField(fields, "crabbox_job")
+			expectedJob = ""
+			fmt.Fprintln(stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility")
+			if retryErr := hooks.Dispatch(ctx, fields); retryErr != nil {
+				return actionsHydrationState{}, retryErr
+			}
+		} else {
+			return actionsHydrationState{}, err
+		}
+	}
+	if hooks.OnDispatched != nil {
+		hooks.OnDispatched()
+	}
+	if err := parent.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	cancelSetup()
+	waitCtx, cancelWait := context.WithDeadline(parent, now().Add(waitTimeout))
+	defer cancelWait()
+	return hooks.Wait(waitCtx, expectedJob)
+}
+
+type actionsRunnerSetupProgress struct {
+	mu          sync.Mutex
+	output      io.Writer
+	partial     string
+	lastStage   string
+	diagnostics string
+}
+
+func newActionsRunnerSetupProgress(output io.Writer) *actionsRunnerSetupProgress {
+	return &actionsRunnerSetupProgress{
+		output:    output,
+		lastStage: "bootstrap",
+	}
+}
+
+func actionsRunnerReconcileBudgets(target SSHTarget) (total, read time.Duration) {
+	if isWindowsNativeTarget(target) {
+		return actionsRunnerReconcileTimeout, actionsRunnerReconcileReadBudget
+	}
+	return actionsRunnerSettleTimeout, actionsRunnerSettleTimeout
+}
+
+func (p *actionsRunnerSetupProgress) Write(data []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.partial += string(data)
+	for {
+		index := strings.IndexByte(p.partial, '\n')
+		if index < 0 {
+			break
+		}
+		p.consumeLineLocked(p.partial[:index])
+		p.partial = p.partial[index+1:]
+	}
+	if len(p.partial) > actionsRunnerDiagnosticLimit {
+		p.appendDiagnosticLocked(p.partial)
+		p.partial = ""
+	}
+	return len(data), nil
+}
+
+func (p *actionsRunnerSetupProgress) Flush() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.partial != "" {
+		p.consumeLineLocked(p.partial)
+		p.partial = ""
+	}
+}
+
+func (p *actionsRunnerSetupProgress) Result() actionsRunnerSetupResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return actionsRunnerSetupResult{
+		LastStage:   p.lastStage,
+		Diagnostics: strings.TrimSpace(p.diagnostics),
+	}
+}
+
+func (p *actionsRunnerSetupProgress) consumeLineLocked(line string) {
+	line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	if line == "" {
+		return
+	}
+	if stage, ok := strings.CutPrefix(line, actionsRunnerStagePrefix); ok {
+		stage = sanitizeActionsRunnerStage(stage)
+		if stage == "" {
+			stage = "unknown"
+		}
+		p.lastStage = stage
+		fmt.Fprintf(p.output, "actions runner setup stage=%s\n", stage)
+		return
+	}
+	p.appendDiagnosticLocked(line + "\n")
+}
+
+func (p *actionsRunnerSetupProgress) appendDiagnosticLocked(value string) {
+	p.diagnostics += value
+	if len(p.diagnostics) > actionsRunnerDiagnosticLimit {
+		p.diagnostics = p.diagnostics[len(p.diagnostics)-actionsRunnerDiagnosticLimit:]
+	}
+}
+
+func sanitizeActionsRunnerStage(value string) string {
+	var stage strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			stage.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			stage.WriteRune(r)
+		case r >= '0' && r <= '9':
+			stage.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			stage.WriteRune(r)
+		default:
+			stage.WriteByte('-')
+		}
+	}
+	return strings.Trim(stage.String(), "-")
+}
+
+func runActionsRunnerSetup(ctx context.Context, output io.Writer, run func(stdout, stderr io.Writer) error) (actionsRunnerSetupResult, error) {
+	progress := newActionsRunnerSetupProgress(output)
+	fmt.Fprintln(output, "actions runner setup stage=bootstrap")
+	err := run(progress, progress)
+	progress.Flush()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return progress.Result(), err
+}
+
+type githubActionsRunnerState struct {
+	Found  bool
+	Status string
+	Busy   bool
+}
+
+type githubActionsRunnerLookup func(context.Context) (githubActionsRunnerState, error)
+
+// githubActionsRunnerStateForBinding reads the exact recorded registration, so a
+// same-named runner in the scope cannot satisfy the online check.
+func githubActionsRunnerStateForBinding(ctx context.Context, binding ActionsRunnerBinding, childEnvDenylist []string) (githubActionsRunnerState, error) {
+	if binding.RunnerID <= 0 || !actionsRunnerScopePattern.MatchString(binding.Scope) {
+		return githubActionsRunnerState{}, Exit(2, "invalid Actions runner receipt")
+	}
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", fmt.Sprintf("%s/actions/runners/%d", binding.Scope, binding.RunnerID))
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return githubActionsRunnerState{}, nil
+		}
+		return githubActionsRunnerState{}, err
+	}
+	var runner struct {
+		ID     int64  `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Busy   bool   `json:"busy"`
+	}
+	if err := json.Unmarshal([]byte(out), &runner); err != nil {
+		return githubActionsRunnerState{}, Exit(3, "invalid GitHub runner response")
+	}
+	if runner.ID != binding.RunnerID || runner.Name != binding.Name {
+		return githubActionsRunnerState{}, nil
+	}
+	return githubActionsRunnerState{Found: true, Status: runner.Status, Busy: runner.Busy}, nil
+}
+
+func waitForGitHubActionsRunnerOnline(
+	ctx context.Context,
+	scope string,
+	name string,
+	interval time.Duration,
+	lookup githubActionsRunnerLookup,
+	stderr io.Writer,
+) error {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	return waitForGitHubActionsRunnerOnlineWithPoll(ctx, scope, name, lookup, stderr, func(ctx context.Context) error {
+		return waitForActionsPoll(ctx, interval)
+	})
+}
+
+func waitForActionsPoll(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForGitHubActionsRunnerOnlineWithPoll(
+	ctx context.Context,
+	scope string,
+	name string,
+	lookup githubActionsRunnerLookup,
+	stderr io.Writer,
+	poll func(context.Context) error,
+) error {
+	var lastState githubActionsRunnerState
+	var lastErr error
+	for {
+		state, err := lookup(ctx)
+		if err == nil {
+			lastState = state
+			lastErr = nil
+			if ctx.Err() == nil && state.Found && strings.EqualFold(state.Status, "online") {
+				fmt.Fprintf(stderr, "actions runner online scope=%s name=%s busy=%t\n", scope, name, state.Busy)
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		status := "missing"
+		if lastState.Found {
+			status = blank(lastState.Status, "unknown")
+		}
+		if lastErr != nil {
+			fmt.Fprintf(stderr, "waiting for actions runner online scope=%s name=%s error=%q\n", scope, name, lastErr.Error())
+		} else {
+			fmt.Fprintf(stderr, "waiting for actions runner online scope=%s name=%s status=%s busy=%t\n", scope, name, status, lastState.Busy)
+		}
+
+		pollErr := ctx.Err()
+		if pollErr == nil {
+			pollErr = poll(ctx)
+		}
+		if pollErr != nil {
+			if errors.Is(pollErr, context.DeadlineExceeded) {
+				if lastErr != nil {
+					return Exit(5, "timed out waiting for GitHub Actions runner %s in %s to become online: last lookup error: %v", name, scope, lastErr)
+				}
+				return Exit(5, "timed out waiting for GitHub Actions runner %s in %s to become online: last status=%s busy=%t", name, scope, status, lastState.Busy)
+			}
+			return pollErr
+		}
+	}
+}
+
+func actionsRunnerBootstrapContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(ctx)
+	}
+	reserve := remaining / 20
+	if reserve > maxActionsDiagnosticReserve {
+		reserve = maxActionsDiagnosticReserve
+	}
+	if reserve <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
+}
+
+func readGitHubActionsRunnerDiagnosticsBestEffort(ctx context.Context, target SSHTarget, secrets ...string) string {
+	if err := ctx.Err(); err != nil {
+		return fmt.Sprintf("diagnostics skipped: timeout budget exhausted: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := runSSHOutputWithRemoteWaitTimeout(ctx, target, remoteGitHubActionsRunnerDiagnostics(target), 15*time.Second, "2", "1")
+	if ctx.Err() != nil {
+		return fmt.Sprintf("diagnostics unavailable: %v", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Sprintf("diagnostics unavailable: %v", err)
+	}
+	out = redactActionsRunnerText(out, secrets...)
+	if len(out) > actionsRunnerDiagnosticLimit {
+		out = out[len(out)-actionsRunnerDiagnosticLimit:]
+	}
+	return strings.TrimSpace(out)
+}
+
+func redactActionsRunnerText(value string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func remoteGitHubActionsRunnerDiagnostics(target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return PowershellCommand(`$ErrorActionPreference = "Continue"
+$runnerDir = Join-Path $HOME "actions-runner"
+Get-ScheduledTask | Where-Object { $_.TaskName -like "crabbox-actions-runner-*" } | ForEach-Object {
+  Write-Output ("task=" + $_.TaskName + " state=" + $_.State)
+}
+Get-CimInstance Win32_Process | Where-Object { $_.Name -in @("Runner.Listener.exe", "Runner.Worker.exe") } | ForEach-Object {
+  Write-Output ("process=" + $_.Name + " pid=" + $_.ProcessId)
+}
+foreach ($path in @((Join-Path $runnerDir "crabbox-runner.err.log"), (Join-Path $runnerDir "crabbox-runner.log"), (Join-Path $runnerDir "crabbox-config.log"))) {
+  if (Test-Path -LiteralPath $path) {
+    Write-Output ("log=" + $path)
+    Get-Content -LiteralPath $path -Tail 40
+  }
+}
+Get-ChildItem -LiteralPath (Join-Path $runnerDir "_diag") -Filter "Runner_*.log" -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 |
+  ForEach-Object {
+    Write-Output ("log=" + $_.FullName)
+    Get-Content -LiteralPath $_.FullName -Tail 40
+  }
+exit 0
+`)
+	}
+	return `set +e
+runner_dir="$HOME/actions-runner"
+printf 'service='
+systemctl is-active crabbox-actions-runner.service 2>&1
+systemctl status crabbox-actions-runner.service --no-pager --lines=20 2>&1
+for path in "$runner_dir/crabbox-runner.err.log" "$runner_dir/crabbox-runner.log" "$runner_dir/crabbox-config.log"; do
+  if [ -f "$path" ]; then
+    echo "log=$path"
+    tail -n 40 "$path"
+  fi
+done
+latest="$(find "$runner_dir/_diag" -maxdepth 1 -type f -name 'Runner_*.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"
+if [ -n "$latest" ]; then
+  echo "log=$latest"
+  tail -n 40 "$latest"
+fi
+exit 0`
+}
+
+// windowsGitBashDiscoveryPowerShell defines Find-CrabboxGitBashBin, which
+// returns the bin directory of an existing Git for Windows with bash.exe: a
+// machine, 32-bit or per-user install, or the installation whose git.exe is on
+// PATH (portable Git included). MinGit has no bash.exe, and the WSL bash.exe
+// launcher in System32 is never a candidate.
+func windowsGitBashDiscoveryPowerShell() string {
+	return `function Find-CrabboxGitBashBin {
+  $roots = [System.Collections.Generic.List[string]]::new()
+  foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if ($base) { $roots.Add((Join-Path $base "Git")) }
+  }
+  if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA "Programs\Git")) }
+  foreach ($git in @(Get-Command git.exe -CommandType Application -All -ErrorAction SilentlyContinue)) {
+    $dir = Split-Path -Parent $git.Source
+    $parent = Split-Path -Parent $dir
+    if ((Split-Path -Leaf $dir) -eq "bin" -and @("mingw64", "mingw32", "usr") -contains (Split-Path -Leaf $parent)) {
+      $roots.Add((Split-Path -Parent $parent))
+    } elseif (@("cmd", "bin") -contains (Split-Path -Leaf $dir)) {
+      $roots.Add($parent)
+    }
+  }
+  foreach ($root in $roots) {
+    $bin = Join-Path $root "bin"
+    if (Test-Path -LiteralPath (Join-Path $bin "bash.exe") -PathType Leaf) { return $bin }
+  }
+  return $null
+}
+`
+}
+
+// windowsRunnerGitBashPowerShell gives a native Windows runner the Git Bash that
+// GitHub-hosted Windows runners provide, so workflow steps with `shell: bash`
+// work. An existing Git for Windows Bash is reused wherever it is installed; a
+// guest without one (MinGit has no bash.exe) gets the pinned, verified Git for
+// Windows installer without a machine PATH change. The runner's own PATH gains
+// that bin directory before config.cmd records it, and the directory is recorded
+// for the listener, whose start command must stay short.
+func windowsRunnerGitBashPowerShell() string {
+	return windowsGitBashDiscoveryPowerShell() + `$crabboxGitBin = Find-CrabboxGitBashBin
+if (-not $crabboxGitBin) {
+  $crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
+  Write-CrabboxRunnerStage "git-bash"
+  $crabboxGitInstaller = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-git-for-windows-" + [Guid]::NewGuid().ToString("N") + ".exe")
+  try {
+    Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $crabboxGitInstaller -UseBasicParsing -TimeoutSec 600
+    $crabboxGitSha = (Get-FileHash -LiteralPath $crabboxGitInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($crabboxGitSha -ne ` + psQuote(gitForWindowsSetupSHA256) + `) {
+      throw "Git for Windows installer checksum mismatch: actual=$crabboxGitSha"
+    }
+    $crabboxGitExit = Invoke-CrabboxSetupProgram -FilePath $crabboxGitInstaller -ArgumentList @("/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/NOCANCEL", "/SP-", "/o:PathOption=BashOnly")
+    if ($crabboxGitExit -ne 0) {
+      throw ("Git for Windows installer exited " + $crabboxGitExit)
+    }
+  } finally {
+    Remove-Item -LiteralPath $crabboxGitInstaller -Force -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe"))) {
+    throw "Git for Windows did not provide bash.exe"
+  }
+}
+$env:Path = $crabboxGitBin + ";" + $env:Path
+[IO.File]::WriteAllText((Join-Path $runnerDir "` + windowsRunnerGitBinRecord + `"), $crabboxGitBin)
+`
+}
+
+// windowsRunnerGitBinRecord names the file in the runner directory that holds
+// the Git Bash bin directory runner setup chose.
+const windowsRunnerGitBinRecord = "crabbox-git-bin.txt"
+
+// actionsLeaseLifetimeWarning reports a lease whose recorded expiry falls before
+// the GitHub-runner hydration budget ends. Heartbeats renew idle time but not
+// the lease TTL, so such a lease can expire during or right after hydration.
+func actionsLeaseLifetimeWarning(leaseID string, server Server, now time.Time, wait time.Duration) string {
+	// Heartbeats keep moving expires_at with the idle deadline; only the TTL
+	// from creation is a hard limit.
+	created, ok := parseLeaseLabelTime(server.Labels["created_at"])
+	if !ok {
+		return ""
+	}
+	ttl, ok := LeaseLabelDuration(server.Labels["ttl_secs"])
+	if !ok {
+		return ""
+	}
+	remaining := created.Add(ttl).Sub(now)
+	if remaining >= wait {
+		return ""
+	}
+	return fmt.Sprintf("warning: lease %s reaches its TTL in %s, before the --wait-timeout of %s; it can expire during or right after GitHub-runner hydration. Warm runner-hydration leases with a longer --ttl.", leaseID, max(remaining, 0).Round(time.Second), wait)
 }

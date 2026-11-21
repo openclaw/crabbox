@@ -212,7 +212,7 @@ func TestActionsWorkspaceClaimBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			if kind == "changed-claim" {
-				if _, err := UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"state": "ready"}); err != nil {
+				if _, err := UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"owner_note": "other-writer"}); err != nil {
 					t.Fatal(err)
 				}
 			} else if kind == "wrong-owner" {
