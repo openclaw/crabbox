@@ -16,6 +16,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
 	github.com/aws/aws-sdk-go-v2/service/lambdamicrovms v1.7.0
 	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.0
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0
 	github.com/aws/smithy-go v1.28.2
 	github.com/containernetworking/cni v1.3.1

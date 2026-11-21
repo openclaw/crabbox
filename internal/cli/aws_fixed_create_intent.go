@@ -59,6 +59,7 @@ type fixedAWSCreateIntentNetwork struct {
 
 // fixedAWSCreateIntentSSH stays separate because its identity fields must not enter Machine0's durable JSON.
 type fixedAWSCreateIntentSSH struct {
+	Transport       string   `json:"transport,omitempty" configFields:"AWSSSHTransport"`
 	User            string   `json:"user" configFields:"SSHUser"`
 	Port            string   `json:"port" configFields:"SSHPort"`
 	FallbackPorts   []string `json:"fallbackPorts,omitempty" configFields:"SSHFallbackPorts"`
@@ -84,6 +85,14 @@ type fixedAWSCreateIntentCapacity struct {
 	Regions           []string `json:"regions,omitempty"`
 	AvailabilityZones []string `json:"availabilityZones,omitempty"`
 	Hints             bool     `json:"hints"`
+}
+
+func fixedAWSCreateIntentSSHTransport(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == AWSSSHTransportDirect {
+		return ""
+	}
+	return value
 }
 
 func FixedAWSCreateIntentFingerprint(cfg Config, req FixedAWSCreateIntentRequest) (string, error) {
@@ -123,8 +132,10 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 	if hostID == "" {
 		hostID = strings.TrimSpace(cfg.AWSMacHostID)
 	}
+	sshTransport := fixedAWSCreateIntentSSHTransport(cfg.AWSSSHTransport)
+	sshCIDRsPinned := cfg.AWSSSHCIDRsPinned && sshTransport != AWSSSHTransportSSM
 	sshCIDRs := []string(nil)
-	if cfg.AWSSSHCIDRsPinned {
+	if sshCIDRsPinned {
 		sshCIDRs = fixedCanonicalStringSet(cfg.AWSSSHCIDRs)
 	}
 	return fixedAWSCreateIntent{
@@ -159,9 +170,10 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 		Networking: fixedAWSCreateIntentNetwork{
 			Mode:            network,
 			SecurityGroupID: strings.TrimSpace(cfg.AWSSGID),
-			SSHCIDRsPinned:  cfg.AWSSSHCIDRsPinned,
+			SSHCIDRsPinned:  sshCIDRsPinned,
 			SSHCIDRs:        sshCIDRs,
 			SSH: fixedAWSCreateIntentSSH{
+				Transport:       sshTransport,
 				User:            strings.TrimSpace(cfg.SSHUser),
 				Port:            strings.TrimSpace(cfg.SSHPort),
 				FallbackPorts:   fixedCanonicalOrderedStrings(cfg.SSHFallbackPorts),

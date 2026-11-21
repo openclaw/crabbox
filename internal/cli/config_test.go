@@ -13441,6 +13441,7 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 		},
 		Hetzner: &fileHetznerConfig{Location: "fsn1", Image: "ubuntu-24.04", SSHKey: "hetzner-key"},
 		AWS: &fileAWSConfig{
+			SSHTransport:    AWSSSHTransportSSM,
 			Region:          "eu-central-1",
 			AMI:             "ami-test",
 			SecurityGroupID: "sg-test",
@@ -13483,8 +13484,8 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 	if cfg.Provider != "aws" || cfg.Access.ClientID != "access-id" || cfg.CoordToken != "coord-token" {
 		t.Fatalf("broker/access config not applied: provider=%s access=%#v token=%s", cfg.Provider, cfg.Access, cfg.CoordToken)
 	}
-	if cfg.Location != "fsn1" || cfg.ProviderKey != "hetzner-key" || cfg.HostID != "h-mac" || cfg.AWSRootGB != 123 {
-		t.Fatalf("hetzner/aws config not applied: location=%s key=%s host=%s root=%d", cfg.Location, cfg.ProviderKey, cfg.HostID, cfg.AWSRootGB)
+	if cfg.Location != "fsn1" || cfg.ProviderKey != "hetzner-key" || cfg.HostID != "h-mac" || cfg.AWSRootGB != 123 || cfg.AWSSSHTransport != AWSSSHTransportSSM {
+		t.Fatalf("hetzner/aws config not applied: location=%s key=%s host=%s root=%d transport=%s", cfg.Location, cfg.ProviderKey, cfg.HostID, cfg.AWSRootGB, cfg.AWSSSHTransport)
 	}
 	if cfg.Azure.OSDisk != "ephemeral" || !cfg.Azure.OSDiskExplicit || cfg.Azure.Network != "public" {
 		t.Fatalf("azure config not applied: %#v", cfg)

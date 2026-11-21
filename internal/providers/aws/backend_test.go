@@ -33,6 +33,7 @@ type fakeAWSClient struct {
 	createCfg        core.Config
 	createErr        error
 	waitErr          error
+	waitPublicIP     []bool
 	acquireStateErr  error
 	get              map[string]core.Server
 	getErrs          map[string]error
@@ -40,6 +41,9 @@ type fakeAWSClient struct {
 	getIDs           []string
 	deletedInstances []string
 	deleteServerErr  error
+	terminatedSSM    []string
+	terminateSSMErr  error
+	teardownEvents   []string
 	deletedKeys      []string
 	deleteKeyErr     error
 	validatedKeys    []string
@@ -109,9 +113,10 @@ func (c *fakeAWSClient) CreateServerWithFallbackControl(ctx context.Context, cfg
 	return server, cfg, nil
 }
 
-func (c *fakeAWSClient) WaitForServerIP(context.Context, string) (core.Server, error) {
+func (c *fakeAWSClient) WaitForServer(_ context.Context, _ string, requirePublicIP bool) (core.Server, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.waitPublicIP = append(c.waitPublicIP, requirePublicIP)
 	if c.waitErr != nil {
 		return core.Server{}, c.waitErr
 	}
@@ -144,8 +149,15 @@ func (c *fakeAWSClient) GetServer(_ context.Context, id string) (core.Server, er
 }
 
 func (c *fakeAWSClient) DeleteServer(_ context.Context, id string) error {
+	c.teardownEvents = append(c.teardownEvents, "instance")
 	c.deletedInstances = append(c.deletedInstances, id)
 	return c.deleteServerErr
+}
+
+func (c *fakeAWSClient) TerminateOwnedSSMSessions(_ context.Context, id string) error {
+	c.teardownEvents = append(c.teardownEvents, "ssm")
+	c.terminatedSSM = append(c.terminatedSSM, id)
+	return c.terminateSSMErr
 }
 
 func (c *fakeAWSClient) DeleteSSHKey(_ context.Context, name string) error {
@@ -165,6 +177,7 @@ func (c *fakeAWSClient) ResolveCleanupSSHKeyID(_ context.Context, name string) (
 }
 
 func (c *fakeAWSClient) DeleteCleanupSSHKeyID(_ context.Context, keyPairID string) error {
+	c.teardownEvents = append(c.teardownEvents, "key")
 	c.deletedKeys = append(c.deletedKeys, keyPairID)
 	return c.deleteKeyErr
 }
@@ -1391,10 +1404,74 @@ func fixedAWSTestServer(control *core.AWSFixedCreateControl, cfg core.Config, le
 	server.Labels["aws_account_id"] = control.AccountID
 	server.Labels["aws_key_pair_id"] = attempt.KeyPairID
 	server.Labels["provider_key"] = cfg.ProviderKey
+	if cfg.AWSSSHTransport == core.AWSSSHTransportSSM {
+		server.Labels["aws_ssh_transport"] = core.AWSSSHTransportSSM
+	}
 	for key, value := range core.AWSFixedAttemptAttestationLabels(attempt) {
 		server.Labels[key] = value
 	}
 	return server
+}
+
+func TestAWSFixedAcquireRejectsSSHTransportDrift(t *testing.T) {
+	for index, test := range []struct {
+		name    string
+		initial string
+		drifted string
+	}{
+		{name: "direct to SSM", initial: core.AWSSSHTransportDirect, drifted: core.AWSSSHTransportSSM},
+		{name: "SSM to direct", initial: core.AWSSSHTransportSSM, drifted: core.AWSSSHTransportDirect},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			fake := &fakeAWSClient{}
+			t.Cleanup(installFixedAWSTestClient(t, fake))
+			cfg := fixedAWSTestConfig()
+			cfg.AWSSSHTransport = test.initial
+			req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: fmt.Sprintf("cbx_abcdef12349%d", index), RequestedSlug: "transport-drift"}
+			if _, err := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend).Acquire(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			cfg.AWSSSHTransport = test.drifted
+			if _, err := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend).Acquire(t.Context(), req); err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+				t.Fatalf("transport drift err=%v, want lease_id_conflict", err)
+			}
+			if fake.createCalls != 1 {
+				t.Fatalf("transport drift creates=%d, want 1", fake.createCalls)
+			}
+		})
+	}
+}
+
+func TestAWSFixedSSMAcquireIgnoresDirectSSHCIDRsOnReplay(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	oldEnsure := ensureAWSSSHCIDRs
+	detections := 0
+	ensureAWSSSHCIDRs = func(context.Context, *core.Config) { detections++ }
+	t.Cleanup(func() { ensureAWSSSHCIDRs = oldEnsure })
+
+	cfg := fixedAWSTestConfig()
+	cfg.AWSSSHTransport = core.AWSSSHTransportSSM
+	cfg.AWSSSHCIDRs = []string{"198.51.100.7/32"}
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef123495", RequestedSlug: "ssm-cidr-free"}
+	first := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	if _, err := first.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if detections != 0 || fake.createCfg.AWSSSHCIDRsPinned || len(fake.createCfg.AWSSSHCIDRs) != 0 {
+		t.Fatalf("SSM fixed acquire detections=%d pinned=%t CIDRs=%v, want no direct CIDR state", detections, fake.createCfg.AWSSSHCIDRsPinned, fake.createCfg.AWSSSHCIDRs)
+	}
+
+	cfg.AWSSSHCIDRs = []string{"203.0.113.9/32"}
+	replayed, err := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend).Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatalf("SSM replay with irrelevant CIDR drift: %v", err)
+	}
+	if replayed.Server.CloudID == "" || fake.createCalls != 1 || detections != 0 {
+		t.Fatalf("SSM replay=%#v creates=%d detections=%d", replayed, fake.createCalls, detections)
+	}
 }
 
 func installFixedAWSTestClient(t *testing.T, fake *fakeAWSClient) func() {
@@ -1431,7 +1508,7 @@ func TestAWSFixedCleanupRetainsPreparedClaimWhileInstanceVisibilityIsUncertain(t
 				err = backend.cleanupOrphanedAWSClaims(t.Context(), false)
 			case "terminate":
 				fake.deleteServerErr = missing
-				err = deleteClaimedAWSServerWithClient(t.Context(), fake, fake.created, before, before.Labels["aws_key_pair_id"])
+				err = deleteClaimedAWSServerWithClient(t.Context(), fake, core.Config{}, fake.created, before, before.Labels["aws_key_pair_id"])
 			default:
 				terminal := fake.created
 				terminal.Status = "terminated"
@@ -1561,6 +1638,58 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	}
 	if len(fake.validatedKeys) != 0 {
 		t.Fatalf("validated keys=%v, want create-time key binding without name re-resolution", fake.validatedKeys)
+	}
+}
+
+func TestAWSSSMAcquireReadinessFailureDoesNotFallBackToDirectAccess(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	readinessFailures := []struct {
+		name string
+		err  error
+	}{
+		{name: "missing AWS CLI", err: errors.New("AWS CLI is not installed")},
+		{name: "missing Session Manager plugin", err: errors.New("SessionManagerPlugin is not found")},
+		{name: "StartSession access denied", err: errors.New("AccessDeniedException: not authorized to perform ssm:StartSession")},
+	}
+	for _, test := range readinessFailures {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeAWSClient{}
+			oldClient := newAWSClient
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+			oldEnsure := ensureAWSSSHCIDRs
+			detections := 0
+			ensureAWSSSHCIDRs = func(context.Context, *core.Config) { detections++ }
+			oldBootstrap := bootstrapAWSWindowsDesktop
+			var target core.SSHTarget
+			bootstrapAWSWindowsDesktop = func(_ context.Context, _ core.Config, candidate *core.SSHTarget, _ string, _ io.Writer) error {
+				target = *candidate
+				return test.err
+			}
+			t.Cleanup(func() {
+				newAWSClient = oldClient
+				ensureAWSSSHCIDRs = oldEnsure
+				bootstrapAWSWindowsDesktop = oldBootstrap
+			})
+
+			cfg := core.Config{Provider: "aws", TargetOS: "linux", AWSRegion: "us-west-2", AWSSSHTransport: core.AWSSSHTransportSSM}
+			backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			_, err := backend.acquireOnce(t.Context(), false, "ssm-no-fallback")
+			if !errors.Is(err, test.err) {
+				t.Fatalf("acquisition error=%v, want original readiness error %v", err, test.err)
+			}
+			if detections != 0 || len(fake.createCfg.AWSSSHCIDRs) != 0 {
+				t.Fatalf("direct CIDR fallback detections=%d CIDRs=%v, want none", detections, fake.createCfg.AWSSSHCIDRs)
+			}
+			if !reflect.DeepEqual(fake.waitPublicIP, []bool{false}) {
+				t.Fatalf("public-IP waits=%v, want private instance wait only", fake.waitPublicIP)
+			}
+			if target.Host != fake.created.CloudID || target.ProxyCommand == "" || !target.SSHConfigProxy {
+				t.Fatalf("readiness target=%#v, want instance-id SSM proxy target", target)
+			}
+			if len(fake.deletedInstances) != 1 || len(fake.terminatedSSM) != 1 || len(fake.deletedKeys) != 1 {
+				t.Fatalf("rollback instances=%v sessions=%v keys=%v, want exact owned cleanup", fake.deletedInstances, fake.terminatedSSM, fake.deletedKeys)
+			}
+		})
 	}
 }
 
@@ -1695,6 +1824,48 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != west.servers[0].Labels["aws_key_pair_id"] {
 		t.Fatalf("west deleted keys=%v, want immutable provider key id", west.deletedKeys)
+	}
+}
+
+func TestAWSResolveUsesPersistedSSHTransport(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	const leaseID = "cbx_0a1b2c3d4e5f"
+	base := awsTestServer("i-transport", leaseID, "transport", "us-west-2")
+	base.PublicNet.IPv4.IP = "203.0.113.42"
+
+	for _, test := range []struct {
+		name             string
+		configured       string
+		persisted        string
+		wantHost         string
+		wantProxyCommand bool
+	}{
+		{name: "persisted SSM overrides current direct", configured: core.AWSSSHTransportDirect, persisted: core.AWSSSHTransportSSM, wantHost: base.CloudID, wantProxyCommand: true},
+		{name: "legacy unlabeled lease stays direct under current SSM", configured: core.AWSSSHTransportSSM, wantHost: base.PublicNet.IPv4.IP},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := base
+			server.Labels = maps.Clone(base.Labels)
+			if test.persisted != "" {
+				server.Labels["aws_ssh_transport"] = test.persisted
+			}
+			fake := &fakeAWSClient{servers: []core.Server{server}}
+			oldClient := newAWSClient
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+			t.Cleanup(func() { newAWSClient = oldClient })
+
+			cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2", AWSSSHTransport: test.configured}
+			backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			for _, id := range []string{server.CloudID, server.Labels["slug"]} {
+				lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: id, ReleaseOnly: true})
+				if err != nil {
+					t.Fatalf("resolve %s: %v", id, err)
+				}
+				if lease.SSH.Host != test.wantHost || (lease.SSH.ProxyCommand != "") != test.wantProxyCommand {
+					t.Fatalf("resolve %s target host=%q proxy=%q, want host=%q proxy=%t", id, lease.SSH.Host, lease.SSH.ProxyCommand, test.wantHost, test.wantProxyCommand)
+				}
+			}
+		})
 	}
 }
 
@@ -1867,6 +2038,144 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	}
 	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok || claim.LeaseID != "" {
 		t.Fatalf("claim=%+v ok=%v err=%v, want removed claim after instance termination", claim, ok, err)
+	}
+}
+
+func TestAWSSSMReleaseSkipsGuestSSHAndSurfacesSessionCleanupFailure(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	leaseID := "cbx_0abcde123456"
+	keyName := core.ProviderKeyForLease(leaseID)
+	server := awsTestServer("i-0123456789abcdef0", leaseID, "ssm-release", "us-west-2")
+	server.Labels["aws_account_id"] = "123456789012"
+	server.Labels["aws_ssh_transport"] = core.AWSSSHTransportSSM
+	server.Labels["provider_key"] = keyName
+	server.Labels["aws_key_pair_id"] = "key-id-for-" + keyName
+	cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2", AWSSSHTransport: core.AWSSSHTransportSSM}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "ssm-release", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	sessionErr := errors.New("ssm terminate denied")
+	keyErr := errors.New("key cleanup denied")
+	fake := &fakeAWSClient{terminateSSMErr: sessionErr, deleteKeyErr: keyErr}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	remoteCleanupCalls := 0
+	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{Server: server, LeaseID: leaseID},
+		GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) {
+			remoteCleanupCalls++
+		},
+	})
+	if remoteCleanupCalls != 0 {
+		t.Fatalf("SSM destructive release made %d guest SSH cleanup call(s)", remoteCleanupCalls)
+	}
+	if outcome.Terminal {
+		t.Fatalf("unverified SSM cleanup produced a terminal outcome: %+v", outcome)
+	}
+	if !errors.Is(err, sessionErr) || !errors.Is(err, keyErr) {
+		t.Fatalf("err=%v, want both session and key cleanup failures", err)
+	}
+	if !slices.Equal(fake.terminatedSSM, []string{server.CloudID}) || !slices.Equal(fake.deletedInstances, []string{server.CloudID}) || !slices.Equal(fake.deletedKeys, []string{server.Labels["aws_key_pair_id"]}) {
+		t.Fatalf("cleanup order inputs sessions=%v instances=%v keys=%v", fake.terminatedSSM, fake.deletedInstances, fake.deletedKeys)
+	}
+	if !slices.Equal(fake.teardownEvents, []string{"ssm", "instance", "key"}) {
+		t.Fatalf("teardown events=%v, want session then instance then key", fake.teardownEvents)
+	}
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
+		t.Fatalf("unverified cleanup removed retry authority: %v", err)
+	}
+}
+
+func TestAWSDirectReleasePreservesGuardedGuestCleanup(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	leaseID := "cbx_0fedcb654321"
+	server := awsTestServer("i-direct-release", leaseID, "direct-release", "us-west-2")
+	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+	server.Labels["aws_key_pair_id"] = "key-id-for-" + server.Labels["provider_key"]
+	cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2"}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "direct-release", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	fake := &fakeAWSClient{}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	remoteCleanupCalls := 0
+	err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{Server: server, LeaseID: leaseID},
+		GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) {
+			remoteCleanupCalls++
+		},
+	})
+	if err != nil || remoteCleanupCalls != 1 {
+		t.Fatalf("err=%v remote cleanup calls=%d, want preserved direct guest cleanup", err, remoteCleanupCalls)
+	}
+}
+
+func TestAWSSSMAcquireRollbackContinuesAfterSessionCleanupFailure(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	sessionErr := errors.New("describe sessions denied")
+	fake := &fakeAWSClient{terminateSSMErr: sessionErr}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2", AWSSSHTransport: core.AWSSSHTransportSSM}
+	err := cleanupAWSCreatedResources(t.Context(), io.Discard, cfg, "cbx_012345abcdef", "i-rollback", "key-rollback")
+	if !errors.Is(err, sessionErr) {
+		t.Fatalf("err=%v, want surfaced session cleanup failure", err)
+	}
+	if !slices.Equal(fake.teardownEvents, []string{"ssm", "instance", "key"}) {
+		t.Fatalf("rollback teardown events=%v, want session failure not to block instance/key cleanup", fake.teardownEvents)
+	}
+}
+
+func TestAWSSSMReleaseRejectsAccountMismatchBeforeTeardown(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	leaseID := "cbx_0123abcdef45"
+	server := awsTestServer("i-account-mismatch", leaseID, "account-mismatch", "us-west-2")
+	server.Labels["aws_account_id"] = "123456789012"
+	server.Labels["aws_ssh_transport"] = core.AWSSSHTransportSSM
+	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+	server.Labels["aws_key_pair_id"] = "key-id-for-" + server.Labels["provider_key"]
+	cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2", AWSSSHTransport: core.AWSSSHTransportSSM}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "account-mismatch", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	fake := &fakeAWSClient{accountID: "999999999999"}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: server, LeaseID: leaseID}})
+	if err == nil || !strings.Contains(err.Error(), "current account does not match") {
+		t.Fatalf("err=%v, want account scope rejection", err)
+	}
+	if len(fake.teardownEvents) != 0 {
+		t.Fatalf("account mismatch reached destructive teardown: %v", fake.teardownEvents)
+	}
+}
+
+func TestAWSSSMReleaseTreatsAbsentExactInstanceAsIdempotent(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	leaseID := "cbx_0a1b2c3d4e5f"
+	server := awsTestServer("i-already-absent", leaseID, "already-absent", "us-west-2")
+	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+	server.Labels["aws_key_pair_id"] = "key-id-for-" + server.Labels["provider_key"]
+	claim := core.LeaseClaim{LeaseID: leaseID, Labels: maps.Clone(server.Labels)}
+	fake := &fakeAWSClient{deleteServerErr: errors.New("InvalidInstanceID.NotFound")}
+	err := deleteAWSReleaseServerWithClient(t.Context(), fake, core.Config{AWSSSHTransport: core.AWSSSHTransportSSM}, server, claim, io.Discard)
+	if err != nil {
+		t.Fatalf("idempotent absent release: %v", err)
+	}
+	if !slices.Equal(fake.teardownEvents, []string{"ssm", "instance", "key"}) {
+		t.Fatalf("teardown events=%v, want absent instance to continue key cleanup", fake.teardownEvents)
 	}
 }
 

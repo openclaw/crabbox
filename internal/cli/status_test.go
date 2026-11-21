@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -205,6 +206,143 @@ func TestStatusViewIncludesProviderMetadata(t *testing.T) {
 	if view.ProviderMetadata != nil {
 		t.Fatalf("providerMetadata=%v, want omitted invalid metadata", view.ProviderMetadata)
 	}
+}
+
+func TestInspectReadinessUsesResolvedSSHTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	sshCalls := installStatusSSHProbe(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	directHost, directPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		publicHost  string
+		target      SSHTarget
+		probeExit   string
+		wantReady   bool
+		wantHasHost bool
+		wantProbes  int
+	}{
+		{
+			name: "provider proxy target succeeds without public host",
+			target: SSHTarget{
+				Host: "i-0123456789abcdef0", User: "ec2-user", Port: "22",
+				ProxyCommand:   "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p",
+				SSHConfigProxy: true, NoControlMaster: true, ReadyCheck: "true",
+			},
+			wantReady: true, wantProbes: 1,
+		},
+		{
+			name: "provider proxy probe failure remains not ready",
+			target: SSHTarget{
+				Host: "i-0123456789abcdef0", User: "ec2-user", Port: "22",
+				ProxyCommand:   "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p",
+				SSHConfigProxy: true, NoControlMaster: true, ReadyCheck: "true",
+			},
+			probeExit: "255", wantReady: false, wantProbes: 1,
+		},
+		{
+			name:       "direct SSH target remains ready",
+			publicHost: directHost,
+			target: SSHTarget{
+				Host: directHost, User: "ec2-user", Port: directPort,
+				NetworkKind: NetworkPublic, ReadyCheck: "true",
+			},
+			wantReady: true, wantHasHost: true, wantProbes: 1,
+		},
+		{
+			name: "unresolved target remains not ready",
+			target: SSHTarget{
+				User: "ec2-user", Port: "22",
+				ProxyCommand:   "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p",
+				SSHConfigProxy: true, NoControlMaster: true, ReadyCheck: "true",
+			},
+			wantReady: false, wantProbes: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(sshCalls, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_FAKE_SSH_EXIT", test.probeExit)
+			backend := &statusInspectBackend{lease: LeaseTarget{
+				LeaseID: "cbx_status",
+				Server: Server{Provider: "aws", CloudID: "i-0123456789abcdef0", Status: "running", Labels: map[string]string{
+					"lease": "cbx_status", "slug": "status", "provider": "aws", "state": "ready",
+				}},
+				SSH: test.target,
+			}}
+			backend.lease.Server.PublicNet.IPv4.IP = test.publicHost
+			testAWSBackendOverride = backend
+			t.Cleanup(func() { testAWSBackendOverride = nil })
+
+			var stdout bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: io.Discard}).inspect(t.Context(), []string{"--provider", "aws", "--id", "cbx_status", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var view statusView
+			if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			if view.Ready != test.wantReady {
+				t.Fatalf("ready=%t, want %t; inspect=%s", view.Ready, test.wantReady, stdout.String())
+			}
+			if view.HasHost != test.wantHasHost {
+				t.Fatalf("hasHost=%t, want %t; inspect=%s", view.HasHost, test.wantHasHost, stdout.String())
+			}
+			data, err := os.ReadFile(sshCalls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(data), "probe\n"); got != test.wantProbes {
+				t.Fatalf("probe calls=%d, want %d", got, test.wantProbes)
+			}
+			if test.target.ProxyCommand != "" && test.wantProbes > 0 && !strings.Contains(string(data), "ProxyCommand="+test.target.ProxyCommand) {
+				t.Fatalf("probe did not preserve provider ProxyCommand: %s", data)
+			}
+		})
+	}
+}
+
+type statusInspectBackend struct {
+	testSSHBackend
+	lease LeaseTarget
+}
+
+func (b *statusInspectBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return b.lease, nil
+}
+
+func installStatusSSHProbe(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf 'probe\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+printf '%s\n' "$@" >> "$CRABBOX_FAKE_SSH_CALLS"
+exit "${CRABBOX_FAKE_SSH_EXIT:-0}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", calls)
+	return calls
 }
 
 func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {

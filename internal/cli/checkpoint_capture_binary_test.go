@@ -95,6 +95,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 		{"review", runCheckpointCaptureReviewContract},
 		{"local-container", runCheckpointContainerReviewContract},
 		{"aws", runCheckpointAWSStrategyContract},
+		{"aws-ssh-access", runCheckpointAWSSSHAccessContract},
 		{"aws-non-submission", runCheckpointAWSNonSubmissionContract},
 		{"coordinator-non-submission", runCheckpointCoordinatorNonSubmissionContract},
 		{"machine0-strategy", runCheckpointMachine0StrategyContract},

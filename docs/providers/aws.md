@@ -365,6 +365,7 @@ architecture: amd64
 class: beast
 market: spot
 aws:
+  sshTransport: direct    # direct (default) or ssm
   region: eu-west-1        # default eu-west-1
   ami: ""                  # override the auto-selected AMI
   securityGroupId: ""      # reuse an existing security group
@@ -374,6 +375,116 @@ aws:
   sshCIDRs: []             # allowed SSH source ranges
   macHostId: ""            # pin an EC2 Mac Dedicated Host
 ```
+
+#### SSH over Session Manager (direct mode)
+
+Set `aws.sshTransport: ssm` to keep OpenSSH authentication, command channels,
+rsync, port forwarding, and exit-status handling while replacing the TCP
+connection with AWS's documented Session Manager proxy:
+
+```yaml
+provider: aws
+target: linux
+aws:
+  region: eu-west-1
+  sshTransport: ssm
+  subnetId: subnet-0123456789abcdef0
+  securityGroupId: sg-0123456789abcdef0
+  instanceProfile: existing-ssm-managed-instance-profile
+```
+
+The local machine must have an OpenSSH client, AWS CLI, and the Session Manager
+plugin. Follow AWS's current plugin installation guidance; at the time this
+mode was documented AWS requires plugin version 1.2.764.0 or later. The worker
+image must have an SSH server and SSM Agent installed and running. AWS requires
+SSM Agent 2.3.672.0 or later for SSH sessions through Session Manager.
+
+The instance must register as a Systems Manager managed node through one of
+AWS's supported permission models:
+
+- attach an existing instance profile whose policy includes
+  `AmazonSSMManagedInstanceCore` or equivalent least-privilege managed-node
+  permissions; or
+- enable Default Host Management Configuration in the same account and Region.
+  That path requires IMDSv2 and SSM Agent 3.2.582.0 or later. If an instance
+  profile grants `ssm:UpdateInstanceInformation`, SSM Agent uses the instance
+  profile instead of Default Host Management Configuration.
+
+Crabbox does not create IAM roles or enable Default Host Management
+Configuration. The local AWS identity must be allowed to start the
+`AWS-StartSSHSession` document for the selected instance and open its own data
+channel. Scope `ssm:StartSession` to the intended EC2 instance ARNs (or to
+Crabbox ownership tags) and the AWS-owned `AWS-StartSSHSession` document; scope
+`ssmmessages:OpenDataChannel` to sessions owned by that principal, following
+AWS's Session Manager SSH policy example. Crabbox does not copy AWS credentials
+or put credentials on command lines. The AWS CLI inherits the same local
+environment/profile chain as Crabbox and receives the resolved region
+explicitly.
+
+With a configured subnet, SSM mode requests no public IP, does not reconcile
+inbound SSH rules, does not wait for a public address, and uses the EC2 instance
+ID as OpenSSH's host. The security group, subnet, DNS, and route configuration
+must already permit the managed node's outbound Systems Manager connectivity,
+either through the documented public service endpoints or interface VPC
+endpoints. In current Regions this includes the regional `ssm` and
+`ssmmessages` endpoints; consult AWS's Systems Manager VPC endpoint
+documentation for the selected Region and any older-region `ec2messages`
+requirement rather than treating that list as a universal minimum.
+Crabbox still provisions and uses its per-lease SSH key for end-to-end OpenSSH
+authentication; Session Manager only carries the bytes.
+
+SSM mode fails closed. A missing AWS CLI, missing Session Manager plugin,
+denied `StartSession`, or unavailable managed node fails the SSH readiness
+check. Crabbox does not retry that lease with direct SSH, discover a public
+client CIDR, or add inbound SSH rules.
+
+AWS Session Manager logging does not record the contents of SSH sessions,
+because SSH encrypts the data inside the Session Manager channel. Use host-side
+SSH auditing or another workload-level control when command-content recording
+is required.
+
+AWS references:
+
+- [Allow SSH connections through Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-getting-started-enable-ssh-connections.html)
+- [Install the Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+- [Configure instance permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html)
+- [Create VPC endpoints for Systems Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-create-vpc.html)
+- [Session logging limitations](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-logging.html)
+
+This first direct-mode baseline starts one standard SSH/SSM transport per
+operation and disables OpenSSH connection sharing for that route. Local
+timeouts and process cleanup remain bounded by the existing SSH callers. It
+does not add a remote process supervisor or a cancellation receipt protocol:
+disconnecting or cancelling the local SSH process does not guarantee remote
+job termination. A child that ignores hangup or detaches may remain alive, so
+Crabbox safely retains the workspace ownership lock while that child might
+still be running; immediate workspace reuse is not guaranteed. This matches
+the direct-SSH baseline and is not specific to Session Manager. Do not delete
+the ownership fence or broadly kill remote processes to force reuse. If the
+job is being abandoned on a disposable worker, use the supported
+`crabbox stop <id-or-slug>` lifecycle command to stop that worker. Brokered AWS
+leases continue to use their existing transport.
+
+Destructive direct-mode teardown does not open a fresh guest SSH connection to
+write hydration markers, stop guest egress helpers, remove files, or log out of
+Tailscale on the disposable instance. Existing local process ownership still
+closes the SSH and ProxyCommand children of each Crabbox operation. Teardown
+then uses the AWS SDK to paginate active Session Manager sessions filtered by
+the exact EC2 instance and the exact canonical ARN returned by
+`sts:GetCallerIdentity`, terminates only matching sessions, and verifies that
+none remain before terminating the instance and deleting its temporary key.
+An assumed-role session ARN is matched in full, including its session name; it
+is never broadened to every session for the underlying role.
+
+The local identity therefore also needs `ssm:DescribeSessions`,
+`ssm:TerminateSession`, and `sts:GetCallerIdentity`. If session cleanup cannot
+prove its owner scope, terminate a matching session, or verify zero active
+matches, Crabbox still attempts exact instance termination and temporary-key
+deletion so a session API failure cannot leave a billable VM behind. The
+command returns the combined error and retains its local cleanup authority
+instead of recording a successful terminal receipt. Retrying is idempotent for
+already-ended sessions, absent exact instances, and already-deleted temporary
+keys. Direct SSH teardown keeps its existing best-effort guest cleanup.
 
 Root volumes default to 40 GB (`tiny`), 80 GB (`small`), 150 GB (`standard`
 and `fast`), 250 GB (`large`), or 400 GB (`beast`). An unset or zero `aws.rootGB`
