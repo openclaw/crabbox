@@ -1079,7 +1079,7 @@ export function portalRunDetail(
             ${run.retryLikely && run.retryLikely !== "unknown" ? metaRow("retry", run.retryLikely) : ""}
             ${metaRow("started", shortTime(run.startedAt))}
             ${metaRow("duration", formatDuration(run.durationMs))}
-            ${metaRow("log", run.logBytes > 0 ? formatBytes(run.logBytes) : "empty")}
+            ${metaRow("log", run.logEvicted === "storage_pressure" ? "log evicted under storage pressure" : run.logEvicted ? "log expired under retention policy" : run.logBytes > 0 ? formatBytes(run.logBytes) : "empty")}
           </dl>
           ${runTelemetryPanel(run.telemetry)}
         </div>
@@ -1117,7 +1117,7 @@ export function portalRunDetail(
         <div class="section-head">
           <h2>log tail</h2>
           <div class="section-actions">
-            <span>${run.logTruncated ? "truncated" : "retained"}</span>
+            <span>${run.logEvicted === "storage_pressure" ? "log evicted under storage pressure" : run.logEvicted ? "expired" : run.logTruncated ? "truncated" : "retained"}</span>
             ${
               logTail
                 ? `<button class="icon-btn" type="button" title="copy log tail" aria-label="copy log tail" data-copy-target="#run-log-tail">${copyIcon}</button>`
