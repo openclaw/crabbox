@@ -43,7 +43,7 @@ func TestHyperVPublicDiscoveryTargets(t *testing.T) {
 	for _, item := range description.ProviderFlags {
 		flags[item.Name] = true
 	}
-	for _, name := range []string{"hyperv-image", "hyperv-user", "hyperv-work-root", "hyperv-cpu", "hyperv-memory", "hyperv-switch"} {
+	for _, name := range []string{"hyperv-image", "hyperv-user", "hyperv-work-root", "hyperv-cpu", "hyperv-memory", "hyperv-switch", "hyperv-storage"} {
 		if !flags[name] {
 			t.Fatalf("public flag %q missing", name)
 		}

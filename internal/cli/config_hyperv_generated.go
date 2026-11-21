@@ -13,6 +13,7 @@ type fileHyperVConfig struct {
 	CPUs          int    `yaml:"cpus,omitempty"`
 	Memory        int    `yaml:"memory,omitempty"`
 	Switch        string `yaml:"switch,omitempty"`
+	Storage       string `yaml:"storage,omitempty"`
 	GuestPassword string `yaml:"guestPassword,omitempty"`
 	InitPassword  *bool  `yaml:"initPassword,omitempty"`
 }
@@ -36,15 +37,15 @@ type HyperVConfigApplied struct {
 	InputAccepted bool
 }
 
-func (cfg *HyperVConfig) applyFile(file *fileHyperVConfig) (HyperVConfigApplied, error) {
+func (cfg *HyperVConfig) applyFile(file *fileHyperVConfig, trusted bool) (HyperVConfigApplied, error) {
 	var applied HyperVConfigApplied
-	err := applyConfigFileOverlay(cfg, file, &applied, true, "hyperv")
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "hyperv")
 	return applied, err
 }
 
 func (cfg *HyperVConfig) applyEnv() (HyperVConfigApplied, error) {
 	var applied HyperVConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
 	return applied, err
 }
 
@@ -56,6 +57,7 @@ type HyperVConfigFlagValues struct {
 	CPUs         *int
 	Memory       *int
 	Switch       *string
+	Storage      *string
 	InitPassword *bool
 }
 

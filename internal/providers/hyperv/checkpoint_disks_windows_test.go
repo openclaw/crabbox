@@ -109,7 +109,7 @@ func TestImportedForkReleaseDeletesTheCopiedDiskChain(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	b.rt.Exec = runner
 
-	if _, err := b.importCheckpointVM(context.Background(), `C:\export\vm.vmcx`, f.name, false); err != nil {
+	if _, err := b.importCheckpointVM(context.Background(), `C:\export\vm.vmcx`, f.name, legacyHyperVStorage(), false); err != nil {
 		t.Fatalf("importCheckpointVM: %v", err)
 	}
 	var recorded []string
@@ -120,7 +120,7 @@ func TestImportedForkReleaseDeletesTheCopiedDiskChain(t *testing.T) {
 	if len(recorded) != 2 || !strings.EqualFold(recorded[0], filepath.Base(f.child)) || !strings.EqualFold(recorded[1], filepath.Base(f.parent)) {
 		t.Fatalf("manifest=%v, want the copied child and parent", recorded)
 	}
-	if err := b.removeVMStorage(f.name, []string{f.child}); err != nil {
+	if err := b.removeVMStorage(f.name, legacyHyperVStorage(), []string{f.child}); err != nil {
 		t.Fatalf("removeVMStorage: %v", err)
 	}
 	assertGone(t, "fork release", f.child, f.parent, filepath.Dir(f.child))
@@ -138,10 +138,10 @@ func TestImportedForkRollbackDeletesTheCopiedDiskChain(t *testing.T) {
 		set  string
 	}{
 		{name: "rollback-after-import", run: func(t *testing.T, f forkDiskChainFixture, b *backend) error {
-			return b.removeImportedCheckpointRegistration(context.Background(), f.name)
+			return b.removeImportedCheckpointRegistration(context.Background(), f.name, legacyHyperVStorage())
 		}},
 		{name: "import-fails-after-copy", set: "$global:failSetVM=$true;", run: func(t *testing.T, f forkDiskChainFixture, b *backend) error {
-			if _, err := b.importCheckpointVM(context.Background(), `C:\export\vm.vmcx`, f.name, false); err == nil {
+			if _, err := b.importCheckpointVM(context.Background(), `C:\export\vm.vmcx`, f.name, legacyHyperVStorage(), false); err == nil {
 				t.Fatal("import succeeded although Set-VM failed")
 			}
 			return nil

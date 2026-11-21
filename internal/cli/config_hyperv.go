@@ -10,6 +10,7 @@ type HyperVConfig struct {
 	CPUs          int    `config:"cpus" env:"CRABBOX_HYPERV_CPUS" flag:"hyperv-cpu" help:"CPU count for Hyper-V leases" sources:"user,repo,env,flag" nonnegative:"true" fileInt:"positive" fileStorage:"value" envInt:"fallback" default:"4"`
 	Memory        int    `config:"memory" env:"CRABBOX_HYPERV_MEMORY" flag:"hyperv-memory" help:"memory in MB for Hyper-V leases" sources:"user,repo,env,flag" nonnegative:"true" fileInt:"positive" fileStorage:"value" envInt:"fallback" default:"8192"`
 	Switch        string `config:"switch" env:"CRABBOX_HYPERV_SWITCH" flag:"hyperv-switch" help:"Hyper-V virtual switch name" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value" default:"Default Switch"`
+	Storage       string `config:"storage" env:"CRABBOX_HYPERV_STORAGE" flag:"hyperv-storage" help:"absolute host directory for new lease disks and VM configuration (Virtual Hard Disks and Virtual Machines subdirectories)" sources:"user,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
 	GuestPassword string `config:"guestPassword" env:"CRABBOX_HYPERV_GUEST_PASSWORD" sources:"user,repo,env" fileIgnoreEmpty:"true" fileStorage:"value"`
 	InitPassword  bool   `config:"initPassword" env:"CRABBOX_HYPERV_INIT_PASSWORD" flag:"hyperv-init-password" help:"set the guest password at first boot via the lease disk (for password-less auto-logon templates, e.g. Windows dev-environment VHDXs)" sources:"user,repo,env,flag"`
 }

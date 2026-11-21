@@ -964,6 +964,10 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return lease, core.Exit(2, "provider=%s checkpoint fork requires a repository root", providerName)
 	}
+	storage, err := b.storageForCreate(ctx, cfg)
+	if err != nil {
+		return lease, err
+	}
 
 	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
@@ -996,6 +1000,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	labels["work_root"] = cfg.HyperV.WorkRoot
 	labels["state"] = "provisioning"
 	labels["checkpoint"] = req.Record.ImageID
+	storage.recordLabels(labels)
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	provisional := core.LeaseTarget{Server: b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg), LeaseID: leaseID}
 	acquireReq := core.AcquireRequest{Repo: req.Repo, Keep: req.Keep, Reclaim: req.Reclaim, RequestedSlug: req.RequestedSlug}
@@ -1009,7 +1014,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if committed {
 			return
 		}
-		cleanupErr := b.rollbackImportedFork(leaseID, claim, name)
+		cleanupErr := b.rollbackImportedFork(leaseID, claim, name, storage)
 		err = errors.Join(err, cleanupErr)
 	}()
 
@@ -1024,7 +1029,7 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	var importedID string
 	if err := fenced(func() error {
 		var importErr error
-		importedID, importErr = b.importCheckpointVM(ctx, paths.config, name, target == core.TargetWindows)
+		importedID, importErr = b.importCheckpointVM(ctx, paths.config, name, storage, target == core.TargetWindows)
 		return importErr
 	}); err != nil {
 		return lease, err
@@ -1143,10 +1148,10 @@ func (b *backend) waitForSSHReadyUnderClaim(ctx context.Context, leaseID string,
 	}
 }
 
-func (b *backend) importCheckpointVM(ctx context.Context, configPath, name string, start bool) (string, error) {
-	vmPath := filepath.Join(hypervVMDir(), name)
+func (b *backend) importCheckpointVM(ctx context.Context, configPath, name string, storage hypervStorage, start bool) (string, error) {
+	vmPath := filepath.Join(storage.vmDir, name)
 	snapshotPath := filepath.Join(vmPath, "Snapshots")
-	vhdPath := filepath.Join(hypervVHDDir(), name)
+	vhdPath := filepath.Join(storage.vhdDir, name)
 	for _, path := range []string{vmPath, snapshotPath, vhdPath} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return "", core.Exit(2, "create Hyper-V checkpoint fork directory %s: %v", path, err)
@@ -1315,15 +1320,15 @@ func (b *backend) restartVM(ctx context.Context, name string) error {
 	return nil
 }
 
-func (b *backend) removeImportedCheckpointVM(ctx context.Context, name string) error {
+func (b *backend) removeImportedCheckpointVM(ctx context.Context, name string, storage hypervStorage) error {
 	var errs []error
-	if err := b.removeImportedCheckpointRegistration(ctx, name); err != nil {
+	if err := b.removeImportedCheckpointRegistration(ctx, name, storage); err != nil {
 		errs = append(errs, err)
 	}
-	if err := b.removeVM(ctx, name); err != nil {
+	if err := b.removeVM(ctx, name, storage); err != nil {
 		errs = append(errs, err)
 	}
-	if err := removeOwnedHyperVLeaseTree(filepath.Join(hypervVHDDir(), name), hypervVHDDir(), name); err != nil {
+	if err := removeOwnedHyperVLeaseTree(filepath.Join(storage.vhdDir, name), storage.vhdDir, name); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -1331,7 +1336,7 @@ func (b *backend) removeImportedCheckpointVM(ctx context.Context, name string) e
 
 // rollbackImportedFork removes the fork only while the lease claim still belongs to it;
 // a reassigned claim keeps both the claim and the imported resources.
-func (b *backend) rollbackImportedFork(leaseID string, original core.LeaseClaim, name string) error {
+func (b *backend) rollbackImportedFork(leaseID string, original core.LeaseClaim, name string, storage hypervStorage) error {
 	current, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
@@ -1340,7 +1345,7 @@ func (b *backend) rollbackImportedFork(leaseID string, original core.LeaseClaim,
 		return core.Exit(2, "retaining forked Hyper-V VM %s: lease %s was reassigned during fork", name, leaseID)
 	}
 	err = core.CleanupLeaseClaimIfUnchangedAfter(leaseID, current, exists, func() error {
-		return b.removeImportedCheckpointVM(context.Background(), name)
+		return b.removeImportedCheckpointVM(context.Background(), name, storage)
 	})
 	if err == nil {
 		core.RemoveStoredTestboxKey(leaseID)
@@ -1348,9 +1353,9 @@ func (b *backend) rollbackImportedFork(leaseID string, original core.LeaseClaim,
 	return err
 }
 
-func (b *backend) removeImportedCheckpointRegistration(ctx context.Context, name string) error {
-	vmRoot := filepath.Join(hypervVMDir(), name)
-	vhdRoot := filepath.Join(hypervVHDDir(), name)
+func (b *backend) removeImportedCheckpointRegistration(ctx context.Context, name string, storage hypervStorage) error {
+	vmRoot := filepath.Join(storage.vmDir, name)
+	vhdRoot := filepath.Join(storage.vhdDir, name)
 	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`$name='%s'; `+

@@ -212,6 +212,10 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a repository root so the VM claim can be persisted before bootstrap", providerName)
 	}
+	storage, err := b.storageForCreate(ctx, cfg)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -250,9 +254,10 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.HyperV.WorkRoot
 	labels["state"] = "provisioning"
+	storage.recordLabels(labels)
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v\n",
-		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB switch=%s keep=%v vhd_dir=%s vm_dir=%s\n",
+		providerName, leaseID, slug, cfg.HyperV.Image, cfg.HyperV.CPUs, cfg.HyperV.Memory, cfg.HyperV.Switch, req.Keep, storage.vhdDir, storage.vmDir)
 
 	provisional := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
@@ -263,10 +268,10 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	}
 	claim, _, _ = core.ServerLeaseClaimSnapshot(provisional.Server)
 	cleanupKey = false
-	if err := b.createVM(ctx, cfg, name); err != nil {
+	if err := b.createVM(ctx, cfg, name, storage); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
 		defer cancel()
-		cleanupErr := b.removeVM(cleanupCtx, name)
+		cleanupErr := b.removeVM(cleanupCtx, name, storage)
 		if cleanupErr == nil {
 			pruneLeaseState(leaseID)
 		}
@@ -278,7 +283,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
 		defer cancel()
-		if err := b.removeVM(cleanupCtx, name); err != nil {
+		if err := b.removeVM(cleanupCtx, name, storage); err != nil {
 			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
 		}
 		core.RemoveLeaseClaim(leaseID)
@@ -512,6 +517,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if !owned {
 		return core.Exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(lease.LeaseID), name)
 	}
+	storage, err := leaseStorage(claim.Labels)
+	if err != nil {
+		return err
+	}
 	cfg := b.configForRun()
 	if user := strings.TrimSpace(lease.Server.Labels["ssh_user"]); user != "" {
 		cfg.HyperV.User = user
@@ -524,7 +533,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err := b.runGuardedReleaseCleanup(ctx, req, cfg, lease, name, claim); err != nil {
 		return err
 	}
-	if err := core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error { return b.removeVM(ctx, name) }); err != nil {
+	if err := core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error { return b.removeVM(ctx, name, storage) }); err != nil {
 		return err
 	}
 	if lease.LeaseID != "" {
@@ -607,6 +616,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=ownership: missing exact local claim\n", inst.Name)
 			continue
 		}
+		storage, err := leaseStorage(claim.Labels)
+		if err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%v\n", inst.Name, err)
+			continue
+		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 			continue
@@ -620,7 +634,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			}
 			err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 				ran = true
-				return b.removeVM(ctx, inst.Name)
+				return b.removeVM(ctx, inst.Name, storage)
 			})
 			if err != nil && !ran {
 				fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=claim changed during cleanup: %v\n", inst.Name, err)
@@ -629,7 +643,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			if err != nil {
 				return err
 			}
-		} else if err := b.removeVM(ctx, inst.Name); err != nil {
+		} else if err := b.removeVM(ctx, inst.Name, storage); err != nil {
 			return err
 		}
 		if claim.LeaseID != "" {
@@ -654,9 +668,17 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			continue
 		}
+		name := instanceNameFromClaim(claim)
+		var storage hypervStorage
+		if name != "" {
+			if storage, err = leaseStorage(claim.Labels); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=%v\n", claim.LeaseID, core.Blank(claim.Slug, "-"), err)
+				continue
+			}
+		}
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-		if name := instanceNameFromClaim(claim); name != "" {
-			if err := b.removeVMStorage(name, nil); err != nil {
+		if name != "" {
+			if err := b.removeVMStorage(name, storage, nil); err != nil {
 				return err
 			}
 		}
@@ -711,16 +733,16 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 
 // createVM creates and starts a disconnected Hyper-V VM. Acquire configures
 // guest SSH over PowerShell Direct before connecting the network adapter.
-func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) error {
+func (b *backend) createVM(ctx context.Context, cfg core.Config, name string, storage hypervStorage) error {
 	memBytes, ok := shared.MiBToBytes(int64(cfg.HyperV.Memory))
 	if !ok {
 		return core.Exit(2, "hyperv.memory exceeds the supported byte range")
 	}
-	vhdDir := hypervVHDDir()
+	vhdDir := storage.vhdDir
 	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
 		return core.Exit(2, "create VHD directory %s: %v", vhdDir, err)
 	}
-	vmDir := hypervVMDir()
+	vmDir := storage.vmDir
 	if err := os.MkdirAll(vmDir, 0o755); err != nil {
 		return core.Exit(2, "create VM directory %s: %v", vmDir, err)
 	}
@@ -1346,7 +1368,7 @@ func applyStoredLeaseKey(cfg *core.Config, leaseID string) {
 	}
 }
 
-func (b *backend) removeVM(ctx context.Context, name string) error {
+func (b *backend) removeVM(ctx context.Context, name string, storage hypervStorage) error {
 	if !validHyperVVMName(name) {
 		return core.Exit(2, "refusing to remove non-Crabbox Hyper-V VM %q", name)
 	}
@@ -1367,15 +1389,15 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 			return shared.LocalCommandError("Remove-VM", result, removeErr)
 		}
 	}
-	return b.removeVMStorage(name, vhdPaths)
+	return b.removeVMStorage(name, storage, vhdPaths)
 }
 
-func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
+func (b *backend) removeVMStorage(name string, storage hypervStorage, attachedPaths []string) error {
 	if !validHyperVVMName(name) {
 		return core.Exit(2, "refusing to remove storage for invalid Crabbox Hyper-V VM %q", name)
 	}
 	var errs []error
-	vhdDir := hypervVHDDir()
+	vhdDir := storage.vhdDir
 	expectedVHD := filepath.Join(vhdDir, name+".vhdx")
 	if err := b.removeVHDFile(expectedVHD); err != nil {
 		errs = append(errs, err)
@@ -1414,7 +1436,7 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 	if err := removeOwnedHyperVLeaseTree(filepath.Join(vhdDir, name), vhdDir, name); err != nil {
 		errs = append(errs, err)
 	}
-	if err := removeHyperVConfigFiles(filepath.Join(hypervVMDir(), name)); err != nil {
+	if err := removeHyperVConfigFiles(filepath.Join(storage.vmDir, name)); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -1813,22 +1835,6 @@ func hypervState(state int) string {
 	default:
 		return "unknown"
 	}
-}
-
-func hypervVHDDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = `C:\Users\Public`
-	}
-	return filepath.Join(home, "Hyper-V", "Virtual Hard Disks")
-}
-
-func hypervVMDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = `C:\Users\Public`
-	}
-	return filepath.Join(home, "Hyper-V", "Virtual Machines")
 }
 
 func parseVMList(raw string) ([]hypervVM, error) {

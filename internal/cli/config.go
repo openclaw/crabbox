@@ -3659,7 +3659,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	{
-		applied, err := cfg.HyperV.applyFile(file.HyperV)
+		applied, err := cfg.HyperV.applyFile(file.HyperV, trusted)
 		recordConfigInput(cfg, "hyperv", inputSource, applied.InputAccepted)
 		if err != nil {
 			return err
