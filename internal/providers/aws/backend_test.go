@@ -2542,12 +2542,17 @@ func TestBootstrapSSHHostRespectsNetworkMode(t *testing.T) {
 	}
 }
 
-func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
+func TestAWSAcquireUsesTailscaleHostnameForStrictModeAndExitNode(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		network core.NetworkMode
-		want    string
+		name        string
+		network     core.NetworkMode
+		want        string
+		exit        string
+		failTailnet bool
 	}{
+		{name: "auto exit node", network: core.NetworkAuto, exit: "100.100.100.100", want: "crabbox-bootstrap"},
+		{name: "auto exit node fallback", network: core.NetworkAuto, exit: "100.100.100.100", failTailnet: true, want: "203.0.113.20"},
+		{name: "public exit node", network: core.NetworkPublic, exit: "100.100.100.100", want: "203.0.113.20"},
 		{name: "auto", network: core.NetworkAuto, want: "203.0.113.20"},
 		{name: "public", network: core.NetworkPublic, want: "203.0.113.20"},
 		{name: "tailscale", network: core.NetworkTailscale, want: "crabbox-bootstrap"},
@@ -2561,6 +2566,12 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 			var bootstrapHost string
 			bootstrapAWSWindowsDesktop = func(_ context.Context, _ core.Config, target *core.SSHTarget, _ string, _ io.Writer) error {
 				bootstrapHost = target.Host
+				if test.failTailnet && target.Host == "crabbox-bootstrap" {
+					return errors.New("tailnet unavailable")
+				}
+				if test.name == "auto exit node" && target.Host == "203.0.113.20" {
+					return errors.New("asymmetric public path")
+				}
 				return nil
 			}
 			t.Cleanup(func() {
@@ -2569,6 +2580,7 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 			})
 
 			cfg := core.Config{Provider: "aws", TargetOS: "linux", AWSRegion: "us-east-1", Network: test.network}
+			cfg.Tailscale.ExitNode = test.exit
 			cfg.Tailscale.Enabled = true
 			cfg.Tailscale.AuthKey = "test-auth-key"
 			cfg.Tailscale.HostnameTemplate = "crabbox-{slug}"

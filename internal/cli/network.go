@@ -346,6 +346,8 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 	if meta.Error != "" {
 		server.Labels["tailscale_error"] = meta.Error
+	} else {
+		delete(server.Labels, "tailscale_error")
 	}
 	if meta.Version != "" {
 		server.Labels["tailscale_version"] = meta.Version
@@ -383,7 +385,7 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 	}
 	applyTailscaleMetadataToServer(server, meta)
 	if useCoordinator && coord != nil && leaseID != "" {
-		if lease, err := coord.UpdateLeaseTailscaleForProvider(ctx, leaseID, cfg.Provider, meta); err == nil {
+		if lease, err := coord.updateLeaseTailscaleForGeneration(ctx, leaseID, cfg.Provider, original.coordinatorCreatedAt, meta); err == nil {
 			updated, identityErr := coordinatorTailscaleResponseServer(cfg, original, lease)
 			if identityErr != nil {
 				*server = original
