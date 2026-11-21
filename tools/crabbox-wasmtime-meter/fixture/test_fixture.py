@@ -163,8 +163,8 @@ class ConsumerContract(unittest.TestCase):
     def test_v2_identity_rejects_legacy_substitution(self):
         value = self.evidence()
         self.check(value)
-        current_key = 'sha256:158ee0686954ed1ad1e62deeb2d8b14b9ca8e133adb30d7c080ca82c1f174bb4'
-        legacy_key = 'sha256:38b199dc30e8b9603f9a4d5ddfa74929ed781459a346bd41593a1451ec79e065'
+        current_key = 'sha256:f63ac8120b361fae3b59bd6930350fb1b9217ed6100fa2faa034f5ca3e05ad57'
+        legacy_key = 'sha256:f2a5b3fe7f08a8eede658f289a923ff13fd53ce2245de9bcbc6c3260c07722d4'
         self.assertEqual(value['meter']['comparisonKey'], current_key)
         self.assertNotEqual(current_key, legacy_key)
         # Recomputed keys cannot make an old configuration or workload current.
