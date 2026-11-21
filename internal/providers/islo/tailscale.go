@@ -166,6 +166,9 @@ for _ in $(seq 1 120); do
   esac
   sleep 1
 done
+# Health checks must reject a joined daemon until exit-node selection succeeds,
+# even if this operation fails or is interrupted after enrollment.
+if [ -n "${TS_EXIT_NODE}" ]; then : >"${TS_STATE_DIR}/exit-node-pending"; fi
 if [ -z "${ts_ip}" ]; then
   if [ "${TS_HAS_AUTH}" != "true" ]; then
     case "${backend_state}" in
@@ -178,8 +181,10 @@ if [ -z "${ts_ip}" ]; then
   if [ "${TS_HAS_AUTH}" = "true" ]; then set -- "$@" --auth-key="file:/dev/stdin"; fi
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
-  if [ -n "${TS_EXIT_NODE}" ]; then
-    set -- "$@" --exit-node="${TS_EXIT_NODE}"
+  # A stopped daemon still has its preferences. Omitting a saved exit node
+  # makes Tailscale reject the restart before selection can run.
+  if [ "${backend_state}" = "Stopped" ] && [ -n "${TS_EXIT_NODE}" ]; then
+    set -- "$@" "--exit-node=${TS_EXIT_NODE}"
     if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
   fi
   if [ "${TS_HAS_AUTH}" = "true" ]; then
@@ -195,6 +200,17 @@ if [ -z "${ts_ip}" ]; then
 fi
 unset TS_AUTH_VALUE
 test -n "${ts_ip}"
+# Retry selection even when a previous attempt left a running daemon.
+if [ -n "${TS_EXIT_NODE}" ]; then
+  set -- --exit-node="${TS_EXIT_NODE}"
+  if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
+  if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" set "$@"; then
+    echo "tailscale exit-node selection failed" >&2
+    "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" down >/dev/null 2>&1 || true
+    exit 1
+  fi
+  rm -f "${TS_STATE_DIR}/exit-node-pending"
+fi
 echo "CRABBOX_TS_IP=${ts_ip}"
 `
 
@@ -214,6 +230,7 @@ if [ -e "${TS_LOCK_FILE}" ]; then
        fi ;;
   esac
 fi
+test ! -e "${TS_STATE_DIR}/exit-node-pending"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
 test -S "${TS_SOCKET}"
 TS_BIN_DIR="${TS_STATE_DIR}/bin"

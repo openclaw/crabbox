@@ -34,6 +34,9 @@ func (a App) inspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if state.NetworkFallbackReason != "" {
+		fmt.Fprintf(a.Stderr, "network fallback %s\n", state.NetworkFallbackReason)
+	}
 	addStatusLifetime(&state, cfg)
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(state)

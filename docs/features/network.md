@@ -59,6 +59,17 @@ For a lease that carries tailnet metadata, `auto`:
 
 For a lease with no tailnet metadata, `auto` is just public mode.
 
+An exit node can make bootstrap prefer the tailnet before this selection runs.
+If that later probe fails, fallback restores the original provider SSH endpoint
+and reports `network=public`; it does not reuse the failed tailnet address.
+Provider-specific routes and SSH settings remain intact.
+If there is no provider endpoint to fall back to, an unreachable tailnet causes
+an error instead of reporting a public connection with an empty address.
+
+The fallback notice goes to stderr, including for `ssh` and `status --json`, so
+SSH command lines and JSON on stdout remain usable. `status --wait` prints the
+notice once per invocation, even when it polls the lease repeatedly.
+
 Static SSH targets behave the same way when the static host name is a MagicDNS
 name or a `100.x` address: `auto` defers to whatever `static.host` resolves to.
 
@@ -107,10 +118,11 @@ When a managed Linux lease is created with `--tailscale`, the runner bootstrap:
 - discards the auth key after `tailscale up` so it never persists on the
   runner.
 
-`--tailscale` only provisions **managed Linux** leases. The CLI rejects it for
-non-Linux targets, for static/BYO providers, and for Blacksmith (which owns its
-own machine connectivity), with an exit-code-2 message pointing you at
-`--network tailscale` plus a tailnet `static.host` instead.
+`--tailscale` only provisions **managed Linux** leases on providers advertising
+the `tailscale` feature in `crabbox providers --json`. Other providers and
+non-Linux targets are rejected with exit code 2 before provisioning. For a
+static/BYO host already on the tailnet, set `static.host` to its tailnet address
+and use `--network tailscale`.
 
 The metadata Crabbox stores on the lease record:
 
@@ -124,6 +136,13 @@ tailscale_tags=tag:crabbox
 tailscale_exit_node=...
 tailscale_exit_node_allow_lan_access=true|false
 ```
+
+Direct provider labels encode tag lists losslessly in bounded chunks where
+needed. `inspect` and `status` decode them back to the requested tags. Missing or
+corrupted chunks are reported as a metadata error, never as a different tag set;
+old sanitized labels that have already lost their separators require lease
+recreation to recover accurate tag metadata. Provider label-count limits still
+apply to unusually large lists.
 
 Brokered leases receive a one-shot auth key minted by the Worker via Tailscale
 OAuth. Direct-provider leases use a key read from the environment variable named
@@ -143,11 +162,14 @@ tailnet reachability after lease creation.
 
 ### Exit nodes
 
-`--tailscale-exit-node <name-or-100.x>` routes the runner's outbound traffic
-through a chosen exit node, and `--tailscale-exit-node-allow-lan-access` keeps
+`--tailscale-exit-node <name-or-100.x>` requires `--tailscale` (or
+`tailscale.enabled: true`) and routes the runner's outbound traffic
+through a chosen exit node. `--tailscale-exit-node-allow-lan-access` keeps
 LAN reachable while doing so (the latter requires an exit node to be set, or the
-config fails validation). When an exit node is configured, `auto` mode prefers
-the tailnet path during bootstrap so traffic uses the node, and Crabbox runs a
+lease request fails validation after flags are resolved). An exit-node default
+in config or the environment does not block unrelated commands; pass
+`--tailscale` when creating a lease to use it. When an exit node is configured,
+`auto` mode prefers the tailnet path during bootstrap so traffic uses the node, and Crabbox runs a
 remote egress check: it confirms the exit node is selected in `tailscale debug
 prefs` and that the runner can fetch its public IP. If the node is joined but
 internet egress fails, the command exits with code 5 and a message naming the
@@ -246,7 +268,7 @@ network=tailscale requested for static host mac-studio but SSH is not reachable;
 network=tailscale requested but blue-lobster.tail-scale.ts.net is not reachable over SSH; is this client joined to the tailnet?
 ```
 
-`auto` mode never fails on a tailnet probe; it falls back to public and writes
+When a provider endpoint is available, `auto` falls back after a failed tailnet probe and writes
 `network fallback tailscale_unreachable` to stderr. That line is the diagnostic
 signal that the tailnet plane is unhealthy even though the command kept working;
 the corresponding `network=public` token in the `ready`/`status` output confirms

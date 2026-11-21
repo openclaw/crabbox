@@ -9,7 +9,7 @@ import (
 
 // BridgePeerProbeResult records the result of a single HTTPS reachability
 // probe against one BridgePeerTarget. The result is intentionally simple —
-// the doctor surface is a smoke check, not a uptime monitor.
+// this helper performs a smoke check, not uptime monitoring.
 type BridgePeerProbeResult struct {
 	Slug       string `json:"slug"`
 	URL        string `json:"url"`
@@ -119,8 +119,8 @@ type ReachabilityCell struct {
 	Note  string `json:"note,omitempty"`
 }
 
-// PondReachabilityMatrix is the per-pond reachability matrix surfaced by
-// `crabbox doctor --pond <name>`. Members lists every distinct transport
+// PondReachabilityMatrix describes a per-pond reachability matrix for API
+// consumers; the doctor command does not emit it. Members lists every transport
 // observed in the pond (so callers can interpret the per-row meaning), and
 // Cells is the dense matrix indexed by (from, to) transport pair.
 type PondReachabilityMatrix struct {

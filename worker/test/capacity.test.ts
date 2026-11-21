@@ -156,6 +156,8 @@ async function fixture(
   kind: "cloudflare" | "node",
   envOverrides: Partial<Env> = {},
   beforeStartup?: (storage: CapacityStorage) => void,
+  runtimeGeneration = generation,
+  waitForRecovery = true,
 ) {
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   vi.setSystemTime(now);
@@ -205,7 +207,7 @@ async function fixture(
       } as unknown as DurableObjectState,
       env,
       {},
-      generation,
+      runtimeGeneration,
     );
     fleet = durable;
     runtime = (durable as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
@@ -225,14 +227,20 @@ async function fixture(
     const mutex = new AsyncMutex();
     node.setOperationRunner((callback) => mutex.run(callback));
     runtime = node;
-    fleet = new FleetCoordinator(node, env, {}, {}, generation);
+    fleet = new FleetCoordinator(node, env, {}, {}, runtimeGeneration);
     dispatch = (request) =>
       fleetRequestQueue(request) === "direct"
         ? fleet.fetch(request)
         : mutex.run(() => fleet.fetch(request));
     cleanups.push(() => node.stop());
-    await node.start(() => fleet.alarm());
+    await node.start(
+      () => fleet.alarm(),
+      () => fleet.startCapacityIndexRecovery(),
+    );
   }
+  const recovery = (fleet as unknown as { capacityIndexRecovery: Promise<void> })
+    .capacityIndexRecovery;
+  if (waitForRecovery) await recovery;
   expect(initializers).toHaveLength(kind === "cloudflare" ? 1 : 0);
   expect(network).not.toHaveBeenCalled();
   const effects = () => ({
@@ -264,7 +272,7 @@ async function fixture(
   const readonly = () => {
     expect(effects()).toEqual(startup.effects);
   };
-  return { storage, env, fleet, runtime, fetch, seed, readonly, startup, jobs };
+  return { storage, env, fleet, runtime, fetch, seed, readonly, startup, jobs, recovery };
 }
 
 type Admission = {
@@ -657,6 +665,129 @@ for (const kind of ["cloudflare", "node"] as const) {
       expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 1 });
       // A stale superset entry is harmless because the current lease is reread.
       f.storage.values.set(`${leaseMaintenanceIndex.prefix}history-0`, 1);
+      expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 1 });
+    }, 30_000);
+
+    it.each([200, 5000])(
+      "keeps capacity available across restarts with %i retained leases",
+      async (history) => {
+        const first = await fixture(kind);
+        for (let i = 0; i < history; i++) first.seed(lease(`history-${i}`, { state: "released" }));
+        await first.storage.transaction((storage) => putLeaseRecord(storage, lease("active")));
+        await maintainLeaseIndex(first.storage, leaseMaintenanceIndex, now.getTime(), generation);
+        if (history > 4096)
+          await maintainLeaseIndex(first.storage, leaseMaintenanceIndex, now.getTime(), generation);
+        expect(await (await first.fetch()).json()).toMatchObject({ activeLeases: 1 });
+
+        let persisted = first.storage.values;
+        for (let restart = 0; restart < 3; restart++) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- recreate successive runtimes over the previous durable state.
+          const restarted = await fixture(
+            kind,
+            {},
+            (storage) => {
+              storage.values = structuredClone(persisted);
+            },
+            `restarted-generation-${restart}`,
+          );
+          const pages = restarted.storage.listOptions.filter(
+            (options) => options?.prefix === "lease:",
+          );
+          expect(pages.length).toBeGreaterThan(0);
+          expect(pages.every((options) => options!.limit! <= 128)).toBe(true);
+          const start = restarted.storage.listOptions.length;
+          // oxlint-disable-next-line eslint/no-await-in-loop -- verify each new runtime before recreating it.
+          const response = await restarted.fetch();
+          expect(response.status).toBe(200);
+          // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each completed response.
+          expect(await response.json()).toMatchObject({ activeLeases: 1 });
+          expect(
+            restarted.storage.listOptions.slice(start).map((options) => options?.prefix),
+          ).toEqual([leaseMaintenanceIndex.prefix, "provider-access:"]);
+          restarted.readonly();
+          persisted = restarted.storage.values;
+        }
+      },
+      30_000,
+    );
+
+    it("recovers unindexed rollback writes before serving capacity after restart", async () => {
+      const first = await fixture(kind);
+      for (let i = 0; i < 200; i++) first.seed(lease(`history-${i}`, { state: "released" }));
+      await maintainLeaseIndex(first.storage, leaseMaintenanceIndex, now.getTime(), generation);
+      first.seed(lease("unindexed"));
+      const restarted = await fixture(
+        kind,
+        {},
+        (storage) => {
+          storage.values = structuredClone(first.storage.values);
+        },
+        "after-rollback",
+      );
+      expect(await (await restarted.fetch()).json()).toMatchObject({ activeLeases: 1 });
+      restarted.readonly();
+    });
+
+    it("leaves lifecycle writes available during startup capacity recovery", async () => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const f = await fixture(
+        kind,
+        {},
+        (storage) => {
+          for (let i = 0; i < 200; i++)
+            storage.values.set(`lease:history-${i}`, lease(`history-${i}`, { state: "released" }));
+          storage.beforeList = async (options) => {
+            if (options.prefix === "lease:" && "limit" in options && options.limit === 128) {
+              entered();
+              await gate;
+            }
+          };
+        },
+        generation,
+        false,
+      );
+      await started;
+      let timer!: ReturnType<typeof setTimeout>;
+      try {
+        const result = await Promise.race([
+          f.runtime.runExclusive(async () => {
+            await f.runtime.storage.transaction((storage) => putLeaseRecord(storage, lease("new")));
+            return "written";
+          }),
+          new Promise<string>((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), 1000);
+          }),
+        ]);
+        expect(result).toBe("written");
+      } finally {
+        clearTimeout(timer);
+        release();
+      }
+      await f.recovery;
+      expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 1 });
+    });
+
+    it("keeps failed startup recovery unavailable until maintenance repairs the index", async () => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const f = await fixture(kind, {}, (storage) => {
+        for (let i = 0; i < 200; i++)
+          storage.values.set(`lease:history-${i}`, lease(`history-${i}`, { state: "released" }));
+        storage.values.set("lease:unindexed", lease("unindexed"));
+        storage.failKey = leaseMaintenanceIndex.stateKey;
+      });
+      expect(log).toHaveBeenCalledWith(
+        "capacity lease index recovery failed; scheduled maintenance will retry",
+      );
+      expect((await f.fetch()).status).toBe(503);
+      delete f.storage.failKey;
+      await maintainLeaseIndex(f.storage, leaseMaintenanceIndex, now.getTime(), generation);
       expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 1 });
     });
 

@@ -182,6 +182,11 @@ Default view rules:
 - Admin sessions get extra `mine` / `system` filters so personal leases stay
   distinct from external runners and other owners' leases.
 
+The admin banner shows the signed-in identity and all-scopes access. Raw lease,
+pool, and usage JSON is available through the bearer-authenticated CLI commands
+`crabbox admin leases`, `crabbox pool list`, and `crabbox usage --scope all`;
+the portal session cookie does not authorize those `/v1` API endpoints.
+
 Clicking a lease opens its detail page; clicking an external runner or visible
 dedicated host opens the matching visibility-only detail page. Unattached host
 details and host-pinned launch commands require admin authentication.

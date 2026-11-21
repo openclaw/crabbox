@@ -461,6 +461,10 @@ func (c *GCPClient) DeleteServer(ctx context.Context, name string) error {
 }
 
 func (c *GCPClient) SetLabels(ctx context.Context, name string, labels map[string]string) error {
+	encoded := gcpLabels(labels)
+	if len(encoded) > 64 {
+		return fmt.Errorf("GCP lease metadata requires %d labels; provider limit is 64", len(encoded))
+	}
 	instance, err := c.instances.Get(ctx, &computepb.GetInstanceRequest{
 		Project:  c.Project,
 		Zone:     c.Zone,
@@ -475,7 +479,7 @@ func (c *GCPClient) SetLabels(ctx context.Context, name string, labels map[strin
 		Instance: name,
 		InstancesSetLabelsRequestResource: &computepb.InstancesSetLabelsRequest{
 			LabelFingerprint: proto.String(instance.GetLabelFingerprint()),
-			Labels:           gcpLabels(labels),
+			Labels:           encoded,
 		},
 	})
 	if err != nil {
@@ -615,7 +619,7 @@ func gcpInstanceToServer(zone string, instance *computepb.Instance) Server {
 		s.ID = int64(instance.GetId())
 	}
 	if instance.Labels != nil {
-		s.Labels = instance.Labels
+		s.Labels = decodeGCPTailscaleLabels(instance.Labels)
 	}
 	s.Labels["zone"] = zone
 	if instance.GetMachineType() != "" {
@@ -637,6 +641,7 @@ func gcpLabels(labels map[string]string) map[string]string {
 	for key, value := range labels {
 		out[gcpLabelKey(key)] = gcpLabelValue(value)
 	}
+	encodeGCPTailscaleLabels(out, labels)
 	return out
 }
 

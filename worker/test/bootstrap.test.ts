@@ -808,6 +808,64 @@ describe("cloud-init bootstrap", () => {
     expect(codeServerCleanup).toBeGreaterThan(codeServerTrap);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "enrolls before exit-node selection and fails before readiness on selection errors",
+    () => {
+      for (const exitNode of ["exit.example.ts.net", "100.64.0.1"]) {
+        for (const fail of [false, true]) {
+          const dir = mkdtempSync(join(tmpdir(), "crabbox-tailscale-"));
+          try {
+            const got = cloudInit({
+              ...config,
+              tailscale: true,
+              tailscaleAuthKey: "synthetic",
+              tailscaleExitNode: exitNode,
+              tailscaleExitNodeAllowLanAccess: true,
+            });
+            const start = got.indexOf(`printf '%s' "$TS_AUTHKEY" | tailscale up`);
+            const end = got.indexOf(
+              `    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`,
+            );
+            expect(start).toBeGreaterThanOrEqual(0);
+            expect(end).toBeGreaterThan(start);
+            const script = `tailscale() {
+  case "$1" in
+    up)
+      case "$*" in *--exit-node=*) return 1 ;; esac
+      touch "$JOINED" ;;
+    ip) test -f "$JOINED"; echo 100.64.0.2 ;;
+    set)
+      test -f "$JOINED"
+      test "$FAIL_SELECTION" != true
+      case "$*" in *"--exit-node=$EXIT_NODE --exit-node-allow-lan-access"*) : ;; *) return 1 ;; esac ;;
+    *) return 2 ;;
+  esac
+}
+TS_AUTHKEY=synthetic
+${got.slice(start, end)}
+echo ready
+`;
+            const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+              encoding: "utf8",
+              timeout: 5000,
+              env: {
+                ...process.env,
+                JOINED: join(dir, "joined"),
+                EXIT_NODE: exitNode,
+                FAIL_SELECTION: String(fail),
+              },
+            });
+            expect(result.error).toBeUndefined();
+            expect(result.status === 0).toBe(!fail);
+            expect(result.stdout.includes("ready")).toBe(!fail);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+      }
+    },
+  );
+
   it("adds Tailscale setup only when requested", () => {
     const plain = cloudInit(config);
     expect(plain).not.toContain("tailscale up");
@@ -836,7 +894,18 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("WantedBy=halt.target reboot.target shutdown.target");
     expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
-      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+    );
+    const upAt = got.indexOf("tailscale up ");
+    const joinedAt = got.indexOf('test -n "$ts_ip"');
+    const setAt = got.indexOf("tailscale set --exit-node=");
+    expect(upAt).toBeGreaterThanOrEqual(0);
+    expect(joinedAt).toBeGreaterThan(upAt);
+    expect(setAt).toBeGreaterThan(joinedAt);
+    const upLine = got.slice(upAt, got.indexOf("\n", upAt));
+    expect(upLine).not.toContain("--exit-node");
+    expect(got).toContain(
+      "tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
     );
     expect(got).not.toContain('--auth-key="$TS_AUTHKEY"');
     expect(got).toContain(

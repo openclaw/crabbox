@@ -90,6 +90,59 @@ describe("daytona coordinator client", () => {
     ).toThrow("must use https");
   });
 
+  it("validates the same normalized configured snapshot used for creation", async () => {
+    const client = new DaytonaClient({
+      ...baseEnv,
+      CRABBOX_DAYTONA_SNAPSHOT: "  ready/snapshot  ",
+    });
+    const requests: Request[] = [];
+    client.fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ id: "snapshot-one", name: "ready/snapshot", state: " ACTIVE " });
+    });
+
+    await expect(client.validateConfiguredSnapshot()).resolves.toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe("/api/snapshots/ready%2Fsnapshot");
+    expect(client.snapshot).toBe("ready/snapshot");
+  });
+
+  it.each(["inactive", "building", "unrecognized", "", undefined])(
+    "rejects a configured snapshot with state %s",
+    async (state) => {
+      const client = new DaytonaClient(baseEnv);
+      client.fetcher = vi.fn<typeof fetch>(async () =>
+        Response.json({ id: "snapshot-one", name: "crabbox-ready", state }),
+      );
+      await expect(client.validateConfiguredSnapshot()).rejects.toThrow("is not active");
+      expect(client.fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    { failure: "missing", message: "404" },
+    { failure: "unreadable", message: "JSON" },
+    { failure: "network", message: "snapshot request failed" },
+  ])("rejects a $failure configured snapshot response", async ({ failure, message }) => {
+    const client = new DaytonaClient(baseEnv);
+    client.fetcher = vi.fn<typeof fetch>(async () => {
+      if (failure === "network") throw new TypeError("snapshot request failed");
+      return failure === "missing"
+        ? new Response("not found", { status: 404 })
+        : new Response("invalid JSON");
+    });
+    await expect(client.validateConfiguredSnapshot()).rejects.toThrow(message);
+    expect(client.fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an account-default snapshot unverified without a lookup", async () => {
+    const client = new DaytonaClient({ ...baseEnv, CRABBOX_DAYTONA_SNAPSHOT: "  " });
+    client.fetcher = vi.fn<typeof fetch>();
+    await expect(client.validateConfiguredSnapshot()).resolves.toBe(false);
+    expect(client.fetcher).not.toHaveBeenCalled();
+  });
+
   it("creates owned sandboxes, paginates inventory, and mints SSH access", async () => {
     const requests: Request[] = [];
     const authorizationHeaders: Array<string | null> = [];

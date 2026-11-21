@@ -548,6 +548,57 @@ func TestCloudInitCodeProfile(t *testing.T) {
 	}
 }
 
+func TestCloudInitTailscaleExitNodeEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the Linux bootstrap with a POSIX shell")
+	}
+	for _, exitNode := range []string{"exit.example.ts.net", "100.64.0.1"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(exitNode+map[bool]string{false: "/success", true: "/failure"}[fail], func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Tailscale.Enabled = true
+				cfg.Tailscale.AuthKey = "synthetic"
+				cfg.Tailscale.ExitNode = exitNode
+				cfg.Tailscale.ExitNodeAllowLANAccess = true
+				rendered := cloudInitTailscaleBootstrap(cfg)
+				start := strings.Index(rendered, `printf '%s' "$TS_AUTHKEY" | tailscale up`)
+				end := strings.Index(rendered, `    printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`)
+				if start < 0 || end < start {
+					t.Fatal("missing enrollment block")
+				}
+				script := `tailscale() {
+  case "$1" in
+    up)
+      case "$*" in *--exit-node=*) return 1 ;; esac
+      touch "$JOINED" ;;
+    ip) test -f "$JOINED"; echo 100.64.0.2 ;;
+    set)
+      test -f "$JOINED"
+      test "$FAIL_SELECTION" != true
+      case "$*" in *"--exit-node=$EXIT_NODE --exit-node-allow-lan-access"*) : ;; *) return 1 ;; esac ;;
+    *) return 2 ;;
+  esac
+}
+TS_AUTHKEY=synthetic
+` + rendered[start:end] + "\necho ready\n"
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "bash", "-euo", "pipefail", "-c", script)
+				failValue := map[bool]string{false: "false", true: "true"}[fail]
+				cmd.Env = append(os.Environ(), "JOINED="+filepath.Join(t.TempDir(), "joined"), "EXIT_NODE="+exitNode, "FAIL_SELECTION="+failValue)
+				out, err := cmd.CombinedOutput()
+				if fail {
+					if err == nil || strings.Contains(string(out), "ready") {
+						t.Fatalf("failed selection reached readiness: err=%v output=%s", err, out)
+					}
+				} else if err != nil || !strings.Contains(string(out), "ready") {
+					t.Fatalf("enrollment failed: err=%v output=%s", err, out)
+				}
+			})
+		}
+	}
+}
+
 func TestCloudInitTailscaleProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.SSHUser = "runner"
@@ -564,7 +615,8 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 		"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main",
 		"retry apt-get install -y --no-install-recommends tailscale",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
-		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+		"tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
 		"tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version",
 		"jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id",
@@ -580,6 +632,19 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
 		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
+	}
+	upAt := strings.Index(got, "tailscale up ")
+	joinedAt := strings.Index(got, `test -n "$ts_ip"`)
+	setAt := strings.Index(got, "tailscale set --exit-node=")
+	if upAt < 0 || joinedAt < upAt || setAt < joinedAt {
+		t.Fatal("cloudInit(tailscale) must select the exit node only after the node has an address")
+	}
+	upLine := got[upAt:]
+	if end := strings.Index(upLine, "\n"); end >= 0 {
+		upLine = upLine[:end]
+	}
+	if strings.Contains(upLine, "--exit-node") {
+		t.Fatal("cloudInit(tailscale) must not pass the exit node to tailscale up")
 	}
 	if !strings.Contains(got, "systemctl disable crabbox-tailscale-logout.service") {
 		t.Fatal("cloudInit(tailscale) must remove the legacy reboot logout unit")

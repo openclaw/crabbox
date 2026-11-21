@@ -912,11 +912,15 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		"--advertise-tags=" + shellQuote(tags),
 	}
 	exitNode := strings.TrimSpace(cfg.Tailscale.ExitNode)
+	// tailscale up rejects a MagicDNS name while this node is still starting
+	// and has no peers. Select the exit node only after an address is present.
+	exitNodeSelect := ""
 	if exitNode != "" {
-		tailscaleUpArgs = append(tailscaleUpArgs, "--exit-node="+shellQuote(exitNode))
+		exitNodeSelect = "    tailscale set --exit-node=" + shellQuote(exitNode)
 		if cfg.Tailscale.ExitNodeAllowLANAccess {
-			tailscaleUpArgs = append(tailscaleUpArgs, "--exit-node-allow-lan-access")
+			exitNodeSelect += " --exit-node-allow-lan-access"
 		}
+		exitNodeSelect += "\n"
 	}
 	if authKey == "" {
 		return `    echo "tailscale requested but no auth key was injected" >&2
@@ -953,7 +957,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
       sleep 5
     done
     test -n "$ts_ip"
-    printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
+` + exitNodeSelect + `    printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
     printf '%s\n' ` + shellQuote(hostname) + ` > /var/lib/crabbox/tailscale-hostname
     tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version || true
     if [ -n ` + shellQuote(exitNode) + ` ]; then

@@ -5,8 +5,25 @@
 ### Fixed
 
 - Dependencies: refresh checksum-pinned developer tools and coordinator security dependencies while preserving owned toolchain upgrades. [PR 3219](https://github.com/openclaw/crabbox/pull/3219). Thanks [Endor Labs](https://github.com/apps/endor-labs-pro).
+- Docs: name `tailscale debug prefs` in the exit-node troubleshooting guide. [PR 3163](https://github.com/openclaw/crabbox/pull/3163). Thanks @KrasimirKralev.
+
+- Pond: require unrestricted self-peering rules for healthy diagnostics and skip only complete policies during opt-in bootstrap. [PR 3208](https://github.com/openclaw/crabbox/pull/3208). Thanks @KrasimirKralev.
+
+- Tailscale: select named exit nodes after enrollment and keep Islo recovery unavailable until selection succeeds. [PR 3211](https://github.com/openclaw/crabbox/pull/3211). Thanks @SebTardif.
+
+- Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning while allowing disabled exit-node defaults for unrelated commands; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.
+- Pond: require locally claimed members, preserve running forward ports during JSON inspection and repeated exports, retain daemon records on failed process inspection, and check recorded member ACL tags with accurate doctor documentation. [PR 3148](https://github.com/openclaw/crabbox/pull/3148). Thanks @coygeek.
+- Network/stop: restore provider SSH routes on automatic fallback, consistently report fallback notices, and prepare direct guest cleanup with the live endpoint and stored lease key. [PR 3153](https://github.com/openclaw/crabbox/pull/3153). Thanks @coygeek.
+- Tailscale: persist direct cloud metadata with lossless GCP labels, protect Hetzner lifecycle updates from diagnostic errors, prefer tailnet readiness for exit nodes with public fallback, and reject stale coordinator metadata after cleanup. [PR 3150](https://github.com/openclaw/crabbox/pull/3150). Thanks @coygeek.
+- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
+- Portal: remove admin JSON shortcuts that return 401 for signed-in browser sessions while preserving bearer-only API authentication. [PR 3145](https://github.com/openclaw/crabbox/pull/3145). Thanks @mkusaka.
+- Checkpoints: reconcile pending AWS snapshot and AMI states in coordinator inventory, including existing checkpoints, with bounded polling and identity-checked verification writes. [PR 3146](https://github.com/openclaw/crabbox/pull/3146). Thanks @mkusaka.
+- Coordinator: recover capacity indexes at startup across retained lease history and restarts while preserving rollback completeness. [PR 3149](https://github.com/openclaw/crabbox/pull/3149). Thanks @mkusaka.
+- Authentication: share positive GitHub membership checks across Worker isolates through the regional Cache API while preserving authorization expiry and the Node fallback. [PR 3216](https://github.com/openclaw/crabbox/pull/3216). Thanks @mkusaka.
+- Coordinator: bound stored run logs, evict oldest terminal payloads under pressure while preserving run records, and expose capacity warnings with faster retention pruning. [PR 3217](https://github.com/openclaw/crabbox/pull/3217). Thanks @mkusaka.
 - Run: preserve successful one-shot command exit status while coordinator teardown is pending, without hiding cleanup failures. https://github.com/openclaw/crabbox/pull/3161 Thanks @etzelm.
 - Managed SSH hosts: use an explicitly configured coordinator admin credential for enrollment and inventory changes while keeping listing and host agents on their existing authentication.
+- Daytona: verify configured snapshots are active before reporting readiness or attempting allocation, and report account-default snapshot readiness as unverified. [PR 3218](https://github.com/openclaw/crabbox/pull/3218). Thanks @vincentkoc.
 
 ## 0.83.2 - 2026-11-15
 
