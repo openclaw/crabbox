@@ -31,6 +31,11 @@ Cancellation by the caller stops the command without printing a successful
 result. Pass `--reclaim` when you are intentionally taking over a lease that is
 claimed by another repo checkout.
 
+For Islo leases, this refresh preserves the acquisition-time sandbox binding and
+creator attribution. Printing an SSH command during a non-kept run does not
+transfer cleanup ownership; the run still releases its own sandbox. Later stop
+operations still compare creator attribution with the original claim.
+
 For coordinator-managed leases, the local claim records the idle timeout
 reported by the coordinator. Printing an SSH command preserves that policy;
 it does not replace it with the local configuration's default.

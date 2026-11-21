@@ -183,7 +183,8 @@ func (o *RunObservation) finish(report timingReport, hasReport bool, err error, 
 		o.record.SyncMs, o.record.CommandMs, o.record.TotalMs = report.SyncMs, report.CommandMs, report.TotalMs
 	} else {
 		result := FinalizeRunResult(RunResult{}, err)
-		o.record.ExitCode = &result.ExitCode
+		// No result was produced, so there is no execution exit code to retain.
+		o.record.ExitCode = nil
 		o.record.RunStatus, o.record.ErrorKind = result.Status, result.ErrorKind
 	}
 	if err != nil {

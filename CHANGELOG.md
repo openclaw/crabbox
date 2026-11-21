@@ -5,6 +5,9 @@
 ### Fixed
 
 - Dependencies: refresh checksum-pinned developer tools and coordinator security dependencies while preserving owned toolchain upgrades. [PR 3219](https://github.com/openclaw/crabbox/pull/3219). Thanks [Endor Labs](https://github.com/apps/endor-labs-pro).
+- Islo: preserve acquisition-bound sandbox identity and creator attribution through SSH refreshes so non-kept runs clean up normally and stop advisories remain visible. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+- Local history: omit unavailable execution exit codes after acquisition failures and show failed run status separately from recording state. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+- Local Container: surface bounded bootstrap logs and process exit status before cleaning up failed acquisitions, even when the readiness budget has expired. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
 - Docs: name `tailscale debug prefs` in the exit-node troubleshooting guide. [PR 3163](https://github.com/openclaw/crabbox/pull/3163). Thanks @KrasimirKralev.
 
 - Pond: require unrestricted self-peering rules for healthy diagnostics and skip only complete policies during opt-in bootstrap. [PR 3208](https://github.com/openclaw/crabbox/pull/3208). Thanks @KrasimirKralev.
