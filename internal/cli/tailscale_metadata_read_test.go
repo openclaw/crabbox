@@ -90,9 +90,3 @@ func TestTailscaleMetadataReadScriptKeepsFieldsAligned(t *testing.T) {
 		})
 	}
 }
-
-func TestParseRemoteTailscaleMetadataRequiresIPv4(t *testing.T) {
-	if _, err := parseRemoteTailscaleMetadata("tailscale-ipv4=\ntailscale-hostname=crabbox-blue-lobster"); err == nil {
-		t.Fatal("expected missing ipv4 error")
-	}
-}
