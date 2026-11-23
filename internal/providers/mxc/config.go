@@ -2,6 +2,7 @@ package mxc
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/user"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -23,20 +25,34 @@ type mxcConfig struct {
 	UI          mxcUI         `json:"ui"`
 }
 type mxcProcess struct {
-	CommandLine string   `json:"commandLine"`
-	CWD         string   `json:"cwd,omitempty"`
-	Env         []string `json:"env,omitempty"`
-	Timeout     int64    `json:"timeout,omitempty"`
+	CommandLine       string   `json:"commandLine"`
+	CWD               string   `json:"cwd,omitempty"`
+	Env               []string `json:"env"`
+	InheritDefaultEnv bool     `json:"inheritDefaultEnv"`
+	Timeout           int64    `json:"timeout,omitempty"`
 }
 type mxcFilesystem struct {
 	ReadWritePaths []string `json:"readwritePaths,omitempty"`
 	ReadOnlyPaths  []string `json:"readonlyPaths,omitempty"`
 }
 type mxcNetwork struct {
-	DefaultPolicy   string   `json:"defaultPolicy"`
-	EnforcementMode string   `json:"enforcementMode,omitempty"`
-	AllowedHosts    []string `json:"allowedHosts,omitempty"`
-	BlockedHosts    []string `json:"blockedHosts,omitempty"`
+	Egress  mxcEgress  `json:"egress"`
+	Ingress mxcIngress `json:"ingress"`
+}
+type mxcEgress struct {
+	Default string           `json:"default"`
+	Allow   []mxcNetworkRule `json:"allow,omitempty"`
+	Deny    []mxcNetworkRule `json:"deny,omitempty"`
+}
+type mxcIngress struct {
+	Default      string `json:"default"`
+	HostLoopback string `json:"hostLoopback"`
+}
+type mxcNetworkRule struct {
+	To []mxcNetworkPeer `json:"to"`
+}
+type mxcNetworkPeer struct {
+	CIDR string `json:"cidr"`
 }
 type mxcFallback struct {
 	AllowDACLMutation bool `json:"allowDaclMutation"`
@@ -46,6 +62,9 @@ type mxcUI struct {
 }
 
 func buildConfig(cfg core.Config, req core.RunRequest) (mxcConfig, error) {
+	if err := validateConfig(cfg.MXC); err != nil {
+		return mxcConfig{}, err
+	}
 	if req.ShellMode && !cfg.MXC.AllowWindowsUI {
 		return mxcConfig{}, core.Exit(2, "provider=mxc --shell uses Windows PowerShell; rerun with --mxc-allow-windows-ui")
 	}
@@ -71,15 +90,79 @@ func buildConfig(cfg core.Config, req core.RunRequest) (mxcConfig, error) {
 	if timeout <= 0 {
 		timeout = cfg.TTL
 	}
+	// Stable MXC uses an unsigned 32-bit millisecond timeout; zero disables it.
+	if timeout < 0 || timeout > time.Duration(4294967295)*time.Millisecond || (timeout > 0 && timeout < time.Millisecond) {
+		return mxcConfig{}, core.Exit(2, "provider=mxc timeout must be zero or between 1ms and 4294967295ms; adjust --ttl")
+	}
+	network, err := buildNetwork(cfg.MXC)
+	if err != nil {
+		return mxcConfig{}, err
+	}
 	return mxcConfig{
-		Version:     defaultString(cfg.MXC.Version, "0.6.0-alpha"),
-		Containment: defaultString(cfg.MXC.Containment, "processcontainer"),
+		Version:     core.MXCConfigDefaultVersion,
+		Containment: strings.ToLower(defaultString(cfg.MXC.Containment, core.MXCConfigDefaultContainment)),
 		Process:     mxcProcess{CommandLine: commandLine, CWD: req.Repo.Root, Env: env, Timeout: timeout.Milliseconds()},
 		Filesystem:  mxcFilesystem{ReadWritePaths: uniquePaths(readwrite), ReadOnlyPaths: uniquePaths(readonly)},
-		Network:     mxcNetwork{DefaultPolicy: defaultString(cfg.MXC.Network, "block"), EnforcementMode: "both", AllowedHosts: cfg.MXC.AllowedHosts, BlockedHosts: cfg.MXC.BlockedHosts},
+		Network:     network,
 		Fallback:    mxcFallback{AllowDACLMutation: cfg.MXC.AllowDACLMutation},
 		UI:          mxcUI{Disable: !cfg.MXC.AllowWindowsUI},
 	}, nil
+}
+
+func validateConfig(cfg core.MXCConfig) error {
+	if version := defaultString(cfg.Version, core.MXCConfigDefaultVersion); version != core.MXCConfigDefaultVersion {
+		return core.Exit(2, "provider=mxc supports only schema 1.0.0; version %q is not supported; review the migration in docs/providers/mxc.md and set --mxc-version 1.0.0", version)
+	}
+	if containment := strings.ToLower(defaultString(cfg.Containment, core.MXCConfigDefaultContainment)); containment != "process" && containment != "processcontainer" {
+		return core.Exit(2, "provider=mxc containment %q cannot preserve the native Windows policy; use --mxc-containment processcontainer (or process); --mxc-experimental does not override this restriction", containment)
+	}
+	if cfg.AllowDACLMutation {
+		return core.Exit(2, "provider=mxc schema 1.0.0 has no host-DACL mutation fallback; remove --mxc-allow-dacl-mutation or set mxc.allowDaclMutation=false; a host with native PSEC support is required")
+	}
+	_, err := buildNetwork(cfg)
+	return err
+}
+
+func buildNetwork(cfg core.MXCConfig) (mxcNetwork, error) {
+	policy := defaultString(cfg.Network, core.MXCConfigDefaultNetwork)
+	action := "deny"
+	switch policy {
+	case "block":
+	case "allow":
+		action = "allow"
+	default:
+		return mxcNetwork{}, core.Exit(2, "invalid mxc.network %q; use --mxc-network block or allow", policy)
+	}
+	allow, err := networkRules(cfg.AllowedHosts, "allowedHosts", "--mxc-allowed-hosts")
+	if err != nil {
+		return mxcNetwork{}, err
+	}
+	deny, err := networkRules(cfg.BlockedHosts, "blockedHosts", "--mxc-blocked-hosts")
+	if err != nil {
+		return mxcNetwork{}, err
+	}
+	// Outbound opt-ins never grant private-network ingress or host loopback.
+	return mxcNetwork{Egress: mxcEgress{Default: action, Allow: allow, Deny: deny}, Ingress: mxcIngress{Default: "deny", HostLoopback: "deny"}}, nil
+}
+
+func networkRules(hosts []string, field, flag string) ([]mxcNetworkRule, error) {
+	var rules []mxcNetworkRule
+	for index, host := range hosts {
+		value := strings.TrimSpace(host)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(value)
+			if addrErr != nil || addr.Zone() != "" || addr.Is4In6() {
+				return nil, core.Exit(2, "mxc.%s entry %d is unsupported; %s accepts only numeric IPv4/IPv6 addresses or CIDRs, not DNS names, wildcards, URLs, ports, zones or IPv4-mapped IPv6; no DNS resolution is performed", field, index+1, flag)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Addr().Is4In6() || prefix != prefix.Masked() {
+			return nil, core.Exit(2, "mxc.%s entry %d must be a canonical IPv4/IPv6 network CIDR without host bits or IPv4-mapped IPv6; adjust %s", field, index+1, flag)
+		}
+		rules = append(rules, mxcNetworkRule{To: []mxcNetworkPeer{{CIDR: prefix.String()}}})
+	}
+	return rules, nil
 }
 
 func isWindowsVolumeRoot(path string) bool {

@@ -33,10 +33,10 @@ func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Version != "0.6.0-alpha" || config.Containment != "processcontainer" {
+	if config.Version != "1.0.0" || config.Containment != "processcontainer" {
 		t.Fatalf("config=%+v", config)
 	}
-	if config.Network.DefaultPolicy != "block" || config.Network.EnforcementMode != "both" {
+	if config.Network.Egress.Default != "deny" || config.Network.Ingress.Default != "deny" || config.Network.Ingress.HostLoopback != "deny" {
 		t.Fatalf("network=%+v", config.Network)
 	}
 	if config.Fallback.AllowDACLMutation {
@@ -79,16 +79,15 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func TestBuildConfigAllowsExplicitDACLMutationFallback(t *testing.T) {
+func TestBuildConfigAllowsExplicitWindowsUI(t *testing.T) {
 	cfg := core.BaseConfig()
-	cfg.MXC.AllowDACLMutation = true
 	cfg.MXC.AllowWindowsUI = true
 	config, err := buildConfig(cfg, core.RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !config.Fallback.AllowDACLMutation {
-		t.Fatal("explicit host DACL mutation fallback was not forwarded")
+	if config.Fallback.AllowDACLMutation {
+		t.Fatal("host DACL mutation fallback must remain disabled")
 	}
 	if config.UI.Disable {
 		t.Fatal("explicit Windows UI capability was not forwarded")
@@ -146,7 +145,7 @@ func TestBuildIsolatedConfigUsesPrivateTemporaryDirectory(t *testing.T) {
 
 func TestWriteConfigFileUsesPrivatePermissions(t *testing.T) {
 	dir := t.TempDir()
-	path, cleanup, err := writeConfigFile(dir, mxcConfig{Version: "0.6.0-alpha"})
+	path, cleanup, err := writeConfigFile(dir, mxcConfig{Version: "1.0.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +165,7 @@ func TestWriteConfigFileUsesPrivatePermissions(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Version != "0.6.0-alpha" {
+	if decoded.Version != "1.0.0" {
 		t.Fatalf("decoded=%+v", decoded)
 	}
 }
