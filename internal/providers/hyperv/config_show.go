@@ -18,6 +18,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "memory", JSONValue: c.Memory, TextName: "memory", TextValue: strconv.Itoa(c.Memory)},
 			{JSONName: "switch", JSONValue: c.Switch, TextName: "switch", TextValue: c.Switch},
 			{JSONName: "initPassword", JSONValue: c.InitPassword, TextName: "init_password", TextValue: strconv.FormatBool(c.InitPassword)},
+			{JSONName: "nestedVirtualization", JSONValue: c.NestedVirtualization, TextName: "nested_virtualization", TextValue: strconv.FormatBool(c.NestedVirtualization)},
 		},
 	}
 }

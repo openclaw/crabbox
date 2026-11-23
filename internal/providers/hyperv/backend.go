@@ -781,6 +781,21 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 		return shared.LocalCommandError("Set-VM", result, err)
 	}
 
+	if cfg.HyperV.NestedVirtualization {
+		vmName := core.PowerShellQuote(name)
+		result, err = b.powershell(ctx, fmt.Sprintf(`Set-VMProcessor -VMName %s -ExposeVirtualizationExtensions $true -ErrorAction Stop`, vmName))
+		if err != nil {
+			return shared.LocalCommandError("enable Hyper-V nested virtualization (Set-VMProcessor)", result, err)
+		}
+		result, err = b.powershell(ctx, fmt.Sprintf(`Get-VMProcessor -VMName %s -ErrorAction Stop | Select-Object -ExpandProperty ExposeVirtualizationExtensions -ErrorAction Stop | ConvertTo-Json -Compress`, vmName))
+		if err != nil {
+			return shared.LocalCommandError("verify Hyper-V nested virtualization (Get-VMProcessor)", result, err)
+		}
+		if strings.TrimSpace(result.Stdout) != "true" {
+			return fmt.Errorf("verify Hyper-V nested virtualization for VM %q: ExposeVirtualizationExtensions was not confirmed true", name)
+		}
+	}
+
 	return b.startVM(ctx, name)
 }
 

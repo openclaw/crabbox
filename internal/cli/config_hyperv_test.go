@@ -1,11 +1,44 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestHyperVNestedVirtualizationConfigPrecedence(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.HyperV.NestedVirtualization {
+		t.Fatal("nested virtualization must be off by default")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("hyperv:\n  nestedVirtualization: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil || !cfg.HyperV.NestedVirtualization {
+		t.Fatalf("YAML opt-in: value=%t err=%v", cfg.HyperV.NestedVirtualization, err)
+	}
+	t.Setenv("CRABBOX_HYPERV_NESTED_VIRTUALIZATION", "false")
+	if err := applyEnv(&cfg); err != nil || cfg.HyperV.NestedVirtualization {
+		t.Fatalf("env false override: value=%t err=%v", cfg.HyperV.NestedVirtualization, err)
+	}
+	for _, want := range []bool{true, false} {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		flags := RegisterHyperVConfigFlags(fs, cfg.HyperV)
+		if err := fs.Set("hyperv-nested-virtualization", fmt.Sprint(want)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := flags.Apply(&cfg.HyperV, fs); err != nil || cfg.HyperV.NestedVirtualization != want {
+			t.Fatalf("flag override: value=%t want=%t err=%v", cfg.HyperV.NestedVirtualization, want, err)
+		}
+	}
+}
 
 func TestApplyFileHyperVConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
