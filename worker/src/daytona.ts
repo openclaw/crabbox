@@ -155,6 +155,18 @@ export class DaytonaClient {
     return this.scopeValue;
   }
 
+  async validateConfiguredSnapshot(): Promise<boolean> {
+    if (!this.snapshot) return false;
+    const snapshot = await this.getSnapshot(this.snapshot);
+    const state = typeof snapshot?.state === "string" ? normalizeDaytonaState(snapshot.state) : "";
+    if (state !== "active") {
+      throw new Error(
+        `Daytona configured snapshot ${this.snapshot} is not active (state=${state || "unknown"})`,
+      );
+    }
+    return true;
+  }
+
   async getOwnedServer(lease: DaytonaLeaseIdentity): Promise<ProviderMachine> {
     const claim = lease.providerScope
       ? validateProviderProvisioningCleanupClaim(

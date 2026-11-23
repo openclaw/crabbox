@@ -63,7 +63,7 @@ test("release workflow is verifier-only, protected-default, dual-architecture, a
   assert.match(workflow, /persist-credentials: false/);
   assert.match(
     workflow,
-    /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
+    /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
   );
   assert.match(workflow, /runner: xcode-27\n\s+arch: arm64/);
   assert.match(workflow, /runner: xcode-27\n\s+arch: x86_64/);
@@ -952,7 +952,7 @@ for (const runtimePack of [false, true, "filesystem", "egress"]) {
         "--go-version",
         goVersion,
         "--goreleaser-version",
-        "2.17.0",
+        "2.20.3",
         "--swift-version",
         "Apple Swift version 6.1 (swiftlang-test)",
         "--xcode-version",
@@ -1204,7 +1204,7 @@ test("candidate manifest rejects byte, mode, and pinned source drift before sign
       "--go-version",
       currentToolchain.go,
       "--goreleaser-version",
-      "2.17.0",
+      "2.20.3",
       "--swift-version",
       "Apple Swift version 6.1 (swiftlang-test)",
       "--xcode-version",

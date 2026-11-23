@@ -10,10 +10,23 @@ import {
   tailscaleInstallConfig,
   tailscalePreflight,
   tailscaleTagOwnershipErrorMessage,
+  validateTailscaleTags,
 } from "../src/tailscale";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("requested Tailscale tags", () => {
+  it("keeps valid normalized tags and the empty-list default", () => {
+    expect(validateTailscaleTags([" TAG:CI-1 ", "tag:ci-1"], ["tag:ci-1"])).toEqual(["tag:ci-1"]);
+    expect(validateTailscaleTags([], ["tag:ci", "tag:staging"])).toEqual(["tag:ci", "tag:staging"]);
+  });
+
+  it("accepts long names allowed by Tailscale's CheckTag grammar", () => {
+    const tag = `tag:${"a".repeat(100)}`;
+    expect(validateTailscaleTags([tag], [tag])).toEqual([tag]);
+  });
 });
 
 describe("tailscale hostnames", () => {
@@ -32,6 +45,18 @@ describe("tailscale hostnames", () => {
     expect(renderTailscaleHostname("!!!", "cbx_abcdef123456", "", "aws")).toBe(
       "crabbox-cbx-abcdef123456",
     );
+  });
+
+  it.each([
+    { name: "63 characters kept", template: "a".repeat(63), want: "a".repeat(63) },
+    { name: "64 characters truncated", template: "a".repeat(64), want: "a".repeat(63) },
+    {
+      name: "truncation right after a hyphen",
+      template: `${"a".repeat(62)}-{slug}`,
+      want: "a".repeat(62),
+    },
+  ])("stays a valid DNS label: $name", ({ template, want }) => {
+    expect(renderTailscaleHostname(template, "cbx_abcdef123456", "db", "hetzner")).toBe(want);
   });
 });
 

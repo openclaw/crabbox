@@ -128,7 +128,7 @@ func applyNetworkFlagOverrides(cfg *Config, fs *flag.FlagSet, values networkFlag
 		cfg.Tailscale.ExitNodeAllowLANAccess = *values.TailscaleExitNodeAllowLAN
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
-	return validateNetworkConfig(*cfg)
+	return validateNetworkRequest(*cfg)
 }
 
 func parseNetworkMode(value string) (NetworkMode, error) {
@@ -142,6 +142,21 @@ func parseNetworkMode(value string) (NetworkMode, error) {
 	default:
 		return "", Exit(2, "network must be auto, tailscale, or public")
 	}
+}
+
+// Enforce routing dependencies after lease flags resolve; config files may hold
+// exit-node defaults for commands that enable Tailscale with --tailscale.
+func validateNetworkRequest(cfg Config) error {
+	if err := validateNetworkConfig(cfg); err != nil {
+		return err
+	}
+	if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
+		return Exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
+	}
+	if strings.TrimSpace(cfg.Tailscale.ExitNode) != "" && !cfg.Tailscale.Enabled {
+		return Exit(2, "tailscale.exitNode requires tailscale.enabled; pass --tailscale to enable the requested exit-node routing")
+	}
+	return nil
 }
 
 func validateNetworkConfig(cfg Config) error {
@@ -160,14 +175,8 @@ func validateNetworkConfig(cfg Config) error {
 		if strings.TrimSpace(cfg.Tailscale.HostnameTemplate) == "" {
 			return Exit(2, "tailscale.hostnameTemplate must not be empty")
 		}
-		if cfg.Tailscale.ExitNodeAllowLANAccess && strings.TrimSpace(cfg.Tailscale.ExitNode) == "" {
-			return Exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
-		}
 		if cfg.TargetOS != targetLinux {
 			return Exit(2, "--tailscale managed provisioning currently supports target=linux only")
-		}
-		if isBlacksmithProvider(cfg.Provider) {
-			return Exit(2, "--tailscale is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 		}
 		if isStaticProvider(cfg.Provider) {
 			return Exit(2, "--tailscale only provisions managed leases; set static.host to a MagicDNS name or 100.x address and use --network tailscale")
@@ -193,17 +202,24 @@ func validTailscaleTag(value string) bool {
 		return false
 	}
 	name := strings.TrimPrefix(value, "tag:")
-	if name == "" || len(name) > 63 {
+	// Match tailscale/tailcfg.CheckTag: ASCII letter first, then letters, digits, or dashes.
+	if name == "" || !asciiLetter(name[0]) {
 		return false
 	}
 	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
 			continue
 		}
 		return false
 	}
 	return true
 }
+
+func asciiLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
+const maxTailscaleHostnameLength = 63
 
 func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 	value := strings.TrimSpace(template)
@@ -218,14 +234,28 @@ func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 	for key, replacement := range replacements {
 		value = strings.ReplaceAll(value, key, replacement)
 	}
-	value = NormalizeLeaseSlug(value)
+	value = tailscaleHostnameLabel(value)
 	if value == "" {
-		value = "crabbox-" + strings.ReplaceAll(leaseID, "_", "-")
+		value = tailscaleHostnameLabel("crabbox-" + strings.ReplaceAll(leaseID, "_", "-"))
+	}
+	return value
+}
+
+// Tailscale rejects a hostname longer than a DNS label or ending in a hyphen,
+// which only surfaces later as a failed enrollment on the lease.
+func tailscaleHostnameLabel(value string) string {
+	value = NormalizeLeaseSlug(value)
+	if len(value) > maxTailscaleHostnameLength {
+		value = strings.TrimRight(value[:maxTailscaleHostnameLength], "-")
 	}
 	return value
 }
 
 func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target SSHTarget) (resolvedNetworkTarget, error) {
+	if target.providerNetworkTarget != nil {
+		target = *target.providerNetworkTarget
+	}
+	target.NetworkKind = NetworkPublic
 	meta := serverTailscaleMetadata(server)
 	switch cfg.Network {
 	case NetworkPublic:
@@ -237,12 +267,15 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 				if !probeSSHTransport(ctx, &target, 6*time.Second) {
 					return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested for static host %s but SSH is not reachable; is this client joined to the tailnet?", target.Host)
 				}
+				target.NetworkKind = NetworkTailscale
 				return resolvedNetworkTarget{Target: target, Network: NetworkTailscale}, nil
 			}
 			return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested but lease %s has no tailnet address", blank(server.Labels["lease"], server.Name))
 		}
 		next := target
 		next.Host = host
+		next.NetworkKind = NetworkTailscale
+		next.providerNetworkTarget = &target
 		if !probeSSHTransport(ctx, &next, 6*time.Second) {
 			return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested but %s is not reachable over SSH; is this client joined to the tailnet?", host)
 		}
@@ -254,8 +287,13 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 		}
 		next := target
 		next.Host = host
+		next.NetworkKind = NetworkTailscale
+		next.providerNetworkTarget = &target
 		if probeSSHTransport(ctx, &next, 5*time.Second) {
 			return resolvedNetworkTarget{Target: next, Network: NetworkTailscale}, nil
+		}
+		if target.Host == "" {
+			return resolvedNetworkTarget{}, Exit(5, "tailnet host %s is not reachable and lease %s has no provider SSH address for fallback", host, blank(server.Labels["lease"], server.Name))
 		}
 		return resolvedNetworkTarget{Target: target, Network: NetworkPublic, FallbackReason: "tailscale_unreachable"}, nil
 	}
@@ -270,6 +308,9 @@ func bootstrapNetworkTarget(cfg Config, server Server, target SSHTarget) SSHTarg
 		return target
 	}
 	next := target
+	if target.providerNetworkTarget == nil {
+		next.providerNetworkTarget = &target
+	}
 	next.Host = host
 	next.NetworkKind = NetworkTailscale
 	return next
@@ -304,8 +345,10 @@ func serverTailscaleMetadata(server Server) TailscaleMetadata {
 		ExitNode:               labels["tailscale_exit_node"],
 		ExitNodeAllowLANAccess: labelBool(labels["tailscale_exit_node_allow_lan_access"]),
 	}
-	if tags := splitCommaList(labels["tailscale_tags"]); len(tags) > 0 {
-		meta.Tags = tags
+	var err error
+	meta.Tags, err = tailscaleTagsFromLabels(labels)
+	if err != nil {
+		meta.Error = firstNonEmpty(meta.Error, err.Error())
 	}
 	return meta
 }
@@ -334,6 +377,8 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 	if meta.Error != "" {
 		server.Labels["tailscale_error"] = meta.Error
+	} else {
+		delete(server.Labels, "tailscale_error")
 	}
 	if meta.Version != "" {
 		server.Labels["tailscale_version"] = meta.Version
@@ -371,7 +416,7 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 	}
 	applyTailscaleMetadataToServer(server, meta)
 	if useCoordinator && coord != nil && leaseID != "" {
-		if lease, err := coord.UpdateLeaseTailscaleForProvider(ctx, leaseID, cfg.Provider, meta); err == nil {
+		if lease, err := coord.updateLeaseTailscaleForGeneration(ctx, leaseID, cfg.Provider, original.coordinatorCreatedAt, meta); err == nil {
 			updated, identityErr := coordinatorTailscaleResponseServer(cfg, original, lease)
 			if identityErr != nil {
 				*server = original

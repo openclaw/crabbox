@@ -16,8 +16,8 @@ Remove-Item -LiteralPath $PrepErrorFile -Force -ErrorAction SilentlyContinue
 Set-Content -LiteralPath $PrepStepFile -Value "validating prep configuration"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$DefaultNodeVersion = "24.22.1"
-$DefaultNodeSHA256 = "3bda4baf1ee709b33cf920dd633106ddb23951e322bff9c03ec9f64ab8981b01"
+$DefaultNodeVersion = "24.22.3"
+$DefaultNodeSHA256 = "4a1ab5bdec5434bae58efae6c3e5077a011f6f1e76d2b47b7b10af043f7db545"
 $NodeVersion = $env:CRABBOX_WINDOWS_NODE_VERSION
 if (-not $NodeVersion) { $NodeVersion = $DefaultNodeVersion }
 $NodeSHA256 = $env:CRABBOX_WINDOWS_NODE_SHA256
@@ -31,11 +31,11 @@ if ($NodeSHA256 -notmatch "^[0-9a-fA-F]{64}$") {
   throw "CRABBOX_WINDOWS_NODE_SHA256 must be a 64-character hex digest"
 }
 $PnpmVersion = $env:CRABBOX_WINDOWS_PNPM_VERSION
-if (-not $PnpmVersion) { $PnpmVersion = "11.1.0" }
+if (-not $PnpmVersion) { $PnpmVersion = "11.28.13" }
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
 if (-not $InstallDocker) { $InstallDocker = "1" }
-$DefaultDockerVersion = "29.5.1"
-$DefaultDockerSHA256 = "7008d54da30461fa745d4539beb87d3d14dd38c7ab0110657720526e16f5f2d3"
+$DefaultDockerVersion = "29.10.0"
+$DefaultDockerSHA256 = "bb894f67d85155e635ce71980fb2cf587e71dad8c41cc145c42a0de5160b6561"
 $DockerVersion = $env:CRABBOX_WINDOWS_DOCKER_VERSION
 if (-not $DockerVersion) { $DockerVersion = $DefaultDockerVersion }
 $DockerSHA256 = $env:CRABBOX_WINDOWS_DOCKER_SHA256
@@ -60,12 +60,12 @@ $ServerCoreTag = switch ($WindowsBuild) {
 if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:$ServerCoreTag" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
 $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
-if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
+if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.5" }
 $ChocolateyPackageSHA256 = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256
-if (-not $ChocolateyPackageSHA256) { $ChocolateyPackageSHA256 = "40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5" }
-$TruffleHogVersion = "3.99.4"
-$TruffleHogAMD64SHA256 = "97749c11ec76ef93ca50a3a50bd2a40f25fb92dfee4366d4bff0ba0d951307a8"
-$TruffleHogARM64SHA256 = "e56d8a6c60b69aa4d00753c202b3864a2d045bc1ee8538012b99c8f7352fcbc6"
+if (-not $ChocolateyPackageSHA256) { $ChocolateyPackageSHA256 = "f86f99a18d236c2f99e6f67a20be7adc65c6c7756bf6cf3b43759e7ec0aa5839" }
+$TruffleHogVersion = "3.100.0"
+$TruffleHogAMD64SHA256 = "e3e854ded5b19ce1312fd103f3ca898f367e99f24f27c1170a711e0e9288f86d"
+$TruffleHogARM64SHA256 = "89553c4dbe94eb712226083ddcc0acd72ce2a280f2d542ba8458e483eee3945f"
 $TruffleHogInstallDir = $env:CRABBOX_WINDOWS_TRUFFLEHOG_INSTALL_DIR
 if (-not $TruffleHogInstallDir) { $TruffleHogInstallDir = "C:\Program Files\TruffleHog" }
 

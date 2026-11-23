@@ -31,7 +31,7 @@ function Assert-Selected {
   $actual = (Get-Command node.exe -ErrorAction Stop).Source
   $expected = Join-Path $selected "node.exe"
   if ($actual -ine $expected) { throw "wrong selected executable: $actual" }
-  if ((& $actual --version) -ne "v24.22.1") { throw "wrong selected runtime version" }
+  if ((& $actual --version) -ne "v24.22.3") { throw "wrong selected runtime version" }
   & (Join-Path $selected "npm.cmd") --version
   if ($LASTEXITCODE -ne 0) { throw "selected npm failed" }
   for ($pass=0; $pass -lt 2; $pass++) {

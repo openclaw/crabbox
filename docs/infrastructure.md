@@ -264,7 +264,7 @@ CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
 CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
 CRABBOX_TAILSCALE_INSTALL_MODE=package  # package (default) or pinned static archive
-CRABBOX_TAILSCALE_VERSION=1.104.2        # static archive version
+CRABBOX_TAILSCALE_VERSION=1.104.7        # static archive version
 CRABBOX_TAILSCALE_SHA256_AMD64=...      # amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64=...      # arm64 archive checksum
 ```
@@ -407,7 +407,8 @@ Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions for
 instances, key pairs, and managed security groups, plus the image lifecycle
 permissions (`CreateImage`, `DeregisterImage`, `RegisterImage`,
 `DescribeSnapshots`, `DeleteSnapshot`, `DescribeFastSnapshotRestores`,
-`EnableFastSnapshotRestores`), `ec2:DescribeInstanceTypes`, and
+`EnableFastSnapshotRestores`), `ec2:DescribeInstanceTypes`,
+`ec2:DescribeSpotPriceHistory`, and
 `servicequotas:GetServiceQuota`. The image
 permissions cover `crabbox image`, native AWS checkpoints, macOS image bake
 validation, and Fast Snapshot Restore promotion. Quota admission and readiness

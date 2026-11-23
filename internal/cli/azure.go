@@ -37,9 +37,9 @@ const (
 	legacyAzureJammyImage             = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
 	legacyAzureNobleGen2Image         = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
 	defaultAzureWindowsImage          = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
-	azureTruffleHogVersion            = "3.99.4"
-	azureTruffleHogAMD64SHA256        = "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1"
-	azureTruffleHogARM64SHA256        = "e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5"
+	azureTruffleHogVersion            = "3.100.0"
+	azureTruffleHogAMD64SHA256        = "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb"
+	azureTruffleHogARM64SHA256        = "aa61657049229ae523e8455fcbba87dff57b0a2ba6bdb391a38cf75e6d4016dd"
 	azureDeleteRetryDelay             = 15 * time.Second
 	azureDeleteRetryAttempts          = 13
 	azureSnapshotQuarantineNSGSuffix  = "-q-nsg"

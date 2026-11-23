@@ -780,6 +780,8 @@ func TestScalewaySDKOwnershipGuardsBeforeHTTPMutations(t *testing.T) {
 					return
 				}
 				switch r.Method + " " + r.URL.Path {
+				case "GET /metadata":
+					reply(http.StatusOK, scw.ApiMetadata{Domain: "scw.cloud", Partition: "scw", Platform: "external"})
 				case "GET " + base + "/servers":
 					items := []*instance.Server{}
 					if server != nil {

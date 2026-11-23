@@ -200,17 +200,17 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
 	}
-	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+	resolved, err := resolveNetworkTarget(ctx, cfg, server, target)
+	if err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
 		return err
-	} else {
-		target = resolved.Target
-		refreshRunLeaseClaimEndpoint(leaseID, &server, target)
-		if resolved.FallbackReason != "" {
-			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
-		}
 	}
-	network := readyNetworkDisplay(cfg, server, target)
+	target = resolved.Target
+	refreshRunLeaseClaimEndpoint(leaseID, &server, target)
+	if resolved.FallbackReason != "" {
+		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+	}
+	network := resolved.Network
 	meta := serverTailscaleMetadata(server)
 	tailscaleSummary := ""
 	if meta.Enabled {
@@ -1692,6 +1692,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
+		applyResolvedLeaseConfig(&cfg, server, &target)
 		envSelection.remove(target.ChildEnvDenylist...)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
@@ -2312,7 +2313,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, err
 		}
 		applyResolvedServerConfig(&cfg, server)
-		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		envSelection.remove(target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
@@ -3847,10 +3849,9 @@ func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, serv
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
 	report.Workdir = workdir
-	stopID := firstNonBlank(ServerSlug(server), leaseID)
-	if normalizeProviderName(cfg.Provider) == "external" {
-		stopID = leaseID
-	}
+	// A display slug can be shared by several leases (for example, static
+	// slots on one host). Recovery must select the exact lease we ran.
+	stopID := firstNonBlank(leaseID, ServerSlug(server))
 	report.StopCommand = runStopCommand(cfg, stopID)
 	report.IdleTimeout = cfg.IdleTimeout.String()
 	report.Artifacts = artifacts
@@ -4586,19 +4587,6 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 	}
 }
 
-func readyNetworkDisplay(cfg Config, server Server, target SSHTarget) NetworkMode {
-	if target.NetworkKind != "" {
-		return target.NetworkKind
-	}
-	if cfg.Provider == "daytona" || server.Provider == "daytona" {
-		return NetworkPublic
-	}
-	if target.Host != server.PublicNet.IPv4.IP && target.Host != "" {
-		return NetworkTailscale
-	}
-	return NetworkPublic
-}
-
 func coordinatorFallbackSummary(lease CoordinatorLease) string {
 	if lease.RequestedServerType == "" {
 		return ""
@@ -4967,7 +4955,8 @@ func (a App) releaseBackendLeaseWithOutcomeBestEffort(ctx context.Context, backe
 		}
 	}
 	if connectionCleanupSafe {
-		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
+		a.cleanupReleaseLeaseRemoteConnectionsBestEffort(ctx, backend, lease)
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, lease.LeaseID)
 	}
 	outcome, err := a.releaseBackendLease(ctx, backend, cfg, lease)
 	if err != nil {
@@ -4998,10 +4987,21 @@ func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(ctx context.Context, 
 	}
 }
 
-func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
-	// Keep mediated outbound connections alive while the guest winds down.
+func (a App) cleanupReleaseLeaseRemoteConnectionsBestEffort(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget) {
+	if lease.SSH.Host == "" {
+		return
+	}
+	// Release-only resolution must not require local keys. Bind them only for
+	// optional guest cleanup, inside the provider's guard when it requires one.
+	if backendCoordinator(backend) == nil {
+		if rebinder, ok := backend.(ResolvedLeaseTargetRebinder); ok {
+			if err := rebinder.RebindResolvedLeaseTarget(&lease, lease.LeaseID); err != nil {
+				fmt.Fprintf(a.Stderr, "warning: could not prepare guest SSH before release for %s: %v\n", lease.LeaseID, err)
+				return
+			}
+		}
+	}
 	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
-	a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, lease.LeaseID)
 }
 
 const remoteConnectionCleanupTimeout = 35 * time.Second
@@ -5026,7 +5026,9 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	request := ReleaseLeaseRequest{Lease: lease, Force: true, DeferProviderCleanupObservation: true}
 	if !releaseLeaseConnectionCleanupSafe(backend) {
-		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+		request.GuardedRemoteCleanup = func(ctx context.Context, lease LeaseTarget) {
+			a.cleanupReleaseLeaseRemoteConnectionsBestEffort(ctx, backend, lease)
+		}
 	}
 	var outcome ReleaseLeaseOutcome
 	var err error
@@ -5597,7 +5599,7 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	}
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
 	if connectionCleanupSafe {
-		a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+		a.cleanupReleaseLeaseRemoteConnectionsBestEffort(ctx, sshBackend, lease)
 		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, *id, lease.LeaseID)
 	}
 	request := ReleaseLeaseRequest{
@@ -5607,7 +5609,9 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 		DeferProviderCleanupObservation: !*wait,
 	}
 	if !connectionCleanupSafe {
-		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+		request.GuardedRemoteCleanup = func(ctx context.Context, lease LeaseTarget) {
+			a.cleanupReleaseLeaseRemoteConnectionsBestEffort(ctx, sshBackend, lease)
+		}
 	}
 	var outcome ReleaseLeaseOutcome
 	if reporter, ok := sshBackend.(ReleaseLeaseOutcomeBackend); ok {

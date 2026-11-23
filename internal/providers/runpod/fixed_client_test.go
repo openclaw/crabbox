@@ -33,7 +33,7 @@ func TestRunpodStableGraphQLIdentity(t *testing.T) {
 				_, _ = io.WriteString(w, tc.response)
 			}))
 			defer server.Close()
-			cfg := core.Config{Runpod: core.RunpodConfig{APIKey: "test-key", APIURL: server.URL + "/v1"}}
+			cfg := core.Config{Runpod: core.RunpodConfig{APIKey: "test-key", APIURL: server.URL + "/v2"}}
 			client, err := newRunpodClient(cfg, core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatal(err)
@@ -77,25 +77,26 @@ func TestRunpodIdentityRoutingAndRedaction(t *testing.T) {
 
 func TestRunpodRedirectGuardBothAPIHosts(t *testing.T) {
 	for _, graphql := range []bool{false, true} {
-		host, other := "rest.runpod.io", "api.runpod.io"
-		if graphql {
-			host, other = other, host
-		}
-		for _, destination := range []string{host, other, "unrelated.example"} {
-			t.Run(host+"/"+destination, func(t *testing.T) {
+		host := "api.runpod.io"
+		for _, destination := range []string{host, "rest.runpod.io", "unrelated.example"} {
+			surface := "REST"
+			if graphql {
+				surface = "GraphQL"
+			}
+			t.Run(surface+"/"+destination, func(t *testing.T) {
 				calls := 0
 				transport := fixedRoundTripper(func(r *http.Request) (*http.Response, error) {
 					calls++
 					if r.URL.Host != host {
 						t.Fatal("redirect escaped the original API host")
 					}
-					if r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer test-key" {
+					if (graphql && r.URL.RawQuery != "") || r.URL.Query().Has("api_key") || r.Header.Get("Authorization") != "Bearer test-key" {
 						t.Fatal("request did not use header-only authentication")
 					}
 					if calls == 1 {
 						return &http.Response{StatusCode: http.StatusTemporaryRedirect, Header: http.Header{"Location": {"https://" + destination + "/redirected"}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 					}
-					body := "[]"
+					body := `{"pods":[],"pagination":{"hasNextPage":false,"nextCursor":null}}`
 					if graphql {
 						body = "{\"data\":{\"myself\":{\"id\":\"account-one\"}}}"
 					}
@@ -134,6 +135,16 @@ func TestRunpodFixedCreateMarkersAndSingleSubmission(t *testing.T) {
 				var payload map[string]json.RawMessage
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					t.Error(err)
+				}
+				var gpu struct {
+					ID    string `json:"id"`
+					Count int    `json:"count"`
+				}
+				if err := json.Unmarshal(payload["gpu"], &gpu); err != nil || gpu.ID != "GPU-one" || gpu.Count != 1 {
+					t.Errorf("fixed create must submit exactly the first GPU: gpu=%+v err=%v", gpu, err)
+				}
+				if _, legacy := payload["gpuTypeIds"]; legacy {
+					t.Error("legacy fallback list sent")
 				}
 				var env map[string]string
 				if err := json.Unmarshal(payload["env"], &env); err != nil {

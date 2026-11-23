@@ -56,9 +56,11 @@ import {
   retainedReconcileDue,
   retainedReconcileStatus,
 } from "./retained-lease-reconcile";
+import { RunLogStorage, runLogBudget } from "./run-log-storage";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
 import { SSHHostCoordinator } from "./ssh-host";
+import { hostCredentialRequest, hostCredentialRouteAllowed } from "./ssh-host-auth";
 import { generateSSHHostKeyPair } from "./ssh-host-key";
 import { sshHostCloudProvider } from "./ssh-host-provider";
 type ReadyPoolMode = boolean | "portable";
@@ -86,6 +88,7 @@ import {
 } from "./lease-list";
 import {
   leaseMaintenanceIndexReady,
+  maintainLeaseIndex,
   maintainLeaseIndexes,
   type LeaseMaintenanceState,
 } from "./lease-maintenance-index";
@@ -185,10 +188,12 @@ import {
   CheckpointError,
   abortCheckpointProvisioningForLease,
   acquireCheckpointUse,
+  backfillCheckpointImageRefresh,
   backfillFailedCheckpointCreateRecovery,
   bindCheckpointUseProvisioningInTransaction,
   cancelFailedCheckpointCreate,
   checkpointDuePrefix,
+  checkpointImageBackfillKey,
   checkpointEventKey,
   checkpointKey,
   checkpointLeaseSourceIdentity,
@@ -196,6 +201,7 @@ import {
   checkpointUseKey,
   checkpointVisibleTo,
   claimCheckpointDeletion,
+  deferCheckpointImageRefresh,
   expireCheckpointClaims,
   failCheckpointCreateDefinitively,
   finalizeCheckpointDeletion,
@@ -213,6 +219,7 @@ import {
   recordCheckpointCreateRecoveryFailure,
   recordCheckpointDeletionFailure,
   recordCheckpointExpiryDue,
+  recordCheckpointImageObservation,
   recordCheckpointProviderAbsence,
   resolveRejectedCheckpointProvisioning,
   renewCheckpointUse,
@@ -223,6 +230,7 @@ import {
   validCheckpointID,
   validCheckpointRetention,
   validateCheckpointUse,
+  type CheckpointImageBackfill,
   type CheckpointPrincipal,
 } from "./checkpoints";
 import {
@@ -551,6 +559,7 @@ import {
   enforceCostLimitUsage,
   enforceBudgetLimitUsage,
   leaseCost,
+  quotedLeaseCost,
   leaseExtensionReservationUSD,
   requestOrg,
   createUsageSummary,
@@ -597,7 +606,7 @@ const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
-const terminalRunPruneBatchSize = 16;
+const terminalRunPruneBatchSize = 128;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
@@ -1264,6 +1273,15 @@ export class FleetCoordinator {
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readonly readyPoolBorrowLock = new AsyncMutex();
+  private logStorage?: RunLogStorage;
+
+  private runLogStorage(): RunLogStorage {
+    return (this.logStorage ??= new RunLogStorage(
+      this.state.storage,
+      runLogBudget(this.env.CRABBOX_RUN_LOG_BUDGET_BYTES),
+      (id) => this.activeRunLogReaders.has(id),
+    ));
+  }
   private readonly poolAccess: ReadyPoolAccess;
   private readonly bridgeTicketLock = new AsyncMutex();
   private readonly bridgeTickets: BridgeTickets;
@@ -1271,6 +1289,8 @@ export class FleetCoordinator {
   private readonly providerMaintenanceLock = new AsyncMutex();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
   private readonly leaseProvisioning: LeaseProvisioningController;
+  private capacityIndexRecovery = Promise.resolve();
+  private capacityIndexRecoveryStarted = false;
   private maintenanceRun: Promise<void> | undefined;
   private alarmArmRevision = 0;
   private maintenanceAlarmStreak: { source: string; key: string; delayMs: number } | undefined;
@@ -1376,6 +1396,45 @@ export class FleetCoordinator {
     this.restoreBridgeWebSockets();
   }
 
+  startCapacityIndexRecovery(): void {
+    if (this.capacityIndexRecoveryStarted) return;
+    this.capacityIndexRecoveryStarted = true;
+    this.capacityIndexRecovery = this.recoverCapacityIndex().catch(() => {
+      console.error("capacity lease index recovery failed; scheduled maintenance will retry");
+    });
+    this.state.provisioning?.ownMaintenance(this.capacityIndexRecovery);
+  }
+
+  private async recoverCapacityIndex(): Promise<void> {
+    const storage = this.state.storage;
+    let state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+      noCache: true,
+    });
+    if (!state) {
+      const leases = await storage.list({ prefix: "lease:", limit: 1, noCache: true });
+      if (leases.size === 0) return;
+    }
+    // Finish the restart audit here, outside request snapshots and the lifecycle
+    // mutex. Each pass is bounded; retained history must not impose a total cap.
+    while (
+      !leaseMaintenanceIndexReady(state) ||
+      state?.generation !== this.coordinatorGeneration ||
+      state.auditStartAfter !== undefined
+    ) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- complete consecutive bounded audit passes before capacity reads.
+      await maintainLeaseIndex(
+        storage,
+        leaseMaintenanceIndex,
+        Date.now(),
+        this.coordinatorGeneration,
+      );
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe the completed pass before advancing recovery.
+      state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+        noCache: true,
+      });
+    }
+  }
+
   async prepareBridgeRequest(request: Request): Promise<Response | undefined> {
     // Capacity reads must not trigger restoration or unrelated maintenance.
     if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") return;
@@ -1393,6 +1452,14 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
+      if (hostCredentialRequest(request)) {
+        if (!hostCredentialRouteAllowed(request))
+          return json({ error: "host_scope_forbidden" }, { status: 403 });
+        const parts = pathParts(request);
+        return parts[1] === "ssh-hosts"
+          ? await new SSHHostCoordinator(this.state, this.env).route(request, parts)
+          : await new ServeCoordinator(this.state, this.env).route(request, parts);
+      }
       if (isDeviceTokenRequest(request) && !configuredFleetBearer(request, this.env)) {
         const authenticated = await this.authenticatedDeviceRequest(request);
         if (authenticated instanceof Response) return authenticated;
@@ -1402,6 +1469,9 @@ export class FleetCoordinator {
       // This read must not trigger bridge reconciliation or other maintenance.
       if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") {
         return await this.capacity(request);
+      }
+      if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity/run-logs") {
+        return json(await this.runLogStorage().capacity());
       }
       const bridgeFailure = await this.prepareBridgeRequest(request);
       if (bridgeFailure) return bridgeFailure;
@@ -3506,6 +3576,7 @@ export class FleetCoordinator {
     forwardedAdminGrantVersion?: string,
     preserveForwardedVersion = false,
   ): Promise<void> {
+    await this.capacityIndexRecovery;
     const alarmArmRevision = this.alarmArmRevision;
     if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
@@ -3556,6 +3627,9 @@ export class FleetCoordinator {
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.pruneTerminalRuns();
+    const logsPending = await this.runLogStorage().maintain();
+    if (logsPending) await this.state.storage.put("maintenance:run-log-pending", true);
+    else await this.state.storage.delete("maintenance:run-log-pending");
     await this.pruneExternalRunners();
     await this.maintainCheckpoints();
     await this.runAzureDeferredCleanups();
@@ -4557,9 +4631,11 @@ export class FleetCoordinator {
         withSSHHostKey(config, `crabbox-${leaseID}`),
       );
     }
-    const providerHourlyUSD = await measureCreationStep("admission.pricing", () =>
-      provider.hourlyPriceUSD(config.serverType, config),
-    ).catch(() => undefined);
+    const cost = await measureCreationStep("admission.pricing", () =>
+      quotedLeaseCost(this.env, config.provider, config.serverType, config.ttlSeconds, () =>
+        provider.hourlyPriceUSD(config.serverType, config),
+      ),
+    );
     admissionFence.assertActive();
     if (
       createAttempt &&
@@ -4567,13 +4643,6 @@ export class FleetCoordinator {
     ) {
       return createCanceledResponse();
     }
-    const cost = leaseCost(
-      this.env,
-      config.provider,
-      config.serverType,
-      config.ttlSeconds,
-      providerHourlyUSD,
-    );
     const continuation =
       !workspaceID && !checkpointAuthorization && !reservationGuard
         ? provider.resumableProvisioning?.()
@@ -4738,6 +4807,7 @@ export class FleetCoordinator {
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
+        ...(cost.pricingFallback ? { pricingFallback: cost.pricingFallback } : {}),
         state: "provisioning",
         provisioningResourceMayExist: false,
         provisioningCoordinatorVersion: this.coordinatorGeneration,
@@ -5270,18 +5340,17 @@ export class FleetCoordinator {
       config = finalized.config;
       record = finalized.lease;
     }
-    const finalProviderHourlyUSD = await provider
-      .hourlyPriceUSD(serverType, config)
-      .catch(() => undefined);
-    const finalCost = leaseCost(
+    const finalCost = await quotedLeaseCost(
       this.env,
       config.provider,
       serverType,
       config.ttlSeconds,
-      finalProviderHourlyUSD,
+      () => provider.hourlyPriceUSD(serverType, config),
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
+    if (finalCost.pricingFallback) record.pricingFallback = finalCost.pricingFallback;
+    else delete record.pricingFallback;
     const finalization = await this.state.runExclusive(async () => {
       type Publication = { committed: false } | { committed: true; record: LeaseRecord };
       let published: LeaseRecord | undefined;
@@ -5509,6 +5578,7 @@ export class FleetCoordinator {
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
+        ...(cost.pricingFallback ? { pricingFallback: cost.pricingFallback } : {}),
         state: "provisioning",
         provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
@@ -6684,15 +6754,12 @@ export class FleetCoordinator {
         }
         return failed;
       }
-      const providerHourlyUSD = await provider
-        .hourlyPriceUSD(recoveredServer.serverType, recoveryConfig)
-        .catch(() => undefined);
-      const recoveredCost = leaseCost(
+      const recoveredCost = await quotedLeaseCost(
         this.env,
         workspace.provider,
         recoveredServer.serverType,
         lease.ttlSeconds,
-        providerHourlyUSD,
+        () => provider.hourlyPriceUSD(recoveredServer.serverType, recoveryConfig),
       );
       const recovered = await this.state.runExclusive(async () => {
         const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
@@ -6722,6 +6789,8 @@ export class FleetCoordinator {
         applyRecoveredServerIdentity(current, recoveredServer);
         current.estimatedHourlyUSD = recoveredCost.hourlyUSD;
         current.maxEstimatedUSD = recoveredCost.maxUSD;
+        if (recoveredCost.pricingFallback) current.pricingFallback = recoveredCost.pricingFallback;
+        else delete current.pricingFallback;
         if (
           workspaceCapability
             ? workspaceCapability.recoveredReady(recoveredServer)
@@ -8109,9 +8178,12 @@ export class FleetCoordinator {
       return this.heartbeatLease(request, leaseID);
     }
     if (method === "POST" && action === "tailscale") {
-      const input = await readJson<Partial<TailscaleMetadata> & { expectedProvider?: unknown }>(
-        request,
-      );
+      const input = await readJson<
+        Partial<TailscaleMetadata> & { expectedProvider?: unknown; expectedCreatedAt?: unknown }
+      >(request);
+      const observed = await this.resolveLease(leaseID, request, isAdminRequest(request));
+      if (!observed) return notFound();
+      const binding = this.cleanupRecoveryLeaseBinding(observed);
       return await this.state.runExclusive(async () => {
         const admin = isAdminRequest(request);
         const lease = await this.resolveLease(leaseID, request, admin);
@@ -8127,6 +8199,31 @@ export class FleetCoordinator {
         const providerError = mutationExpectedProviderError(input.expectedProvider, lease);
         if (providerError) {
           return providerError;
+        }
+        if (
+          this.cleanupRecoveryLeaseBinding(lease) !== binding ||
+          (input.expectedCreatedAt !== undefined && input.expectedCreatedAt !== lease.createdAt)
+        ) {
+          return json(
+            {
+              error: "lease_generation_changed",
+              message: "lease generation changed before metadata update",
+            },
+            { status: 409 },
+          );
+        }
+        if (
+          lease.state === "released" ||
+          lease.state === "expired" ||
+          leaseProviderCleanupConfirmed(lease)
+        ) {
+          return json(
+            {
+              error: "lease_ended",
+              message: "lease has ended or its provider cleanup is confirmed",
+            },
+            { status: 409 },
+          );
         }
         lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
         lease.updatedAt = new Date().toISOString();
@@ -8710,7 +8807,7 @@ export class FleetCoordinator {
     }
     try {
       config.tailscaleTags = validateTailscaleTags(
-        input.tailscaleTags ?? config.tailscaleTags,
+        input.tailscaleTags ?? [],
         tailscaleDefaultTags(this.env),
       );
       config.tailscaleHostname = renderTailscaleHostname(
@@ -8737,7 +8834,11 @@ export class FleetCoordinator {
       });
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (message.includes("tags not allowed") || message.includes("requires at least one")) {
+      if (
+        message.includes("invalid Tailscale tag") ||
+        message.includes("tags not allowed") ||
+        message.includes("requires at least one")
+      ) {
         return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
       }
       const tagOwnershipMessage = tailscaleTagOwnershipErrorMessage(error);
@@ -16271,8 +16372,9 @@ export class FleetCoordinator {
       | { kind: "duplicate"; run: RunRecord }
       | { kind: "conflict"; run: RunRecord }
       | { kind: "committed"; run: RunRecord; event: RunEventRecord };
+    const retained = await this.runLogStorage().reserve(terminalLogPrefix, logInput.bytes);
     try {
-      await writeTerminalRunLog(this.state.storage, terminalLogPrefix, logInput.log);
+      if (retained) await writeTerminalRunLog(this.state.storage, terminalLogPrefix, logInput.log);
       committed = await this.state.storage.transaction(async (storage) => {
         let current = await storage.get<RunRecord>(runKey(runID));
         if (admissionFingerprint) {
@@ -16312,6 +16414,7 @@ export class FleetCoordinator {
         if (!admissionFingerprint && !sameTerminalRunBinding(current, run)) {
           return { kind: "conflict" as const, run: current };
         }
+        await this.runLogStorage().account(storage, current);
         const next = { ...current };
         if (admissionFingerprint) next.admissionFailedBeforeWork = true;
         next.exitCode = exitCode;
@@ -16335,6 +16438,7 @@ export class FleetCoordinator {
         if (receipt) next.terminalReceipt = receipt;
         next.terminalFinishSHA256 = requestedFingerprint;
         next.terminalLogPrefix = terminalLogPrefix;
+        await this.runLogStorage().commit(storage, next, terminalLogPrefix, retained);
         const seq = (next.eventCount ?? 0) + 1;
         const event = boundedRunEvent(next.id, seq, endedAt, {
           type: admissionFingerprint ? "run.failed" : "command.finished",
@@ -16356,7 +16460,9 @@ export class FleetCoordinator {
           throw error;
         });
       if (current?.terminalLogPrefix !== terminalLogPrefix) {
-        await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+        await this.runLogStorage()
+          .discard(terminalLogPrefix)
+          .catch(() => undefined);
         throw error;
       }
       if (
@@ -16370,12 +16476,16 @@ export class FleetCoordinator {
         throw error;
       }
       committed = { kind: "duplicate", run: current };
+    } finally {
+      this.runLogStorage().release(terminalLogPrefix);
     }
     if (
       committed.kind !== "committed" &&
       (committed.kind === "missing" || committed.run.terminalLogPrefix !== terminalLogPrefix)
     ) {
-      await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+      await this.runLogStorage()
+        .discard(terminalLogPrefix)
+        .catch(() => undefined);
     }
     if (committed.kind === "missing") return notFound();
     if (committed.kind === "conflict") {
@@ -16384,11 +16494,18 @@ export class FleetCoordinator {
     if (committed.kind === "committed") {
       await this.broadcastRunEvent(committed.run, committed.event);
     }
+    await this.runLogStorage().warn();
     return json({ run: publicRunRecord(committed.run) });
   }
 
   private async *runLogChunks(runID: string, reverse = false): AsyncGenerator<string> {
     const run = await this.getRun(runID);
+    if (run?.logEvicted) {
+      yield run.logEvicted === "storage_pressure"
+        ? "log evicted under storage pressure\n"
+        : "log expired under retention policy\n";
+      return;
+    }
     const terminalPrefix = run?.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))
       ? run.terminalLogPrefix
       : undefined;
@@ -16734,6 +16851,7 @@ export class FleetCoordinator {
     if (new URL(request.url).searchParams.size > 0) {
       return json({ error: "capacity does not accept query parameters" }, { status: 400 });
     }
+    await this.capacityIndexRecovery;
     const now = new Date();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -16934,22 +17052,14 @@ export class FleetCoordinator {
             current.scope.project,
           );
           const image = await provider.getImage(current.image.id, current.image.kind);
-          if (
-            image.id !== current.image.id ||
-            image.resourceID !== current.image.resourceID ||
-            image.immutableID !== current.image.immutableID ||
-            image.region !== current.scope.region ||
-            (current.provider === "gcp" && image.project !== current.scope.project) ||
-            (current.provider === "aws" &&
-              image.accountID &&
-              image.accountID !== current.scope.accountID)
-          ) {
-            throw new CheckpointError(
-              "checkpoint_source_mismatch",
-              "provider resource no longer matches checkpoint ownership",
-            );
-          }
-          return json({ checkpoint: publicCheckpointRecord(current), image });
+          const updated = await recordCheckpointImageObservation(
+            this.state.storage,
+            current,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({ checkpoint: publicCheckpointRecord(updated), image });
         }
         return json({ checkpoint: publicCheckpointRecord(current) });
       }
@@ -17073,7 +17183,12 @@ export class FleetCoordinator {
           }
           const recovered = await provider.recoverCheckpointImage(current);
           if (recovered) {
-            await publishRecoveredCheckpoint(this.state.storage, checkpointID, recovered);
+            await publishRecoveredCheckpoint(
+              this.state.storage,
+              checkpointID,
+              recovered,
+              provider.checkpointImageNeedsRefresh?.(recovered) ?? false,
+            );
             return await this.deleteManagedCheckpoint(checkpointID, principal, "create-recovery");
           }
           const observed = await recordCheckpointProviderAbsence(this.state.storage, checkpointID);
@@ -17268,6 +17383,7 @@ export class FleetCoordinator {
         reservation.id,
         ownershipToken,
         image,
+        provider.checkpointImageNeedsRefresh?.(image) ?? false,
       );
       await this.scheduleCheckpointAlarm();
       return json({ checkpoint: publicCheckpointRecord(checkpoint), image }, { status: 201 });
@@ -17712,6 +17828,15 @@ export class FleetCoordinator {
   }
 
   private async maintainCheckpoints(): Promise<void> {
+    await backfillCheckpointImageRefresh(
+      this.state.storage,
+      (checkpoint) =>
+        this.provider(
+          checkpoint.provider,
+          checkpoint.scope.region,
+          checkpoint.scope.project,
+        ).checkpointImageNeedsRefresh?.(checkpoint.image!) ?? false,
+    );
     await backfillFailedCheckpointCreateRecovery(this.state.storage, checkpointLimits(this.env));
     const due = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
       prefix: checkpointDuePrefix,
@@ -17762,7 +17887,12 @@ export class FleetCoordinator {
         }
         const image = await provider.recoverCheckpointImage(checkpoint);
         if (image) {
-          await publishRecoveredCheckpoint(this.state.storage, checkpoint.id, image);
+          await publishRecoveredCheckpoint(
+            this.state.storage,
+            checkpoint.id,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
         } else {
           await recordCheckpointProviderAbsence(this.state.storage, checkpoint.id);
         }
@@ -17786,6 +17916,29 @@ export class FleetCoordinator {
       ) {
         await recordCheckpointExpiryDue(this.state.storage, checkpoint.id);
         await this.deleteManagedCheckpoint(checkpoint.id, undefined, "unused-expiry");
+        return;
+      }
+      if (
+        checkpoint?.state === "ready" &&
+        checkpoint.image &&
+        Date.parse(checkpoint.imageRefreshAt ?? "") <= now
+      ) {
+        const provider = this.provider(
+          checkpoint.provider,
+          checkpoint.scope.region,
+          checkpoint.scope.project,
+        );
+        try {
+          const image = await provider.getImage(checkpoint.image.id, checkpoint.image.kind);
+          await recordCheckpointImageObservation(
+            this.state.storage,
+            checkpoint,
+            image,
+            provider.checkpointImageNeedsRefresh?.(image) ?? false,
+          );
+        } catch {
+          await deferCheckpointImageRefresh(this.state.storage, checkpoint);
+        }
       }
       return;
     }
@@ -19288,6 +19441,17 @@ export class FleetCoordinator {
       prefix: checkpointDuePrefix,
       limit: 1,
     });
+    const imageBackfill = await this.state.storage.get<CheckpointImageBackfill>(
+      checkpointImageBackfillKey,
+    );
+    // Scheduled maintenance starts the migration; only unfinished pages need an extra wakeup.
+    if (imageBackfill && !imageBackfill.complete) {
+      retainAlarm(
+        now + 1000,
+        "checkpoint",
+        `${checkpointImageBackfillKey}:${imageBackfill?.startAfter ?? ""}`,
+      );
+    }
     const checkpoint = [...nextCheckpoint][0];
     if (checkpoint) {
       // Tombstone pruning advances audit rows while retaining the same due marker.
@@ -19304,6 +19468,9 @@ export class FleetCoordinator {
     const runPruneCursor = await this.state.storage.get<string>(runPruneCursorKey);
     if (runPruneCursor !== undefined) {
       retainAlarm(now + 1000, "run-prune", runPruneCursor, now);
+    }
+    if (await this.state.storage.get("maintenance:run-log-pending")) {
+      retainAlarm(now + 1000, "run-log-storage", "maintenance:run-log-pending", now);
     }
     const runnerPrune =
       await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
@@ -20801,6 +20968,7 @@ export class FleetCoordinator {
       return;
     }
     let deleted = 0;
+    let prunedBytes = 0;
     let lastScanned: string | undefined;
     for (const [key, run] of page) {
       lastScanned = key;
@@ -20809,7 +20977,8 @@ export class FleetCoordinator {
         // oxlint-disable-next-line eslint/no-await-in-loop -- each run and its artifacts are removed before advancing the maintenance cursor.
         await this.deleteTerminalRun(run.id, cutoff);
         deleted += 1;
-        if (deleted >= terminalRunPruneBatchSize) {
+        prunedBytes += run.storedLogBytes ?? run.logBytes;
+        if (deleted >= terminalRunPruneBatchSize || prunedBytes >= 16 * 1024 * 1024) {
           break;
         }
       }
@@ -20823,26 +20992,7 @@ export class FleetCoordinator {
   }
 
   private async deleteTerminalRun(runID: string, cutoff: number): Promise<void> {
-    await this.state.runExclusive(async () => {
-      const current = await this.getRun(runID);
-      const terminalAt = current ? terminalRunTimestamp(current) : undefined;
-      if (
-        !current ||
-        terminalAt === undefined ||
-        terminalAt > cutoff ||
-        this.activeRunLogReaders.has(runID)
-      ) {
-        return;
-      }
-      await this.deleteStoragePrefix(runEventPrefix(runID));
-      await this.deleteStoragePrefix(`runevent-id:${runID}:`);
-      if (current.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))) {
-        await this.deleteStoragePrefix(current.terminalLogPrefix);
-      }
-      await this.deleteStoragePrefix(runLogChunkPrefix(runID));
-      await this.state.storage.delete(runLogKey(runID));
-      await this.state.storage.delete(runKey(runID));
-    });
+    await this.runLogStorage().evict(runID, "retention", cutoff);
   }
 
   private async deleteStoragePrefix(prefix: string): Promise<void> {
@@ -21044,6 +21194,7 @@ export class FleetCoordinator {
       idleTimeoutSeconds: lease.idleTimeoutSeconds,
       estimatedHourlyUSD: lease.estimatedHourlyUSD,
       maxEstimatedUSD: lease.maxEstimatedUSD,
+      ...(lease.pricingFallback ? { pricingFallback: lease.pricingFallback } : {}),
       state: lease.state,
       createdAt: lease.createdAt,
       updatedAt: lease.updatedAt,
@@ -21397,6 +21548,7 @@ export class FleetCoordinator {
       const event = boundedRunEvent(runID, seq, now, input);
       const previousLeaseID = run.leaseID;
       applyRunEventSummary(run, event);
+      await this.runLogStorage().index(storage, run);
       if (
         validLeaseID(run.leaseID) &&
         (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))
@@ -22138,6 +22290,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
     const runtime = new CloudflareCoordinatorRuntime(state);
     super(runtime, env, testProviders, {}, coordinatorGeneration, admissionDeadlineMs);
     this.runtime = runtime;
+    this.startCapacityIndexRecovery();
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -29381,6 +29534,7 @@ export interface CloudProvider {
     checkpoint: CoordinatorCheckpointRecord,
   ): Promise<ProviderImage | undefined>;
   deleteCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  checkpointImageNeedsRefresh?(image: Pick<ProviderImage, "kind" | "state">): boolean;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
   retireCatalogImage?(imageID: string, region?: string): Promise<number>;
@@ -30830,12 +30984,17 @@ export class DaytonaProvider implements CloudProvider {
     };
     try {
       const servers = await this.client.listCrabboxServers();
+      const snapshotReady = await this.client.validateConfiguredSnapshot();
       return [
         {
-          status: "ok",
+          status: snapshotReady ? "ok" : "warning",
           check: "daytona-fallback",
-          message: `auth=ready control_plane=ready inventory=ready leases=${servers.length} mutation=false`,
-          details: { ...details, leases: String(servers.length) },
+          message: `auth=ready control_plane=ready inventory=ready leases=${servers.length} snapshot=${snapshotReady ? "active" : "account-default-unverified"} mutation=false`,
+          details: {
+            ...details,
+            leases: String(servers.length),
+            snapshot_state: snapshotReady ? "active" : "unverified",
+          },
         },
       ];
     } catch (error) {
@@ -30843,7 +31002,7 @@ export class DaytonaProvider implements CloudProvider {
         {
           status: "failed",
           check: "daytona-fallback",
-          message: `auth_or_control_plane=failed mutation=false ${coordinatorErrorMessage(this.env, error)}`,
+          message: `daytona_readiness=failed mutation=false ${coordinatorErrorMessage(this.env, error)}`,
           details,
         },
       ];
@@ -30871,6 +31030,8 @@ export class DaytonaProvider implements CloudProvider {
     config: LeaseConfig,
     lease: LeaseRecord,
   ): Promise<ProviderLeaseCreatePreparation> {
+    // Read failures here precede provider dispatch and cannot imply an uncertain allocation.
+    await this.client.validateConfiguredSnapshot();
     const providerScope = await this.client.providerScope();
     return { config, lease: { ...lease, providerScope } };
   }
@@ -32494,6 +32655,13 @@ export class AWSProvider implements CloudProvider {
       );
     }
     return { region, accountID: identity.account };
+  }
+
+  checkpointImageNeedsRefresh(image: Pick<ProviderImage, "kind" | "state">): boolean {
+    return (
+      (image.kind === "aws-ebs-snapshot" || image.kind === "aws-ami") &&
+      image.state.toLowerCase() === "pending"
+    );
   }
 
   async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {

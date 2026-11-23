@@ -48,6 +48,16 @@ An email, login, or other invalid selector makes GitHub login and existing
 GitHub sessions fail closed until an operator replaces it. This prevents a
 renamed or reassigned mutable identity from silently escaping an old revocation.
 
+On Cloudflare Workers, positive membership results are shared across isolates
+through the regional Cache API after the isolate-local cache. This reduces GitHub
+REST calls without adding Fleet requests; different regions and simultaneous
+cold misses can still revalidate independently. Node retains process-local
+caching. Both cache levels preserve the same absolute deadline, so GitHub-side
+membership removal or credential revocation may take up to the configured TTL
+to appear (300 seconds by default, never more than 3600). Failed checks are not
+cached, and shared hits do not extend that window. Configured owner revocation,
+token expiry, and allowed org/team policy checks still apply on every request.
+
 ```sh
 crabbox login --url https://broker.example.com
 crabbox login --url https://broker.example.com --no-browser   # print the URL; open it on this device

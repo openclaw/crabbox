@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -423,7 +426,7 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return Exit(2, "%s requires a configured coordinator login; run crabbox login --url <broker-url> first", name)
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
 	if err != nil {
 		return err
 	}
@@ -633,7 +636,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	var target SSHTarget
 	resolved := false
 	if cfgErr == nil {
-		if _, resolvedTarget, resolvedLeaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
+		if _, resolvedTarget, resolvedLeaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true); resolveErr == nil {
 			target = resolvedTarget
 			leaseID = resolvedLeaseID
 			resolved = true
@@ -1597,8 +1600,18 @@ func newLocalEgressSessionID() string {
 	return "egress_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
+// localEgressConnSeq numbers the connections this process opens through a
+// bridge. Both bridge ends key per-connection state by the resulting ID, so it
+// must never repeat while connections are accepted concurrently.
+var localEgressConnSeq atomic.Uint64
+
+// newLocalEgressConnID returns a connection ID unique within this process: a
+// monotonic sequence number keeps concurrent accepts distinct, and random bytes
+// keep IDs from a restarted client distinct from ones a host may still hold.
 func newLocalEgressConnID() string {
-	return "conn_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	var nonce [6]byte
+	_, _ = rand.Read(nonce[:])
+	return "conn_" + strconv.FormatUint(localEgressConnSeq.Add(1), 36) + "_" + hex.EncodeToString(nonce[:])
 }
 
 func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {

@@ -759,12 +759,12 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit({ ...config, code: true });
     expect(got).not.toContain("https://code-server.dev/install.sh");
     expect(got).not.toContain("curl -fsSL https://code-server.dev/install.sh | sh");
-    expect(got).toContain("CS_VERSION='4.143.1'");
+    expect(got).toContain("CS_VERSION='4.146.0'");
     expect(got).toContain(
-      "x86_64) CS_ARCH=amd64; CS_SHA256='614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5'",
+      "x86_64) CS_ARCH=amd64; CS_SHA256='cf7e82ca5fe1df664d43a43d900c3c9710f8f3403a5e8d0e18f6a12d10d7401b'",
     );
     expect(got).toContain(
-      "aarch64|arm64) CS_ARCH=arm64; CS_SHA256='51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384'",
+      "aarch64|arm64) CS_ARCH=arm64; CS_SHA256='3df88f7f1feecce3583ab0109c5f6bf14f90ae3a44939b4257ccd9850ef37a6e'",
     );
     expect(got).toContain(
       "https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
@@ -808,6 +808,64 @@ describe("cloud-init bootstrap", () => {
     expect(codeServerCleanup).toBeGreaterThan(codeServerTrap);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "enrolls before exit-node selection and fails before readiness on selection errors",
+    () => {
+      for (const exitNode of ["exit.example.ts.net", "100.64.0.1"]) {
+        for (const fail of [false, true]) {
+          const dir = mkdtempSync(join(tmpdir(), "crabbox-tailscale-"));
+          try {
+            const got = cloudInit({
+              ...config,
+              tailscale: true,
+              tailscaleAuthKey: "synthetic",
+              tailscaleExitNode: exitNode,
+              tailscaleExitNodeAllowLanAccess: true,
+            });
+            const start = got.indexOf(`printf '%s' "$TS_AUTHKEY" | tailscale up`);
+            const end = got.indexOf(
+              `    printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`,
+            );
+            expect(start).toBeGreaterThanOrEqual(0);
+            expect(end).toBeGreaterThan(start);
+            const script = `tailscale() {
+  case "$1" in
+    up)
+      case "$*" in *--exit-node=*) return 1 ;; esac
+      touch "$JOINED" ;;
+    ip) test -f "$JOINED"; echo 100.64.0.2 ;;
+    set)
+      test -f "$JOINED"
+      test "$FAIL_SELECTION" != true
+      case "$*" in *"--exit-node=$EXIT_NODE --exit-node-allow-lan-access"*) : ;; *) return 1 ;; esac ;;
+    *) return 2 ;;
+  esac
+}
+TS_AUTHKEY=synthetic
+${got.slice(start, end)}
+echo ready
+`;
+            const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+              encoding: "utf8",
+              timeout: 5000,
+              env: {
+                ...process.env,
+                JOINED: join(dir, "joined"),
+                EXIT_NODE: exitNode,
+                FAIL_SELECTION: String(fail),
+              },
+            });
+            expect(result.error).toBeUndefined();
+            expect(result.status === 0).toBe(!fail);
+            expect(result.stdout.includes("ready")).toBe(!fail);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+      }
+    },
+  );
+
   it("adds Tailscale setup only when requested", () => {
     const plain = cloudInit(config);
     expect(plain).not.toContain("tailscale up");
@@ -836,7 +894,18 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("WantedBy=halt.target reboot.target shutdown.target");
     expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
-      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+      "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+    );
+    const upAt = got.indexOf("tailscale up ");
+    const joinedAt = got.indexOf('test -n "$ts_ip"');
+    const setAt = got.indexOf("tailscale set --exit-node=");
+    expect(upAt).toBeGreaterThanOrEqual(0);
+    expect(joinedAt).toBeGreaterThan(upAt);
+    expect(setAt).toBeGreaterThan(joinedAt);
+    const upLine = got.slice(upAt, got.indexOf("\n", upAt));
+    expect(upLine).not.toContain("--exit-node");
+    expect(got).toContain(
+      "tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
     );
     expect(got).not.toContain('--auth-key="$TS_AUTHKEY"');
     expect(got).toContain(
@@ -919,7 +988,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e");
-    expect(got).toContain("dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2");
+    expect(got).toContain("c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559");
     expect(got).toContain("NewNetworkWindowOff");
     expect(got).toContain("DoNotOpenServerManagerAtLogon");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
@@ -977,8 +1046,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("function Assert-CrabboxFileSHA256");
     expect(got).toContain("OpenSSH-Win64.zip");
     expect(got).toContain("0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54");
-    expect(got).toContain("Git-2.56.0.3-64-bit.exe");
-    expect(got).toContain("dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2");
+    expect(got).toContain("Git-2.56.1-64-bit.exe");
+    expect(got).toContain("c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559");
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
     expect(got).toContain("$credentialPaths = @($passwordPath)");
     expect(got).toContain("PubkeyAuthentication yes");
@@ -1039,9 +1108,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
     expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
-    expect(got).toContain("trufflehog_version='3.99.4'");
+    expect(got).toContain("trufflehog_version='3.100.0'");
     expect(got).toContain("trufflehog_${trufflehog_version}_linux_amd64.tar.gz");
-    expect(got).toContain("5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1");
+    expect(got).toContain("b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb");
     expect(got).toContain("sha256sum -c -");
     expect(got).toContain('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog');
     expect(got).toContain("trufflehog --no-update --version >/dev/null");
@@ -1082,7 +1151,7 @@ describe("cloud-init bootstrap", () => {
     } as const;
     const got = azureWindowsBootstrapPowerShell(input);
     expect(got).toContain("OpenSSH-Win64.zip");
-    expect(got).toContain("Git-2.56.0.3-64-bit.exe");
+    expect(got).toContain("Git-2.56.1-64-bit.exe");
     expect(got).toContain("administrators_authorized_keys");
     expect(got).toContain("Match Group administrators");
     expect(got).toContain("$sshPorts = @('2222', '22')");
@@ -1132,7 +1201,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("com.openssh.sshd");
     expect(got).toContain("com.apple.screensharing");
     expect(got).toContain("/usr/local/bin/crabbox-ready");
-    expect(got).toContain("node_version=24.22.1");
+    expect(got).toContain("node_version=24.22.3");
     expect(got).toContain("UsePAM yes");
     expect(got).toContain("KbdInteractiveAuthentication no");
     expect(got).toContain("node_arch=x64");

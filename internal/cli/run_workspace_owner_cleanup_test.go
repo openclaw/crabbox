@@ -824,6 +824,14 @@ func (p replacementRunProvider) Configure(cfg Config, rt Runtime) (Backend, erro
 	return &coordinatorLeaseBackend{spec: p.Spec(), cfg: cfg, rt: rt, coord: p.coord, direct: runEnvProfileTestBackend{spec: p.Spec()}}, nil
 }
 
+func (p replacementRunProvider) ConfigureSSHTarget(target *SSHTarget, _ string) {
+	if target.User == "replacement" {
+		// Providers may omit Linux defaults and introduce a new child boundary.
+		target.WindowsMode = ""
+		target.ChildEnvDenylist = []string{"REPLACEMENT_DENIED_INLINE", "REPLACEMENT_DENIED_PROFILE"}
+	}
+}
+
 func TestRunCommandReplacesLeaseWithFreshWorkspaceOwner(t *testing.T) {
 	for _, scenario := range []string{"success", "command failure", "caller cancellation", "retained release"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -839,12 +847,22 @@ func TestRunCommandReplacesLeaseWithFreshWorkspaceOwner(t *testing.T) {
 			t.Setenv("CRABBOX_CONFIG", configPath)
 			syncLog := filepath.Join(dir, "sync.log")
 			t.Setenv("CRABBOX_REPLACEMENT_SYNC_LOG", syncLog)
+			inlineLog, profileLog := filepath.Join(dir, "inline.env"), filepath.Join(dir, "profile-upload.env")
+			t.Setenv("CRABBOX_REPLACEMENT_INLINE_LOG", inlineLog)
+			t.Setenv("CRABBOX_REPLACEMENT_PROFILE_LOG", profileLog)
+			t.Setenv("REPLACEMENT_DENIED_INLINE", "inline-denied-sentinel")
+			t.Setenv("REPLACEMENT_ALLOWED_INLINE", "inline-allowed-sentinel")
+			profilePath := filepath.Join(dir, "profile.env")
+			writeFile(t, profilePath, "REPLACEMENT_DENIED_PROFILE=profile-denied-sentinel\nREPLACEMENT_ALLOWED_PROFILE=profile-allowed-sentinel\n")
 			if err := os.WriteFile(filepath.Join(dir, "rsync"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CRABBOX_REPLACEMENT_SYNC_LOG\"\n/bin/cat >/dev/null\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			installWorkspaceOwnerAwareSSH(t, filepath.Join(dir, "ssh"), `#!/bin/sh
 printf '%s\n---\n' "$1" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$1" in
+  *"cat > "*".crabbox/env/"*) /bin/cat >> "$CRABBOX_REPLACEMENT_PROFILE_LOG"; exit 0 ;;
+  *"cat > "*".crabbox/env-"*) /bin/cat >> "$CRABBOX_REPLACEMENT_INLINE_LOG"; exit 0 ;;
+  *REPLACEMENT_ALLOWED_PROFILE*) printf 'REPLACEMENT_ALLOWED_PROFILE=set\n'; exit 0 ;;
   *replacement-workload-fail*) printf 'replacement workload completed\n'; exit 23 ;;
   *replacement-workload*) printf 'replacement workload completed\n' ;;
 esac
@@ -892,6 +910,9 @@ exit 0
 					ids = append(ids, body.LeaseID)
 					events = append(events, "acquire:"+body.LeaseID)
 					lease := CoordinatorLease{ID: body.LeaseID, Slug: body.Slug, Provider: provider.Spec().Name, TargetOS: targetLinux, Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: port, SSHHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc", WorkRoot: "/work", State: "active"}
+					if len(ids) == 2 {
+						lease.SSHUser = "replacement"
+					}
 					leases[lease.ID] = lease
 					response = map[string]any{"lease": lease}
 				case len(parts) >= 3 && parts[1] == "leases":
@@ -967,6 +988,24 @@ exit 0
 				if workspaceOwnerFromContext(ctx) != nil || ctx.Err() != nil {
 					t.Fatal("owner acquisition inherited old owner")
 				}
+				if nativeRuntimeLease(ctx) != id {
+					t.Error("workspace owner lost its runtime lease binding")
+				}
+				if len(ids) == 2 {
+					scope := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope)
+					fake := testNativeRuntimeScope()
+					scope.loadOnce.Do(func() {})
+					scope.install, scope.remove = fake.install, fake.remove
+					installed, err := scope.ensure(ctx, target)
+					prepared, preparedErr := scope.prepared(ctx, targetWithConfigDefaults(target, defaultConfig()))
+					if err != nil || preparedErr != nil || prepared != installed {
+						t.Errorf("replacement runtime route changed under Actions defaults: install=%v prepared=%v", err, preparedErr)
+					}
+					previous := context.WithValue(ctx, nativeRuntimeLeaseKey{}, ids[0])
+					if _, err := scope.prepared(previous, target); err == nil {
+						t.Error("replacement runtime reused the previous lease entry")
+					}
+				}
 				remote := newRunCleanupWorkspaceOwnerTransport(0, nil)
 				remote.childMarker = filepath.Join(dir, "owner-child")
 				remote.unblockRenewal()
@@ -1001,7 +1040,7 @@ exit 0
 			}
 			// Coordinator acquisitions are exclusive: failure retention requests an owner.
 			// Success closes retained B's owner; command failure destroys B.
-			err = app.runCommand(parent, []string{"--provider", provider.Spec().Name, "--no-hydrate", "--stop-after", "failure", "--timing-json", "--", command})
+			err = app.runCommand(parent, []string{"--provider", provider.Spec().Name, "--no-hydrate", "--stop-after", "failure", "--timing-json", "--allow-env", "REPLACEMENT_DENIED_INLINE,REPLACEMENT_ALLOWED_INLINE,REPLACEMENT_DENIED_PROFILE,REPLACEMENT_ALLOWED_PROFILE", "--env-from-profile", profilePath, "--", command})
 			for _, owner := range owners {
 				owner.stopRenewal()
 				owner.cancel()
@@ -1052,6 +1091,15 @@ exit 0
 			}
 			if owners[a] == owners[b] {
 				t.Fatal("replacement reused owner")
+			}
+			for _, staged := range []struct{ path, allowed, denied string }{
+				{inlineLog, "inline-allowed-sentinel", "inline-denied-sentinel"},
+				{profileLog, "profile-allowed-sentinel", "profile-denied-sentinel"},
+			} {
+				data, err := os.ReadFile(staged.path)
+				if err != nil || !bytes.Contains(data, []byte(staged.allowed)) || bytes.Contains(data, []byte(staged.denied)) {
+					t.Errorf("replacement staging lost allowed value or forwarded denied value: %s error=%v", filepath.Base(staged.path), err)
+				}
 			}
 			if !strings.Contains(stdout.String(), "replacement workload completed") {
 				t.Fatalf("workload missing: %s", stdout.String())

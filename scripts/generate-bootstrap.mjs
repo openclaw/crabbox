@@ -249,7 +249,10 @@ function fragmentFunction(fragment, constants, language) {
     const words = go ? `bootstrapQuoteWords(${token.parameter}, ${quote}, ${JSON.stringify(token.type.startsWith("ps") ? ", " : " ")})` : `${token.parameter}.map(${quote}).join(${JSON.stringify(token.type.startsWith("ps") ? ", " : " ")})`;
     return token.type.startsWith("ps") ? `("@(" + ${words} + ")")` : words;
   });
-  return go ? `func ${functionName(fragment.name)}(${params}) string {\nreturn ${expressions.join(" + ")}\n}\n` : `// prettier-ignore\nexport function ${functionName(fragment.name)}(${params}): string {\n  return ${expressions.join(" + ")};\n}\n`;
+  const lint = Object.values(fragment.parameters).includes("ps-strings")
+    ? "  // oxlint-disable-next-line eslint/no-useless-concat -- preserve generated PowerShell array boundaries.\n"
+    : "";
+  return go ? `func ${functionName(fragment.name)}(${params}) string {\nreturn ${expressions.join(" + ")}\n}\n` : `// prettier-ignore\nexport function ${functionName(fragment.name)}(${params}): string {\n${lint}  return ${expressions.join(" + ")};\n}\n`;
 }
 export function generateSources({ constants, catalog, fragments }) {
   let go = provenance + '\npackage cli\n\nimport "strings"\n\n';

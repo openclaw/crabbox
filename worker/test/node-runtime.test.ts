@@ -8,6 +8,7 @@ import { WebSocket as NodeWebSocket } from "ws";
 import { AsyncMutex } from "../src/async-mutex";
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import type { CoordinatorStorageView } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import { FleetCoordinator } from "../src/fleet";
 import type { Env } from "../src/types";
 import { ProvisioningTestStorage } from "./provisioning-fixtures";
@@ -74,6 +75,66 @@ describe("NodeCoordinatorRuntime", () => {
     mocks.storage.transaction.mockImplementation((callback) => storage.transaction(callback));
     mocks.storage.list.mockImplementation((options) =>
       storage.list(options as Parameters<CoordinatorStorageView["list"]>[0]),
+    );
+  });
+
+  it("admits host credentials through the shared entrypoint and durable Node fleet boundary", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const env = {
+      CRABBOX_ADMIN_TOKEN: "synthetic-admin-token",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const fleet = new FleetCoordinator(runtime, env);
+    const hostID = "11111111-1111-4111-8111-111111111111";
+    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const token = `cbxh_${hostID}_1_${"ab".repeat(32)}`;
+    const call = (path: string, secret: string, body?: unknown, method = "POST") =>
+      routeCoordinatorRequest(
+        new Request(`https://broker.example.com${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${secret}`,
+            "content-type": "application/json",
+            "x-crabbox-owner": "operator@example.com",
+            "x-crabbox-admin": "true",
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+        env,
+        (r) => fleet.fetch(r),
+      );
+    const enrollment = await call("/v1/ssh-hosts", "synthetic-admin-token", {
+      id: hostID,
+      name: "node-builder",
+      target: "linux",
+      architecture: "amd64",
+      runtime: "native-user",
+      template: "tools-v1",
+      capabilities: [],
+      hostKey: key,
+      credential: {
+        purpose: "agent",
+        version: 1,
+        generation: 1,
+        tokenHash: await sha256Hex(token),
+        expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+      },
+    });
+    expect(enrollment.status).toBe(201);
+    expect((await call(`/v1/ssh-hosts/${hostID}/heartbeat`, token, { hostKey: key })).status).toBe(
+      200,
+    );
+    expect((await call("/v1/ssh-hosts", token, undefined, "GET")).status).toBe(403);
+    expect((await call("/v1/leases", token, {})).status).toBe(403);
+    expect(
+      (await call(`/v1/ssh-hosts/${hostID}/heartbeat`, "synthetic-admin-token", { hostKey: key }))
+        .status,
+    ).toBe(401);
+    expect(
+      (await call(`/v1/ssh-hosts/${hostID}/credential/revoke`, "synthetic-admin-token", {})).status,
+    ).toBe(200);
+    expect((await call(`/v1/ssh-hosts/${hostID}/heartbeat`, token, { hostKey: key })).status).toBe(
+      401,
     );
   });
 
@@ -164,6 +225,25 @@ describe("NodeCoordinatorRuntime", () => {
       "coordinator-alarm",
       expect.objectContaining({ policy: "short" }),
     );
+  });
+
+  it("starts storage recovery after initialization and before scheduling jobs", async () => {
+    const initialized = deferred<void>();
+    mocks.storage.initialize.mockImplementationOnce(() => initialized.promise);
+    const recovery = vi.fn<() => void>();
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    try {
+      const startup = runtime.start(async () => {}, recovery);
+      expect(recovery).not.toHaveBeenCalled();
+      initialized.resolve();
+      await startup;
+      expect(recovery).toHaveBeenCalledTimes(1);
+      expect(recovery.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.boss.start.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      await runtime.stop();
+    }
   });
 
   it("persists the scheduled alarm time across Node coordinator restarts", async () => {

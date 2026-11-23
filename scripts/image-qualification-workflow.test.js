@@ -86,7 +86,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /image-qualification-control\.mjs arm/);
   assert.match(
     workflow,
-    /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll, arm\]/,
+    /execute:[\s\S]*needs: \[authorize, build-candidate, admit, deploy-enroll, arm\]/,
   );
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
@@ -1293,4 +1293,17 @@ fi
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("generic executor retains the protected credential reader without campaign modes", () => {
+  const executeJob = workflow.slice(workflow.indexOf("  execute:"), workflow.indexOf("  finalize:"));
+  assert.match(executeJob, /environment: image-qualification-executor/);
+  assert.match(executeJob, /node-version: 24\.22\.3/);
+  assert.match(executeJob, /node harness\/scripts\/image-qualification-executor-token\.mjs/);
+  assert.match(executeJob, /QUALIFICATION_HANDOFF_SHA256:/);
+  assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN_SHA256:/);
+  assert.deepEqual([...executeJob.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]), ["CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL"]);
+  assert.doesNotMatch(workflow, /outputs\.executor_token \}\}|executor_token:/);
+  assert.doesNotMatch(control, /appendOutput\("executor_token"/);
+  assert.doesNotMatch(workflow, /first-walk|key-authorization|QUALIFICATION_INSTALLATION|AWS_SESSION_JSON/);
 });

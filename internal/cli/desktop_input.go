@@ -245,7 +245,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 	if err := requireLeaseID(*id, "crabbox "+name+" --id <lease-id-or-slug>", cfg); err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}

@@ -50,7 +50,7 @@ install_go_toolchain
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.includes("go-installed"), expected);
-    assert.equal(result.stdout.includes("archive=go1.27.3.linux-amd64.tar.gz"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.4.linux-amd64.tar.gz"), expected);
   });
 }
 
@@ -944,7 +944,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 cat > "$output_dir/trufflehog" <<'SCRIPT'
 #!/usr/bin/env bash
-printf 'trufflehog %s\n' "\${CRABBOX_FAKE_TRUFFLEHOG_VERSION:-3.99.4}"
+printf 'trufflehog %s\n' "\${CRABBOX_FAKE_TRUFFLEHOG_VERSION:-3.100.0}"
 SCRIPT
 chmod 0755 "$output_dir/trufflehog"
 `,
@@ -974,17 +974,17 @@ test("linux developer image installs pinned TruffleHog after checksum verificati
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(
 		fs.readFileSync(fixture.downloadLog, "utf8"),
-		/trufflehog\/releases\/download\/v3\.99\.4\/trufflehog_3\.99\.4_linux_amd64\.tar\.gz/,
+		/trufflehog\/releases\/download\/v3\.100\.0\/trufflehog_3\.100\.0_linux_amd64\.tar\.gz/,
 	);
 	assert.match(
 		fs.readFileSync(fixture.checksumLog, "utf8"),
-		/^5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1  trufflehog_3\.99\.4_linux_amd64\.tar\.gz\n$/,
+		/^b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb  trufflehog_3\.100\.0_linux_amd64\.tar\.gz\n$/,
 	);
 	assert.equal(
 		spawnSync(path.join(fixture.targetBin, "trufflehog"), ["--version"], {
 			encoding: "utf8",
 		}).stdout,
-		"trufflehog 3.99.4\n",
+		"trufflehog 3.100.0\n",
 	);
 });
 
@@ -992,7 +992,7 @@ test("linux developer image re-verifies an existing same-version TruffleHog bina
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-existing-"));
 	const fixture = installTruffleHogFixture(dir);
 	const target = path.join(fixture.targetBin, "trufflehog");
-	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.99.4\\n'\nprintf 'untrusted\\n'\n");
+	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.100.0\\n'\nprintf 'untrusted\\n'\n");
 	const result = spawnSync(
 		"bash",
 		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
@@ -1010,10 +1010,10 @@ test("linux developer image re-verifies an existing same-version TruffleHog bina
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
-	assert.match(fs.readFileSync(fixture.downloadLog, "utf8"), /trufflehog_3\.99\.4_linux_amd64/);
+	assert.match(fs.readFileSync(fixture.downloadLog, "utf8"), /trufflehog_3\.100\.0_linux_amd64/);
 	assert.equal(
 		spawnSync(target, ["--version"], { encoding: "utf8" }).stdout,
-		"trufflehog 3.99.4\n",
+		"trufflehog 3.100.0\n",
 	);
 });
 
@@ -1079,11 +1079,11 @@ test("linux developer image reports TruffleHog from the configured install direc
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
-		"#!/usr/bin/env bash\nprintf 'trufflehog 3.99.4\\n'\n",
+		"#!/usr/bin/env bash\nprintf 'trufflehog 3.100.0\\n'\n",
 	);
 	writeExecutable(
 		path.join(goLinkDir, "go"),
-		"#!/usr/bin/env bash\nprintf 'go version go1.27.3 linux/amd64\\n'\n",
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.4 linux/amd64\\n'\n",
 	);
 	for (const command of [
 		"git",
@@ -1139,13 +1139,13 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
-	assert.match(result.stdout, /go version go1\.27\.3 linux\/amd64/);
+	assert.match(result.stdout, /go version go1\.27\.4 linux\/amd64/);
 	assert.match(result.stdout, /bun test-version/);
 	for (const command of ["rustc", "cargo", "rustdoc", "uv", "uvx"]) {
 		assert.match(result.stdout, new RegExp(`${command} test-version`));
 	}
 	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
-	assert.match(result.stdout, /trufflehog 3\.99\.4/);
+	assert.match(result.stdout, /trufflehog 3\.100\.0/);
 });
 
 test("linux developer image keeps pinned TruffleHog probes update-free", () => {
@@ -1179,7 +1179,7 @@ main --node-only
     assert.match(result.stdout, /packages=ca-certificates curl gnupg python3-minimal xz-utils/);
     if (major === "24") {
       assert.equal(result.stdout.split("pinned-node").length - 1, 2);
-      assert.match(result.stdout, /archives=node-v24\.22\.1-linux-x64\.tar\.xz/);
+      assert.match(result.stdout, /archives=node-v24\.22\.3-linux-x64\.tar\.xz/);
     } else {
       assert.equal(result.stdout.split("requested-node").length - 1, 2);
     }

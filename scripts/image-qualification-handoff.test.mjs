@@ -128,6 +128,12 @@ function installAPI(file) {
       const [, name, suffix] = match;
       if (!suffix && method === "PUT") {
         const metadata = JSON.parse(await init.body.get("metadata").text());
+        if (metadata.migrations) {
+          assert.equal(Array.isArray(metadata.migrations), false, "upload API migrations must be an object");
+          assert.equal(typeof metadata.migrations.new_tag, "string");
+          assert.equal(metadata.migrations.tag, undefined);
+        }
+        if (state.echoExecutorToken) throw new Error("upload failed: " + "6".repeat(64));
         state.workers[name] = {
           metadata,
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
@@ -145,7 +151,7 @@ function installAPI(file) {
         if (method === "POST") state.workers[name].subdomain = JSON.parse(init.body);
         return api(state.workers[name].subdomain);
       }
-      if (suffix === "/schedules") return api([]);
+      if (suffix === "/schedules") return api(Object.hasOwn(state, "scheduleShape") ? state.scheduleShape : { schedules: [] });
     }
     if (cfRoute === "/workers/subdomain") return api({ subdomain: "example" });
     if (cfRoute === "/workers/durable_objects/namespaces") {
@@ -230,6 +236,10 @@ function fixture(t, mode = "retained") {
     RUNNER_TEMP: directory,
     GH_TOKEN: "synthetic-github-token",
     GITHUB_REPOSITORY: "example/repo",
+    GITHUB_REPOSITORY_ID: "123",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_SHA: workflowSha,
+    GITHUB_EVENT_NAME: "workflow_dispatch",
     GITHUB_RUN_ID: "42",
     GITHUB_RUN_ATTEMPT: "1",
     GITHUB_WORKFLOW_REF: "example/repo/.github/workflows/image-qualification.yml@refs/heads/main",
@@ -266,6 +276,10 @@ function fixture(t, mode = "retained") {
   function invoke(command, overrides = {}) {
     const output = path.join(directory, `${command}.outputs`);
     fs.writeFileSync(output, "");
+    const identityFile = path.join(handoffDir, "executor-identity.json");
+    const credential = command === "deploy" && fs.existsSync(identityFile)
+      ? Buffer.from(JSON.stringify({ ...JSON.parse(fs.readFileSync(identityFile, "utf8")), token: "6".repeat(64) })).toString("base64url")
+      : undefined;
     const child = spawnSync(process.execPath, ["--import", import.meta.url, control, command], {
       encoding: "utf8",
       timeout: 10_000,
@@ -275,6 +289,7 @@ function fixture(t, mode = "retained") {
           CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
           QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
         } : {}),
+        ...(credential ? { QUALIFICATION_EXECUTOR_CREDENTIAL: credential } : {}),
         QUALIFICATION_HANDOFF_SHA256: outputs.handoff_sha256 ?? "",
         GITHUB_OUTPUT: output,
         GITHUB_STEP_SUMMARY: path.join(directory, "summary"),
@@ -448,6 +463,55 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(cleanup.status, 0, cleanup.stderr);
       assert.equal(f.state().finalized, true);
       assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+    });
+  }
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("generic deployment retains digest-only executor delivery and independently recovers", (t) => {
+    const f = fixture(t, "mint");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    assert.equal(f.outputs.executor_token, undefined);
+    assert.equal(f.outputs.executor_token_sha256, digest("6".repeat(64)));
+    const proof = fs.readFileSync(path.join(f.directory, "deploy-proof/deployment.json"), "utf8");
+    assert.equal(proof.includes("6".repeat(64)), false);
+    assert.equal(proof.includes(f.outputs.executor_token_sha256), true);
+    f.update({ now: Date.parse(f.prepared().expiresAt) + 60_000 });
+    const cleanup = f.invoke("reap");
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
+  });
+  for (const value of ["", "malformed", Buffer.from(JSON.stringify({ version: 1, token: "7".repeat(64) })).toString("base64url")]) {
+    test("generic deployment rejects missing or foreign credential before provider effects: " + value.slice(0, 12), (t) => {
+      const f = fixture(t);
+      assert.equal(f.invoke("admit").status, 0);
+      const denied = f.invoke("deploy", { QUALIFICATION_EXECUTOR_CREDENTIAL: value });
+      assert.notEqual(denied.status, 0);
+      assert.match(denied.stderr, /invalid qualification executor credential/);
+      assert.deepEqual(f.state().events.filter((v) => /cloudflare|workers\.dev/.test(v)), []);
+    });
+  }
+  test("generic deployment redacts echoed decoded executor token", (t) => {
+    const f = fixture(t);
+    assert.equal(f.invoke("admit").status, 0);
+    f.update({ echoExecutorToken: true });
+    const denied = f.invoke("deploy");
+    assert.notEqual(denied.status, 0);
+    assert.equal(denied.stderr.includes("6".repeat(64)), false);
+    assert.match(denied.stderr, /upload failed: \[executor-token\]/);
+  });
+  for (const scheduleShape of [[], {}, null, { schedules: "invalid" }, { schedules: [{ cron: "* * * * *" }] }]) {
+    test("generic isolation rejects missing, malformed or active schedules: " + JSON.stringify(scheduleShape), (t) => {
+      const f = fixture(t);
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ scheduleShape });
+      const denied = f.invoke("deploy");
+      assert.notEqual(denied.status, 0);
+      assert.match(denied.stderr, /Worker isolation verification failed/);
       assert.equal(f.state().identity, undefined);
     });
   }

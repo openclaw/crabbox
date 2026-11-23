@@ -14,13 +14,21 @@ work against a lease.
 ## Scope
 
 - Managed Linux leases can join a tailnet at creation time with `--tailscale`.
-  Tailscale provisioning is offered by the providers that declare the capability:
-  Hetzner, AWS, Azure, and Google Cloud.
+  Tailscale provisioning is offered by the providers in the compiled capability catalog below.
 - Static (`provider=ssh`) hosts are not joined by Crabbox; point `static.host` at a
   MagicDNS name or `100.x` address and assert reachability with `--network tailscale`.
 - `--tailscale` is rejected for non-Linux targets, for Blacksmith Testbox (Blacksmith
   owns connectivity), for static hosts, and for sandbox providers such as Sprites that
   expose SSH through their own proxy.
+
+<!-- BEGIN GENERATED TAILSCALE PROVIDERS -->
+
+The compiled provider catalog declares Tailscale support for 11 providers.
+
+- Bidirectional tailnet peers (including pond transport): [aws](../providers/aws.md), [azure](../providers/azure.md), [digitalocean](../providers/digitalocean.md), [gcp](../providers/gcp.md), [hetzner](../providers/hetzner.md), [lambda](../providers/lambda.md), [linode](../providers/linode.md), [ovh](../providers/ovh.md), [scaleway](../providers/scaleway.md), [tencentcloud](../providers/tencentcloud.md).
+- Egress-only userspace access: [islo](../providers/islo.md). These providers do not advertise a bidirectional pond tailnet endpoint.
+
+<!-- END GENERATED TAILSCALE PROVIDERS -->
 
 ## Commands
 
@@ -75,8 +83,11 @@ tailscale:
 managed Linux leases. `tailscale.network` is an alias that sets the top-level
 `network` mode used for target resolution on SSH-backed commands. Hostname templates
 support `{id}`, `{slug}`, and `{provider}`; the rendered value is sanitized to a DNS
-label. When `enabled` is set, `tags` must contain at least one valid `tag:` value and
-`hostnameTemplate` must be non-empty.
+label and cut to 63 characters without a trailing hyphen. When `enabled` is set,
+`tags` must contain at least one valid `tag:` value and
+`hostnameTemplate` must be non-empty. A tag starts with `tag:` followed by an ASCII
+letter, then only ASCII letters, digits, or dashes (for example `tag:ci-1`).
+Underscores and names starting with digits or dashes are rejected before provisioning.
 
 Environment overrides:
 
@@ -102,6 +113,26 @@ because its snapshot-safe memory-only node identity must re-enroll after daemon
 loss. Brokered mode does not need a local key; the coordinator mints one per lease
 (see below).
 
+## Persisted metadata
+
+Direct warmup and run refresh the lease's Tailscale address and readiness state in
+provider metadata, so later CLI processes can resolve the same tailnet endpoint.
+Refreshes preserve lifecycle state and expiry. A failed metadata read remains a
+warning; on Hetzner, diagnostic labels are shortened to the provider's allowed
+syntax so they cannot block subsequent lifecycle writes. Hetzner drops an FQDN
+longer than its 63-character label limit and uses the recorded tailnet IPv4 instead.
+
+GCP stores address fields with a reversible, chunked label encoding. Each chunk
+fits GCP's 63-character limit, including for long MagicDNS names. Previously
+sanitized labels cannot be decoded unambiguously; run a metadata refresh (for
+example, a run over `--network public`) to replace them from the guest.
+
+The coordinator rejects metadata writes on released or expired leases and after
+confirmed provider cleanup. CLI refreshes also bind updates to the observed
+lease creation timestamp, preventing stale metadata from updating a replacement
+lease. Older API clients may omit this timestamp; their writes still receive the
+serialized cleanup and lifecycle checks.
+
 ## Exit nodes
 
 Exit-node egress is opt-in per lease. The lease routes its outbound internet through
@@ -112,15 +143,27 @@ crabbox warmup --tailscale --tailscale-exit-node build-host.example.ts.net --tai
 crabbox run --tailscale --tailscale-exit-node 100.100.100.100 -- curl -4 https://ifconfig.me
 ```
 
-`exitNodeAllowLanAccess` maps to Tailscale's LAN-access flag and requires `exitNode`.
+`exitNode` requires `tailscale.enabled: true` or `--tailscale`; otherwise Crabbox
+rejects the request before provisioning so the requested egress route cannot be
+silently omitted. `exitNodeAllowLanAccess` maps to Tailscale's LAN-access flag and
+requires `exitNode`, even when Tailscale is disabled.
+These dependencies are checked after lease-creation flags are resolved. Config
+and environment settings can keep exit-node defaults with Tailscale disabled
+and enable them per lease with `--tailscale`; unrelated commands such as
+`config show`, `list`, and `status` can still load those defaults.
 The exit node must already advertise exit-node capability and be approved in the
 Tailscale admin console, and the tailnet policy must grant the lease's tags (for
 example `tag:crabbox`) access to `autogroup:internet` through exit nodes.
 
+Fresh nodes join the tailnet before selecting the exit node, so MagicDNS names
+can resolve against their peers. Enrollment completes only after selection
+succeeds. Islo recovery preserves a stopped daemon's exit-node preferences and
+keeps an incomplete selection unavailable to later workloads until a retry succeeds.
+
 When an exit node is selected, `network: auto` prefers the tailnet host for bootstrap
 because the provider/public SSH path can become asymmetric once the lease routes
 outbound traffic through the exit node. Before sync or the remote command, Crabbox
-verifies on the box that an exit node is selected in `tailscale prefs` and that the
+verifies on the box that an exit node is selected in `tailscale debug prefs` and that the
 node can reach the public internet. If that check fails, the run stops and reports the
 exit-node egress failure (`tailscale exit node … joined but remote internet egress
 failed`), which usually means the exit node is not approved, the policy does not grant
@@ -142,6 +185,11 @@ CRABBOX_TAILSCALE_VERSION       pinned static build version
 CRABBOX_TAILSCALE_SHA256_AMD64  pinned amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64  pinned arm64 archive checksum
 ```
+
+Lease API requests that omit `tailscaleTags` or send an empty list use every tag
+in `CRABBOX_TAILSCALE_TAGS`. Explicit non-empty lists must be a subset of those
+allowed tags. The CLI sends its configured tags explicitly; this API default does
+not override them.
 
 The OAuth client's tags and each requested lease tag must also satisfy Tailscale's
 ownership rules:
@@ -178,7 +226,9 @@ Flow:
 1. The CLI sends the requested Tailscale settings (enabled, tags, hostname, optional
    exit node) in `CreateLease`.
 2. The coordinator validates the requested tags against `CRABBOX_TAILSCALE_TAGS` and
-   rejects any tag outside that set.
+   rejects any malformed tag or tag outside that set before minting a key or creating
+   a machine. Explicit tag lists are never silently filtered; an empty list keeps
+   the configured-default behavior.
 3. The coordinator exchanges the OAuth client for a token and mints a one-off auth key
    that is non-reusable, ephemeral, pre-approved, tagged, and expires in 10 minutes.
 4. The key is injected only into the runner's cloud-init user-data.
@@ -223,6 +273,12 @@ Preflight the coordinator without leasing a machine:
 CRABBOX_TAILSCALE_ENABLED=0 scripts/live-tailscale-smoke.sh --json
 CRABBOX_LIVE=1 CRABBOX_COORDINATOR=https://broker.example.com CRABBOX_ADMIN_TOKEN=replace-me scripts/live-tailscale-smoke.sh --json
 ```
+
+For direct acquisition with an exit node and `network: auto`, readiness tries
+the tailnet hostname first. After 30 seconds it also allows the provider/public
+address to finish readiness, while continuing the tailnet wait within the same
+readiness deadline. Explicit `network: public` retains the
+public path, and automatic acquisition without an exit node is unchanged.
 
 ## SSH and VNC
 

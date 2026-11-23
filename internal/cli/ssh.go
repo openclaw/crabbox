@@ -47,6 +47,7 @@ type SSHReadinessErrorPattern struct {
 }
 
 type SSHTarget struct {
+	providerNetworkTarget   *SSHTarget // Original adapter route, before tailnet selection.
 	relayConfig             *Config
 	relayCoordinator        *CoordinatorClient
 	SSHJump                 *SSHJump

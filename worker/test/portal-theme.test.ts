@@ -54,7 +54,9 @@ describe("portal theme", () => {
 
     expect(body).toContain("admin mode");
     expect(body).toContain("data-admin-panel");
-    expect(body).toContain("leases JSON");
     expect(body).toContain("admin@example.com / example-org");
+    for (const path of ["/v1/admin/leases", "/v1/pool", "/v1/usage?scope=all"]) {
+      expect(body).not.toContain(`href="${path}"`);
+    }
   });
 });

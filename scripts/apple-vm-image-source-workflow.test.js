@@ -26,7 +26,7 @@ test("Apple VM image source workflow covers source changes and stable releases",
   assert.doesNotMatch(workflow, /contents: write|secrets[.]/);
   assert.match(workflow, /timeout-minutes: 5/);
   assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
-  assert.match(workflow, /actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e/);
+  assert.match(workflow, /actions\/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5/);
   assert.match(workflow, /go-version-file: go[.]mod\n\s+cache: false/);
   assert.match(workflow, /run: go run [.][/]scripts\/apple-vm-image-source/);
   assert.doesNotMatch(workflow, /setup-node|node-version/);

@@ -56,6 +56,7 @@ func TestDaytonaStopPreservesClaimOnUnverifiedAbsence(t *testing.T) {
 					"id": resourceID, "organizationId": "synthetic-current-account", "name": "scoped-fixture",
 					"target": "us", "user": "daytona", "env": map[string]string{}, "public": false,
 					"networkBlockAll": false, "cpu": 1, "gpu": 0, "memory": 1, "disk": 3,
+					"kvm":             false,
 					"toolboxProxyUrl": "https://toolbox.example.test/" + resourceID, "state": state, "labels": labels,
 				}
 				switch {

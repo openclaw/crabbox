@@ -71,11 +71,11 @@ RUN bash /proof/released.sh --node-only && test "$(node --version)" = v24.19.0
 RUN mkdir -p /var/lib/crabbox && echo '{"existing":"usable","value":42}' >/var/lib/crabbox/retained.json && sha256sum /var/lib/crabbox/retained.json >/proof/state.sha256 && bash /proof/released.sh --node-only
 FROM released AS upgraded
 COPY candidate.sh /proof/candidate.sh
-RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.1 && sha256sum -c /proof/state.sha256 && bash /proof/candidate.sh --node-only && sha256sum -c /proof/state.sha256 && for tool in node npm npx corepack pnpm pnpx; do test "$(readlink /usr/local/bin/$tool)" = "/opt/hostedtoolcache/node/24.22.1/x64/bin/$tool"; done
+RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.3 && sha256sum -c /proof/state.sha256 && bash /proof/candidate.sh --node-only && sha256sum -c /proof/state.sha256 && for tool in node npm npx corepack pnpm pnpx; do test "$(readlink /usr/local/bin/$tool)" = "/opt/hostedtoolcache/node/24.22.3/x64/bin/$tool"; done
 FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS fresh
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && python3 -c "import shutil, tempfile; t=tempfile.TemporaryDirectory(); t.cleanup()"
 COPY candidate.sh /proof/candidate.sh
-RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.1
+RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.3
 `,
     );
     for (const target of ["upgraded", "fresh"]) {
@@ -176,7 +176,7 @@ RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.1
         run("sudo", ["-n", "rm", `/usr/local/bin/${tool}`]);
       run("sudo", ["-n", "bash", installer]);
       command = fs.realpathSync("/usr/local/bin/node");
-      assert.equal(run(command, ["--version"]), "v24.22.1");
+      assert.equal(run(command, ["--version"]), "v24.22.3");
       const initial = sha(fs.readFileSync(command));
       run("sudo", ["-n", "bash", installer]);
       assert.equal(sha(fs.readFileSync(command)), initial);
@@ -234,7 +234,7 @@ RUN bash /proof/candidate.sh --node-only && test "$(node --version)" = v24.22.1
     }
     const output = run(command, args, { env: { ...process.env, ...variables, NODE_OPTIONS: "" } });
     const result = JSON.parse(output.split(/\r?\n/).at(-1));
-    assert.equal(result.node, "v24.22.1");
+    assert.equal(result.node, "v24.22.3");
     assert.equal(result.control.accepted, true, JSON.stringify(result.control));
     assert.ok(
       result.rows.every((row) => !row.accepted && row.code === "CERT_REVOKED"),

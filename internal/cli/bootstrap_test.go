@@ -517,9 +517,9 @@ func TestCloudInitCodeProfile(t *testing.T) {
 	cfg.Code = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"CS_VERSION='4.143.1'",
-		"x86_64) CS_ARCH=amd64; CS_SHA256='614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5'",
-		"aarch64|arm64) CS_ARCH=arm64; CS_SHA256='51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384'",
+		"CS_VERSION='4.146.0'",
+		"x86_64) CS_ARCH=amd64; CS_SHA256='cf7e82ca5fe1df664d43a43d900c3c9710f8f3403a5e8d0e18f6a12d10d7401b'",
+		"aarch64|arm64) CS_ARCH=arm64; CS_SHA256='3df88f7f1feecce3583ab0109c5f6bf14f90ae3a44939b4257ccd9850ef37a6e'",
 		"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
 		"sha256sum -c -",
 		"/usr/local/lib/code-server",
@@ -548,6 +548,57 @@ func TestCloudInitCodeProfile(t *testing.T) {
 	}
 }
 
+func TestCloudInitTailscaleExitNodeEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the Linux bootstrap with a POSIX shell")
+	}
+	for _, exitNode := range []string{"exit.example.ts.net", "100.64.0.1"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(exitNode+map[bool]string{false: "/success", true: "/failure"}[fail], func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Tailscale.Enabled = true
+				cfg.Tailscale.AuthKey = "synthetic"
+				cfg.Tailscale.ExitNode = exitNode
+				cfg.Tailscale.ExitNodeAllowLANAccess = true
+				rendered := cloudInitTailscaleBootstrap(cfg)
+				start := strings.Index(rendered, `printf '%s' "$TS_AUTHKEY" | tailscale up`)
+				end := strings.Index(rendered, `    printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4`)
+				if start < 0 || end < start {
+					t.Fatal("missing enrollment block")
+				}
+				script := `tailscale() {
+  case "$1" in
+    up)
+      case "$*" in *--exit-node=*) return 1 ;; esac
+      touch "$JOINED" ;;
+    ip) test -f "$JOINED"; echo 100.64.0.2 ;;
+    set)
+      test -f "$JOINED"
+      test "$FAIL_SELECTION" != true
+      case "$*" in *"--exit-node=$EXIT_NODE --exit-node-allow-lan-access"*) : ;; *) return 1 ;; esac ;;
+    *) return 2 ;;
+  esac
+}
+TS_AUTHKEY=synthetic
+` + rendered[start:end] + "\necho ready\n"
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "bash", "-euo", "pipefail", "-c", script)
+				failValue := map[bool]string{false: "false", true: "true"}[fail]
+				cmd.Env = append(os.Environ(), "JOINED="+filepath.Join(t.TempDir(), "joined"), "EXIT_NODE="+exitNode, "FAIL_SELECTION="+failValue)
+				out, err := cmd.CombinedOutput()
+				if fail {
+					if err == nil || strings.Contains(string(out), "ready") {
+						t.Fatalf("failed selection reached readiness: err=%v output=%s", err, out)
+					}
+				} else if err != nil || !strings.Contains(string(out), "ready") {
+					t.Fatalf("enrollment failed: err=%v output=%s", err, out)
+				}
+			})
+		}
+	}
+}
+
 func TestCloudInitTailscaleProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.SSHUser = "runner"
@@ -564,7 +615,8 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 		"deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main",
 		"retry apt-get install -y --no-install-recommends tailscale",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
-		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox'",
+		"tailscale set --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
 		"tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version",
 		"jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id",
@@ -580,6 +632,19 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
 		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
+	}
+	upAt := strings.Index(got, "tailscale up ")
+	joinedAt := strings.Index(got, `test -n "$ts_ip"`)
+	setAt := strings.Index(got, "tailscale set --exit-node=")
+	if upAt < 0 || joinedAt < upAt || setAt < joinedAt {
+		t.Fatal("cloudInit(tailscale) must select the exit node only after the node has an address")
+	}
+	upLine := got[upAt:]
+	if end := strings.Index(upLine, "\n"); end >= 0 {
+		upLine = upLine[:end]
+	}
+	if strings.Contains(upLine, "--exit-node") {
+		t.Fatal("cloudInit(tailscale) must not pass the exit node to tailscale up")
 	}
 	if !strings.Contains(got, "systemctl disable crabbox-tailscale-logout.service") {
 		t.Fatal("cloudInit(tailscale) must remove the legacy reboot logout unit")
@@ -797,7 +862,7 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"sshd_config",
 		"Port $port",
 		"crabbox-sshd-$port",
-		"Git-2.56.0.3-64-bit.exe",
+		"Git-2.56.1-64-bit.exe",
 		gitForWindowsSetupSHA256,
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
 		tightVNCMSISHA256,
@@ -870,7 +935,7 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		"function Assert-CrabboxFileSHA256",
 		"OpenSSH-Win64.zip",
 		openSSHWin64ZipSHA256,
-		"Git-2.56.0.3-64-bit.exe",
+		"Git-2.56.1-64-bit.exe",
 		gitForWindowsSetupSHA256,
 		"$passwordPath = $windowsPasswordPath",
 		"$credentialPaths = @($passwordPath)",
@@ -942,7 +1007,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
 		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
-		"trufflehog_version='3.99.4'",
+		"trufflehog_version='3.100.0'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
 		"sha256sum -c -",

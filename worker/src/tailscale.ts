@@ -112,7 +112,16 @@ export function tailscaleInstallConfig(env: Env): TailscaleInstallConfig {
 }
 
 export function validateTailscaleTags(requested: string[], allowed: string[]): string[] {
-  const tags = normalizeTags(requested.length > 0 ? requested : allowed);
+  for (const tag of requested) {
+    if (typeof tag !== "string" || !/^tag:[a-z][a-z0-9-]*$/i.test(tag.trim())) {
+      throw new Error(
+        "invalid Tailscale tag; use tag: followed by a letter, then letters, digits, or dashes",
+      );
+    }
+  }
+  const tags = [
+    ...new Set((requested.length > 0 ? requested : allowed).map((tag) => tag.trim().toLowerCase())),
+  ];
   const allowedSet = new Set(allowed);
   const denied = tags.filter((tag) => !allowedSet.has(tag));
   if (denied.length > 0) {
@@ -139,8 +148,15 @@ export function renderTailscaleHostname(
   for (const [key, replacement] of Object.entries(replacements)) {
     value = value.replaceAll(key, replacement);
   }
-  value = sanitizeDNSLabel(value).slice(0, 63);
-  return value || sanitizeDNSLabel(`crabbox-${leaseID.replaceAll("_", "-")}`).slice(0, 63);
+  return (
+    tailscaleHostnameLabel(value) ||
+    tailscaleHostnameLabel(`crabbox-${leaseID.replaceAll("_", "-")}`)
+  );
+}
+
+// Tailscale rejects a hostname ending in a hyphen, and truncating can leave one.
+function tailscaleHostnameLabel(value: string): string {
+  return sanitizeDNSLabel(value).slice(0, 63).replace(/-+$/, "");
 }
 
 export async function createTailscaleAuthKey(

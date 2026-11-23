@@ -80,7 +80,7 @@ def main():
             coordinator = prefix + "-coordinator"
             def start_coordinator(worker_tree):
                 command(["docker", "run", "-d", "--name", coordinator, "--network", prefix, "--network-alias", "coordinator", "--env-file", envfile,
-                         "-p", "127.0.0.1::8080", "-v", f"{worker_tree}:/worker:ro", "-w", "/worker", "node:24.22.1-bookworm", "node", "dist-node/server.mjs"])
+                         "-p", "127.0.0.1::8080", "-v", f"{worker_tree}:/worker:ro", "-w", "/worker", "node:24.22.3-bookworm", "node", "dist-node/server.mjs"])
             start_coordinator(opts.upgrade_worker or ROOT / "worker")
             containers.append(coordinator)
             port = command(["docker", "port", coordinator, "8080/tcp"]).split(":")[-1]
@@ -125,7 +125,7 @@ def main():
             build = work / "build"
             build.mkdir()
             shutil.copy2(targetcli, build / "crabbox")
-            (build / "Dockerfile").write_text("FROM node:24.22.1-bookworm\nRUN apt-get update && apt-get install -y --no-install-recommends bubblewrap rsync openssh-server procps passwd util-linux && rm -rf /var/lib/apt/lists/*\nCOPY crabbox /usr/local/bin/crabbox\nRUN printf '{}\\n' > /tmp/host-empty.yaml\nCMD [\"sleep\",\"infinity\"]\n")
+            (build / "Dockerfile").write_text("FROM node:24.22.3-bookworm\nRUN apt-get update && apt-get install -y --no-install-recommends bubblewrap rsync openssh-server procps passwd util-linux && rm -rf /var/lib/apt/lists/*\nCOPY crabbox /usr/local/bin/crabbox\nRUN printf '{}\\n' > /tmp/host-empty.yaml\nCMD [\"sleep\",\"infinity\"]\n")
             command(["docker", "build", "-q", "-t", image, build])
             target = prefix + "-target"
             command(["docker", "run", "-d", "--name", target, "--network", prefix, "--env-file", agentenv,
