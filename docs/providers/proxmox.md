@@ -289,6 +289,14 @@ lifecycle operations additionally need the corresponding VM clone, allocation,
 configuration, power-management, datastore-allocation, and pool-allocation
 privileges.
 
+Crabbox reads each new clone's IPv4 address through the QEMU guest agent
+(`GET /nodes/<node>/qemu/<vmid>/agent/network-get-interfaces`). On Proxmox VE 9
+that read needs `VM.GuestAgent.Audit` (or `VM.GuestAgent.Unrestricted`) on the
+clone; on Proxmox VE 8 it needs `VM.Monitor`. Clones get new VMIDs, so grant it
+propagated on `/vms`, or on the configured pool. Doctor does not check this
+privilege: a token without it passes doctor, then `warmup` waits 10 minutes and
+fails with `timeout waiting for proxmox guest ip`.
+
 For CI or lab smoke checks after building the local binary:
 
 ```sh
@@ -545,12 +553,15 @@ token read access for the endpoint named in the doctor details, such as the
 node status, storage inventory, network bridge inventory, template VM config,
 or `/cluster/nextid`, then rerun `crabbox doctor --provider proxmox --json`.
 
-`timeout waiting for proxmox qemu guest agent` /
-`no guest ipv4 address reported by qemu guest agent`
+`timeout waiting for proxmox guest ip`
 
-The VM started but the guest agent did not report a usable IPv4 address. Install
-and enable `qemu-guest-agent` in the template, then check DHCP, bridge
-selection, and VLANs. If you override `--proxmox-bridge`, make sure the template
+The VM started but Crabbox could not read a usable IPv4 address from the guest
+agent within 10 minutes. First check that the token can read the guest agent
+(`VM.GuestAgent.Audit` on Proxmox VE 9, `VM.Monitor` on Proxmox VE 8, on the
+clone or propagated on `/vms`; see
+[Readiness and token permissions](#readiness-and-token-permissions)): a denied
+read looks the same as an agent that never reports. Then install and enable
+`qemu-guest-agent` in the template, and check DHCP, bridge selection, and VLANs. If you override `--proxmox-bridge`, make sure the template
 NIC can boot on that bridge. If no bridge override is configured, doctor
 requires the template NIC to reference an active Proxmox bridge.
 
