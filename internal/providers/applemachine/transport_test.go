@@ -148,6 +148,9 @@ func checkMachineTransport(t *testing.T, req core.RunRequest, source, stdout str
 		t.Errorf("stdout=%q; want %q", output.String(), stdout)
 	}
 	want := []string{"machine", "run", "--name", machineName(leaseID), "--cwd", repo, source}
+	if len(runner.requests) == 0 {
+		t.Fatalf("no native command recorded: exit=%d err=%v; want argv=%q", result.ExitCode, err, want)
+	}
 	got := runner.requests[len(runner.requests)-1]
 	if !reflect.DeepEqual(got.Args, want) {
 		t.Errorf("native argv=%q; want %q", got.Args, want)
