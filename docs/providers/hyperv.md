@@ -80,7 +80,7 @@ Windows acquisition allows up to 25 minutes overall, including a ten-minute
 authenticated PowerShell Direct readiness budget after VM creation. An external
 timeout shorter than that can terminate acquisition
 before readiness finishes. Bootstrap progress on stderr distinguishes waiting for authentication
-from completed SSH lockdown and network connection. A booted
+from completed credential escrow, SSH lockdown, and network connection. A booted
 VM or a started network adapter alone does not prove guest authentication.
 
 ## Desktop and browser capabilities
@@ -136,7 +136,7 @@ frames, archives, and protected directories; always stop the lease to remove the
 VM and differencing disk.
 
 Crabbox copies guest PowerShell scripts larger than 4 KB, such as screenshot
-and video capture setup, to a protected guest directory and runs them with a
+and video capture setup and Actions runner setup, to a protected guest directory and runs them with a
 short argument-based command, because Windows OpenSSH intermittently
 wedges its per-connection event loop while forwarding a large stdin payload;
 when that happens the guest never finishes reading stdin and ssh aborts with
@@ -150,6 +150,11 @@ secret that Winlogon reads, before the expected setup reboot, and never writes
 it to the Winlogon `DefaultPassword` registry value, which any local account can
 read; a registry value left by an older Crabbox is removed. If the LSA secret
 cannot be stored, setup fails before the reboot.
+
+Actions runner setup decodes
+`windows.password` as strict UTF-8, preserves Unicode plus leading/trailing
+whitespace exactly, and rejects only a zero-length file. The credential is never
+trimmed, logged, or added to native process arguments.
 
 ### Preparing a Windows template
 
@@ -272,26 +277,34 @@ During Windows `Acquire`, the provider:
 4. Waits for a trivial authenticated PowerShell Direct call to succeed. The
    readiness loop has an overall boot budget and bounds each attempt so a guest
    that is still booting cannot hang acquisition.
-5. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
+5. Escrows the exact guest password at
+   `C:\ProgramData\crabbox\windows.password` for durable GitHub Actions runner
+   startup. The password reaches the host PowerShell process only through
+   `_CRABBOX_GP` and reaches the guest only through the remoting argument list.
+   Crabbox writes UTF-8 without a BOM or newline to an empty temporary file
+   after applying a fresh protected ACL containing only the selected local user,
+   Builtin Administrators, and LocalSystem, then atomically replaces the target.
+   The password is never added to lease claims, labels, or logs.
+6. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
    rule, replace authorized keys, discard template `Match` authentication
    blocks, and restrict SSH to the selected user
-6. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
+7. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
-7. Reapplies the final key-only config, validates `sshd_config`, regenerates
+8. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
+9. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
    otherwise installs pinned MinGit when git is absent
-9. With `--desktop`, installs/configures loopback-only TightVNC, handles its
-   expected setup reboot through bounded PowerShell Direct retries, and reruns
-   the marked setup idempotently
-10. Ensures the shared Node/npm baseline
-11. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+10. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+    expected setup reboot through bounded PowerShell Direct retries, and reruns
+    the marked setup idempotently
+11. Ensures the shared Node/npm baseline
+12. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
     VNC plus an active Explorer-backed session for the configured guest user,
     followed by repeated stable SSH probes.
     When auto-logon settings have not taken effect, it performs at most two
     explicit reboot retries and repeats the bounded readiness checks
-12. With `--browser`, probes for Edge or Chrome without installing either
-13. Records successful desktop/browser lease labels only after all requested
+13. With `--browser`, probes for Edge or Chrome without installing either
+14. Records successful desktop/browser lease labels only after all requested
     readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
@@ -422,7 +435,9 @@ installation.
 ## Lifecycle
 
 1. **Acquire**: Creates a per-lease differencing root disk and Generation 2 VM,
-   then follows the Windows PowerShell Direct bootstrap described above.
+   then follows the Windows PowerShell Direct bootstrap described above. Credential escrow
+   failure aborts acquisition and follows the normal `keep=true` preserve or
+   default VM/differencing-disk cleanup policy.
 2. **Resolve**: Finds a VM by lease ID, slug, or instance name and reports live
    Hyper-V state. Reuse requires a live VM and an exact local claim; a recovered
    legacy VM must be adopted with explicit `--reclaim`.
@@ -482,6 +497,10 @@ instead of detaching a replacement VM's disk.
 - The selected SSH account must be a local account name containing only letters,
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
+- Durable native-Windows GitHub Actions runner startup depends on the protected
+  credential escrow created during a fresh acquisition. Retained Windows leases
+  acquired by older Crabbox builds are not backfilled during resolve or
+  hydration; release and recreate them before using `--github-runner`.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only deterministically named provider-owned root and checkpoint
   disks are cleaned up; unrelated attached disks are preserved.

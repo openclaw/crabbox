@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -66,11 +67,28 @@ func prepareActionsWorkspaceClaim(ctx context.Context, leaseID string, repo Repo
 		return leaseClaim{}, false, Exit(2, "Actions hydration lease claim no longer belongs to the invoking repository")
 	}
 	if claim.ActionsWorkspace != nil {
-		replacement := cloneLeaseClaim(claim)
-		replacement.ActionsWorkspace = nil
-		claim, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, leaseID, claim, replacement)
+		claim, err = clearActionsWorkspaceBinding(ctx, leaseID, claim)
 	}
 	return claim, true, err
+}
+
+// clearActionsWorkspaceBinding retries when only heartbeat-published lifecycle
+// fields moved after the claim was read; any other change still fails.
+func clearActionsWorkspaceBinding(ctx context.Context, leaseID string, claim leaseClaim) (leaseClaim, error) {
+	base := claim
+	for attempt := 0; ; attempt++ {
+		replacement := cloneLeaseClaim(base)
+		replacement.ActionsWorkspace = nil
+		updated, err := ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, leaseID, base, replacement)
+		if err == nil || attempt >= 3 {
+			return updated, err
+		}
+		latest, present, readErr := ReadLeaseClaimWithPresence(leaseID)
+		if readErr != nil || !present || !actionsClaimLifecycleOnlyChange(base, latest) {
+			return updated, err
+		}
+		base = latest
+	}
 }
 
 func bindActionsWorkspaceClaim(ctx context.Context, target SSHTarget, repo Repo, selected GitHubRepo, state actionsHydrationState, claim leaseClaim, exists bool) error {
@@ -83,8 +101,62 @@ func bindActionsWorkspaceClaim(ctx context.Context, target SSHTarget, repo Repo,
 	}
 	replacement := cloneLeaseClaim(claim)
 	replacement.ActionsWorkspace = &ActionsWorkspaceBinding{Origin: origin, MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
-	_, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, claim.LeaseID, claim, replacement)
-	return err
+	base := claim
+	for attempt := 0; ; attempt++ {
+		_, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, base.LeaseID, base, replacement)
+		if err == nil || attempt >= 3 {
+			return err
+		}
+		latest, present, readErr := ReadLeaseClaimWithPresence(base.LeaseID)
+		if readErr != nil || !present || !actionsClaimLifecycleOnlyChange(base, latest) {
+			return err
+		}
+		base = latest
+		replacement = cloneLeaseClaim(latest)
+		replacement.ActionsWorkspace = &ActionsWorkspaceBinding{Origin: origin, MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
+	}
+}
+
+// actionsClaimLifecycleOnlyChange reports whether current differs from
+// captured only by the labels, revision and a same-or-newer last-use time that a heartbeat
+// publishes together.
+func actionsClaimLifecycleOnlyChange(captured, current leaseClaim) bool {
+	capturedUsed, capturedErr := time.Parse(time.RFC3339, captured.LastUsedAt)
+	currentUsed, currentErr := time.Parse(time.RFC3339, current.LastUsedAt)
+	if capturedErr != nil || currentErr != nil || currentUsed.Before(capturedUsed) {
+		return false
+	}
+	for _, key := range actionsClaimLabelKeys(captured.Labels, current.Labels) {
+		if !actionsHeartbeatLabelKeys[key] {
+			return false
+		}
+	}
+	normalized := cloneLeaseClaim(current)
+	normalized.Labels = captured.Labels
+	normalized.LastUsedAt = captured.LastUsedAt
+	normalized.Revision = captured.Revision
+	return reflect.DeepEqual(normalized, captured)
+}
+
+// actionsHeartbeatLabelKeys are the labels a lease heartbeat publishes; any other label change is not a heartbeat.
+var actionsHeartbeatLabelKeys = map[string]bool{
+	"state": true, "last_touched_at": true, "expires_at": true, "ttl_secs": true, "max_ttl_secs": true,
+	"idle_timeout": true, "idle_timeout_secs": true,
+}
+
+func actionsClaimLabelKeys(a, b map[string]string) []string {
+	var keys []string
+	for key, value := range a {
+		if other, ok := b[key]; !ok || other != value {
+			keys = append(keys, key)
+		}
+	}
+	for key := range b {
+		if _, ok := a[key]; !ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func readActionsWorkspaceState(ctx context.Context, target SSHTarget, leaseID string) (actionsHydrationState, error) {
