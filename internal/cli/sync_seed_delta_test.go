@@ -46,6 +46,11 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 			if err := os.Symlink("missing", filepath.Join(fixture.root, "link")); err != nil {
 				t.Fatal(err)
 			}
+			mustWriteTestFile(t, filepath.Join(fixture.root, "nested", ".gitignore"), "unselected\n")
+			mustWriteTestFile(t, filepath.Join(fixture.root, "nested", "unselected"), "ignored\n")
+			if err := os.Symlink("missing", filepath.Join(fixture.root, "nested", "dangling")); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Chmod(filepath.Join(fixture.root, "staged.txt"), 0o640); err != nil {
 				t.Fatal(err)
 			}
@@ -79,8 +84,9 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 				}
 				run(remoteWriteSyncManifestsNew(remote, coldTestToken), []byte(syncManifestInputForTarget(SSHTarget{}, manifest.NUL(), manifest.DeletedNUL())))
 				run(remotePruneSyncManifest(remote, coldTestToken), nil)
-				cmd := exec.Command("rsync", "-a", "--checksum", "--from0", "--files-from=-", fixture.root+"/", remote+"/")
-				cmd.Stdin = bytes.NewReader(delta)
+				args, input := rsyncFileList([]string{"-a", "--checksum"}, delta, manifest.hasSymlinks)
+				cmd := exec.Command("rsync", append(args, fixture.root+"/", remote+"/")...)
+				cmd.Stdin = input
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("rsync: %v\n%s", err, out)
 				}
@@ -111,7 +117,7 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 						}
 					}
 				}
-				for _, name := range []string{"deleted.txt", "renamed.txt", "excluded.txt", "node_modules/ignored"} {
+				for _, name := range []string{"deleted.txt", "renamed.txt", "excluded.txt", "node_modules/ignored", "nested/unselected"} {
 					if _, err := os.Lstat(filepath.Join(remote, name)); !os.IsNotExist(err) {
 						t.Fatalf("extra %s: %v", name, err)
 					}
@@ -229,8 +235,9 @@ func TestSeededSyncTextAttributesPreserveWorkingBytes(t *testing.T) {
 	if slices.Contains(splitNul(delta), "auto.bin") || slices.Contains(splitNul(delta), "staged.txt") {
 		t.Fatalf("unchanged bytes selected: %q", delta)
 	}
-	cmd := exec.Command("rsync", "-a", "--checksum", "--from0", "--files-from=-", fixture.root+"/", remote+"/")
-	cmd.Stdin = bytes.NewReader(delta)
+	args, input := rsyncFileList([]string{"-a", "--checksum"}, delta, manifest.hasSymlinks)
+	cmd := exec.Command("rsync", append(args, fixture.root+"/", remote+"/")...)
+	cmd.Stdin = input
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("rsync: %v %s", err, out)
 	}

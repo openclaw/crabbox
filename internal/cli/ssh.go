@@ -1739,6 +1739,7 @@ type rsyncOptions struct {
 	Checksum          bool
 	FullResync        bool
 	UseFilesFrom      bool
+	HasSymlinks       bool
 	FilesFrom         []byte
 	NoTimes           bool
 	Timeout           time.Duration
@@ -1781,8 +1782,9 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if opts.Checksum {
 		args = append(args, "--checksum")
 	}
+	var fileList io.Reader
 	if opts.UseFilesFrom {
-		args = append(args, "--files-from=-", "--from0")
+		args, fileList = rsyncFileList(args, opts.FilesFrom, opts.HasSymlinks)
 	}
 	owner := workspaceOwnerFromContext(ctx)
 	if isWindowsWSL2Target(target) {
@@ -1806,7 +1808,9 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		args = append(args, "--stats", "--itemize-changes", "--progress")
 	}
 	args = append(args, "--", ensureTrailingSlash(rsyncLocalPath(src)), session.host()+":"+dst+"/")
-	handle, err := resolvedRsyncCommand(ctx, target, args, wslExe, mountRoot)
+	transferCtx, cancelTransfer := context.WithCancelCause(ctx)
+	defer cancelTransfer(nil)
+	handle, err := resolvedRsyncCommand(transferCtx, target, args, wslExe, mountRoot)
 	if err != nil {
 		return err
 	}
@@ -1826,11 +1830,17 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		guardStarted = true
 	}
 	start := time.Now()
-	if opts.UseFilesFrom {
-		cmd.Stdin = bytes.NewReader(opts.FilesFrom)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = fileList, stdout, stderr
+	if runtime.GOOS == "darwin" && opts.Timeout > 0 {
+		// The heartbeat and both process streams may share one output buffer.
+		output := &synchronizedFanoutWriter{writers: []io.Writer{stderr}}
+		if sameCommandStreamWriter(stdout, stderr) {
+			cmd.Stdout = output
+		}
+		stderr = output
+		watch := &openRsyncTimeoutWriter{cmd: cmd, cancel: cancelTransfer, tail: "\n"}
+		cmd.Stderr = io.MultiWriter(watch, output)
 	}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 	stopHeartbeat := startSyncHeartbeat(stderr, start, opts.HeartbeatInterval)
 	err = handle.Start()
 	if err == nil {
@@ -1839,7 +1849,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	stopHeartbeat()
 	if ctx.Err() != nil {
 		err = errors.Join(err, ctx.Err())
-	} else if opts.Timeout > 0 && exitCode(err) == 30 {
+	} else if opts.Timeout > 0 && (exitCode(err) == 30 || errors.Is(context.Cause(transferCtx), errOpenRsyncTimeout)) {
 		err = Exit(6, "rsync stalled with no I/O progress for %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
 	}
 	if guardStarted {

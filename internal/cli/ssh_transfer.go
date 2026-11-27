@@ -1,10 +1,61 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os/exec"
 	"runtime"
 	"strings"
 )
+
+// OpenRsync stats each listed leaf when deriving implied directories, which
+// fails for a dangling symlink. Send the same parents explicitly on macOS.
+// Directory names without a trailing slash do not select their contents.
+func rsyncFileList(args []string, files []byte, hasSymlinks bool) ([]string, io.Reader) {
+	args = append(args, "--files-from=-", "--from0")
+	if runtime.GOOS != "darwin" || !hasSymlinks {
+		return args, bytes.NewReader(files)
+	}
+	var parents bytes.Buffer
+	seen := make(map[string]bool)
+	for name := range bytes.SplitSeq(files, []byte{0}) {
+		for {
+			end := bytes.LastIndexByte(name, '/')
+			if end <= 0 || seen[string(name[:end])] {
+				break
+			}
+			name = name[:end]
+			seen[string(name)] = true
+			parents.Write(name)
+			parents.WriteByte(0)
+		}
+	}
+	return append(args, "--no-implied-dirs"), io.MultiReader(&parents, bytes.NewReader(files))
+}
+
+var errOpenRsyncTimeout = errors.New("openrsync poll timeout")
+
+// OpenRsync reports its own protocol timeout before waiting for the SSH child.
+// Cancel the owned transfer group on that exact local diagnostic. Keep enough
+// stderr across writes to recognize a split line without buffering the log.
+type openRsyncTimeoutWriter struct {
+	cmd    *exec.Cmd
+	cancel context.CancelCauseFunc
+	tail   string
+}
+
+func (w *openRsyncTimeoutWriter) Write(p []byte) (int, error) {
+	line := fmt.Sprintf("\nrsync(%d): error: poll: timeout\n", w.cmd.Process.Pid)
+	text := w.tail + string(p)
+	if strings.Contains(text, line) {
+		w.cancel(errOpenRsyncTimeout)
+	}
+	w.tail = text[max(0, len(text)-len(line)+1):]
+	return len(p), nil
+}
 
 func newWorkspaceRsyncSession(ctx context.Context, target SSHTarget) (*sshTransportSession, string, string, error) {
 	wslExe := ""
