@@ -32,6 +32,16 @@ type remoteNativeRuntime struct {
 	identity runtimeartifact.Identity
 }
 
+func nativeRuntimeSSHProfile(target SSHTarget) sshReadinessProfile {
+	if target.SSHConfigProxy {
+		// A provider proxy opens a fresh connection for runtime staging. Keep
+		// the banner allowance that admitted it, rather than rejecting a proxy
+		// that was ready within five seconds with a two-second setup probe.
+		return sshReadinessProfileForTarget(target)
+	}
+	return sshReadinessProfile{connectTimeout: "2", connectionAttempts: "1"}
+}
+
 func (r *remoteNativeRuntime) command(args ...string) string {
 	words := []string{r.path, remoteruntime.Command}
 	words = append(words, args...)
@@ -79,7 +89,8 @@ func (r *remoteNativeRuntime) runPOSIX(ctx context.Context, script string, stdou
 		}
 	}
 	transport := sshTransportPreparation{command: command}
-	_, err := transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, false)
+	profile := nativeRuntimeSSHProfile(r.target)
+	_, err := transport.runOnce(ctx, r.target, profile.connectTimeout, profile.connectionAttempts, stdout, io.Discard, false)
 	if err == nil {
 		err = context.Cause(ctx)
 	}
@@ -99,7 +110,8 @@ func (r *remoteNativeRuntime) runMetadata(ctx context.Context, args []string, st
 		}
 	}
 	transport := sshTransportPreparation{command: command}
-	_, err := transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, false)
+	profile := nativeRuntimeSSHProfile(r.target)
+	_, err := transport.runOnce(ctx, r.target, profile.connectTimeout, profile.connectionAttempts, stdout, io.Discard, false)
 	if err == nil {
 		err = context.Cause(ctx)
 	}
@@ -235,7 +247,8 @@ func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtim
 	}
 	defer func() { err = errors.Join(err, input.close()) }()
 	remote = runtime // A failed dispatch may still have created remote staging.
-	if _, err := transport.runOnce(installCtx, target, "2", "1", io.Discard, io.Discard, false); err != nil {
+	profile := nativeRuntimeSSHProfile(target)
+	if _, err := transport.runOnce(installCtx, target, profile.connectTimeout, profile.connectionAttempts, io.Discard, io.Discard, false); err != nil {
 		return nil, fmt.Errorf("upload native runtime: %w", err)
 	}
 	if err := verifyNativeRuntimeBytes(installCtx, runtime, identity); err != nil {
