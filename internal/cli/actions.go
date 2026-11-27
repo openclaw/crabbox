@@ -3245,9 +3245,9 @@ fi
 sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
 sudo mkdir -p "$HOME/.cache/node/corepack/v1"
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
-group_args=()
-if [ -n "${RUNNER_GROUP:-}" ]; then group_args=(--runnergroup "$RUNNER_GROUP"); fi
-./config.sh --unattended %s "${group_args[@]}" --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
+set --
+if [ -n "${RUNNER_GROUP:-}" ]; then set -- --runnergroup "$RUNNER_GROUP"; fi
+./config.sh --unattended %s "$@" --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
 %s
 
 `, shellQuote(version), ephemeralArg, githubActionsRunnerToolCacheSeedScript())
