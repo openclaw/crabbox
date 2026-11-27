@@ -1459,7 +1459,7 @@ export function awsInstanceTypeIsARM64(instanceType: string): boolean {
   return /^[cmr][0-9]+g[dn]?$/.test(family);
 }
 
-function parsedPolicyOverrides(env: Partial<Env>): PolicyOverrides | undefined {
+export function parsedPolicyOverrides(env: Partial<Env>): PolicyOverrides | undefined {
   if (!env.CRABBOX_LEASE_POLICY_OVERRIDES) return {};
   try {
     const value: unknown = JSON.parse(env.CRABBOX_LEASE_POLICY_OVERRIDES);
@@ -1487,10 +1487,11 @@ export function resolveLeasePolicy(env: Partial<Env>, owner = "", org = ""): Lea
     autoExtend: env.CRABBOX_LEASE_AUTO_EXTEND === "deny" ? "deny" : "allow",
   };
   const overrides = parsedPolicyOverrides(env);
+  const { maxActiveLeases: _capacity, ...ownerPolicy } = overrides?.owners?.[owner] ?? {};
   const policy = {
     ...global,
     ...(org === MISSING_ORG_KEY ? undefined : overrides?.orgs?.[orgLabelFromKey(org) ?? org]),
-    ...overrides?.owners?.[owner],
+    ...ownerPolicy,
   };
   policy.defaultTTLSeconds = Math.min(policy.defaultTTLSeconds, policy.maxTTLSeconds);
   policy.defaultIdleTimeoutSeconds = Math.min(

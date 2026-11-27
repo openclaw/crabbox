@@ -9,7 +9,10 @@ export interface LeasePolicy {
 
 export type PolicyOverrides = {
   orgs?: Record<string, Partial<Omit<LeasePolicy, "runtimeExtension">>>;
-  owners?: Record<string, Partial<Omit<LeasePolicy, "runtimeExtension">>>;
+  owners?: Record<
+    string,
+    Partial<Omit<LeasePolicy, "runtimeExtension">> & { maxActiveLeases?: number }
+  >;
 };
 
 export function isLeasePolicyOverrides(value: unknown): value is PolicyOverrides;

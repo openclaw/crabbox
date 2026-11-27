@@ -171,6 +171,24 @@ and capacity-admin active-lease caps to 50. The ordinary per-owner cap is 10.
 Monthly committed-USD budgets are $100,000 fleet-wide, $50,000 per owner, and
 $100,000 per org.
 
+Individual owners can have an exact concurrent-lease cap in the runtime-owned
+`CRABBOX_LEASE_POLICY_OVERRIDES` document:
+
+```json
+{"owners":{"github:1000000001":{"maxActiveLeases":20}}}
+```
+
+Use the authenticated immutable owner ID, not a GitHub login. `maxActiveLeases`
+must be an integer from 1 to 2147483647 and is supported only under `owners`.
+It replaces that owner's ordinary or capacity-admin cap, including when lower.
+It does not grant capacity-admin membership, bypass fleet/org caps, or change
+monthly budgets. Omitting the field restores the owner's normal tier. Existing
+lifetime fields in the same document remain unchanged. Keep individual policy
+exceptions out of source control and use the reviewed policy-replacement workflow
+in [Operations](../operations.md#deployment), preserving all unrelated fields.
+Deploy support for this field before adding it to live policy; older validators
+reject it, so remove it with the guarded workflow before rolling back to one.
+
 Active-lease checks run in fleet → owner → org order, before monthly budgets.
 The capacity response's `admissible` and `blockedBy` use that same order, with
 `blockedBy: null` when all three caps have headroom. New fleet/org limit fields

@@ -1,3 +1,4 @@
+import { parsedPolicyOverrides } from "./config";
 import { lifetimeOwnsCompute, lifetimeRuntimeMs } from "./lease-lifetime";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import { orgLabelForDisplay, orgMatchesForAccounting, orgMatchesForFilter } from "./org-identity";
@@ -45,6 +46,7 @@ export async function quotedLeaseCost(
 export interface CostLimits {
   maxActiveLeases: number;
   maxActiveLeasesPerOwner: number;
+  ownerActiveLeaseOverrides?: Record<string, number>;
   maxActiveLeasesPerOrg: number;
   capacityAdminOwners: string[];
   sharedCapacityOverrideOwners: string[];
@@ -176,6 +178,11 @@ export function costLimits(env: Env): CostLimits {
   return {
     maxActiveLeases: envInt(env.CRABBOX_MAX_ACTIVE_LEASES),
     maxActiveLeasesPerOwner: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER),
+    ownerActiveLeaseOverrides: Object.fromEntries(
+      Object.entries(parsedPolicyOverrides(env)?.owners ?? {})
+        .filter(([, policy]) => policy.maxActiveLeases !== undefined)
+        .map(([owner, policy]) => [owner, policy.maxActiveLeases!]),
+    ),
     maxActiveLeasesPerOrg: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_ORG),
     capacityAdminOwners: [
       ...envList(env.CRABBOX_CAPACITY_ADMIN_OWNERS),
@@ -587,9 +594,13 @@ export function activeLeaseLimitsForOwner(limits: CostLimits, owner: string) {
     capacityAdmin && limits.sharedCapacityOverrideOwners.includes(owner.toLowerCase());
   return {
     fleet: sharedOverride ? 0 : limits.maxActiveLeases,
-    owner: capacityAdmin
-      ? Math.max(limits.maxActiveLeasesPerOwner, limits.maxActiveLeasesPerCapacityAdmin)
-      : limits.maxActiveLeasesPerOwner,
+    owner:
+      (Object.hasOwn(limits.ownerActiveLeaseOverrides ?? {}, owner)
+        ? limits.ownerActiveLeaseOverrides?.[owner]
+        : undefined) ??
+      (capacityAdmin
+        ? Math.max(limits.maxActiveLeasesPerOwner, limits.maxActiveLeasesPerCapacityAdmin)
+        : limits.maxActiveLeasesPerOwner),
     org: sharedOverride ? 0 : limits.maxActiveLeasesPerOrg,
   };
 }
