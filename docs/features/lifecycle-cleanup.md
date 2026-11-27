@@ -123,6 +123,11 @@ foreign attachments, replacements, and missing immutable identities also fail
 closed. This narrow exact-lease release path does not relax the separate Azure
 orphan sweep's complete-set and quarantine requirements.
 
+Azure direct coordinator creates, like durable provisioning, refuse lease-resource
+writes while a delete claim or deferred cleanup record remains for the same name;
+cleanup never adopts a same-name replacement with a new immutable identity, even
+with matching tags (see [Azure cleanup guidance](../providers/azure.md#same-name-replacements-and-outstanding-cleanup)).
+
 ### Heartbeats and expiry
 
 While a command runs, the CLI heartbeats the active lease over the coordinator
