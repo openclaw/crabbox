@@ -2008,7 +2008,12 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 		runGit(t, dir, "-c", "filter.fixture.clean=cat", "-c", "filter.fixture.required=false", "add", ".")
 		runGit(t, dir, "commit", "-m", "filter")
 		runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		// The target still has the filter even if the index and worktree do not.
+		writeFile(t, filepath.Join(dir, ".gitattributes"), "*.bin -filter\n")
+		runGit(t, dir, "add", ".gitattributes")
+		index := gitOutput(dir, "write-tree")
 		requireSeedOnly(t, planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), ""))
+		requireGitOutput(t, dir, index, "write-tree")
 	})
 
 	t.Run("gitlink", func(t *testing.T) {

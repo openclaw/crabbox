@@ -699,9 +699,6 @@ func validateGitOverlayCheckoutConfig(root string) error {
 }
 
 func gitSyncTransformAttribute(root, source string, paths, attributes []string) (string, error) {
-	if len(paths) == 0 {
-		return "", nil
-	}
 	var input bytes.Buffer
 	for _, rel := range paths {
 		if !safeRepoRel(rel) {
@@ -710,17 +707,45 @@ func gitSyncTransformAttribute(root, source string, paths, attributes []string) 
 		input.WriteString(rel)
 		input.WriteByte(0)
 	}
-	args := []string{"check-attr"}
-	if source != "" {
-		args = append(args, "--source="+source)
+	return gitCheckTransformAttribute(root, source, input.Bytes(), attributes)
+}
+
+func gitCheckTransformAttribute(root, source string, paths []byte, attributes []string) (string, error) {
+	if len(paths) == 0 {
+		return "", nil
 	}
-	args = append(args, "-z", "--stdin")
-	args = append(args, attributes...)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = root
-	cmd.Env = repositoryGitEnvironment()
-	cmd.Stdin = &input
-	out, err := cmd.Output()
+	env := repositoryGitEnvironment()
+	check := func(option string) ([]byte, error) {
+		args := []string{"check-attr", "-z", "--stdin"}
+		if option != "" {
+			args = append(args, option)
+		}
+		cmd := exec.Command("git", append(args, attributes...)...)
+		cmd.Dir, cmd.Env, cmd.Stdin = root, env, bytes.NewReader(paths)
+		return cmd.Output()
+	}
+	option := ""
+	if source != "" {
+		option = "--source=" + source
+	}
+	out, err := check(option)
+	if source != "" && exitCode(err) == 129 {
+		// Git before 2.40 can read committed attributes from an index. Keep the
+		// caller's index intact, even when it differs from both HEAD and disk.
+		dir, mkErr := os.MkdirTemp("", "crabbox-attr-")
+		if mkErr != nil {
+			return "", mkErr
+		}
+		defer os.RemoveAll(dir)
+		env = append(env, "GIT_INDEX_FILE="+filepath.Join(dir, "index"))
+		read := exec.Command("git", "-c", "core.hooksPath="+os.DevNull, "-c", "core.fsmonitor=false",
+			"-c", "core.splitIndex=false", "read-tree", "--no-sparse-checkout", source)
+		read.Dir, read.Env = root, env
+		if err := read.Run(); err != nil {
+			return "", err
+		}
+		out, err = check("--cached")
+	}
 	if err != nil {
 		return "", err
 	}
