@@ -159,8 +159,11 @@ func BenchmarkExcluded(b *testing.B) { record(b.Name()) }
                 (directory / "fixture_test.go").write_text("package fixture\n" + preamble +
                     f'func {name}(t *testing.T) {{ record(t.Name()) }}\n')
             (root / "nested module/go.mod").write_text("module example.test/nested\n\ngo 1.26.0\n")
+            temporary_root = base / "tmp"
+            temporary_root.mkdir()
             env = {
                 "PATH": os.environ.get("PATH", ""), "HOME": str(base / "home"),
+                "TMPDIR": str(temporary_root), "TMP": str(temporary_root), "TEMP": str(temporary_root),
                 "GOCACHE": str(base / "cache"), "GOPATH": str(base / "gopath"),
                 "GOENV": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off",
                 "GOSUMDB": "off", "GOWORK": "off", "GOTELEMETRY": "off",

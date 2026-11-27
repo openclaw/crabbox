@@ -191,7 +191,14 @@ func TestAcquisitionPublicationRollbackIncludesClaimFence(t *testing.T) {
 				}
 				done := make(chan error, 1)
 				go func() { _, err := b.createLease(ctx, core.Repo{Root: home}, false, ""); done <- err }()
-				<-entered
+				// Acquisition can fail before the inspect hook (for example when
+				// managed-state metadata is inaccessible). Report that prerequisite
+				// failure instead of deadlocking the synctest bubble on entered.
+				select {
+				case <-entered:
+				case err := <-done:
+					t.Fatalf("acquisition returned before publication fence: %v", err)
+				}
 				synctest.Wait()
 				if _, err := readMachineIdentity(f.root, name); err != nil {
 					close(release)

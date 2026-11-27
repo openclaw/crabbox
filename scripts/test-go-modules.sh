@@ -11,7 +11,8 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 found=0
-modules_file="$(mktemp)"
+# An explicit template honors the caller's temporary root on BSD/macOS too.
+modules_file="$(mktemp "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/crabbox-go-modules.XXXXXX")"
 cleanup() {
   rm -f "$modules_file"
 }
