@@ -10,6 +10,48 @@ import { MISSING_ORG_KEY, orgKeyForLabel } from "../src/org-identity";
 import { leaseCost, leaseExtensionReservationUSD } from "../src/usage";
 
 describe("lease lifetime policy", () => {
+  it("accepts owner capacity overrides without including capacity in lifetime policy", () => {
+    const env = {
+      CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+        owners: {
+          "github:1001": { maxActiveLeases: 20, maxTTLSeconds: 43200 },
+        },
+      }),
+    };
+    expect(leasePolicyOverridesInvalid(env)).toBe(false);
+    expect(resolveLeasePolicy(env, "github:1001")).toEqual({
+      ...resolveLeasePolicy({}),
+      maxTTLSeconds: 43200,
+    });
+  });
+
+  it.each([0, -1, 1.5, "20", null, 2147483648])(
+    "rejects invalid owner capacity %s",
+    (maxActiveLeases) => {
+      expect(
+        leasePolicyOverridesInvalid({
+          CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+            owners: {
+              "github:1001": { maxActiveLeases },
+            },
+          }),
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("rejects capacity overrides on organizations", () => {
+    expect(
+      leasePolicyOverridesInvalid({
+        CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+          orgs: {
+            "example-org": { maxActiveLeases: 20 },
+          },
+        }),
+      }),
+    ).toBe(true);
+  });
+
   it.each([0, 0.08, 1.13, 9])(
     "uses create-time reservation rounding at hourly rate %s",
     (hourlyUSD) => {

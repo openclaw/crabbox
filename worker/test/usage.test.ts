@@ -764,6 +764,46 @@ describe("usage accounting", () => {
     },
   );
 
+  it("applies exact owner caps without granting shared exemptions or changing other owners", () => {
+    const limits = costLimits({
+      CRABBOX_MAX_ACTIVE_LEASES: "50",
+      CRABBOX_MAX_ACTIVE_LEASES_PER_ORG: "50",
+      CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "10",
+      CRABBOX_CAPACITY_ADMIN_OWNERS: "github:1002",
+      CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "50",
+      CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+        owners: {
+          "github:1001": { maxActiveLeases: 20, maxTTLSeconds: 43200 },
+          "github:1002": { maxActiveLeases: 5 },
+        },
+      }),
+    } as Env);
+    expect(activeLeaseLimitsForOwner(limits, "github:1001")).toEqual({
+      fleet: 50,
+      owner: 20,
+      org: 50,
+    });
+    expect(activeLeaseLimitsForOwner(limits, "github:1002").owner).toBe(5);
+    expect(activeLeaseLimitsForOwner(limits, "github:1003").owner).toBe(10);
+    expect(activeLeaseLimitsForOwner(limits, "toString").owner).toBe(10);
+    const now = new Date("2026-05-01T02:00:00Z");
+    const candidate = testLease({ owner: "github:1001", org: "example-org" });
+    const usage = { ...createCostLimitUsage(candidate, now), ownerActiveLeases: 19 };
+    expect(enforceCostLimitUsage(usage, candidate, limits)).toBe("");
+    expect(enforceCostLimitUsage({ ...usage, ownerActiveLeases: 20 }, candidate, limits)).toContain(
+      "21/20",
+    );
+    expect(enforceCostLimitUsage({ ...usage, activeLeases: 50 }, candidate, limits)).toContain(
+      "fleet active lease limit exceeded",
+    );
+    expect(enforceCostLimitUsage({ ...usage, orgActiveLeases: 50 }, candidate, limits)).toContain(
+      "active lease limit for org exceeded",
+    );
+    expect(
+      enforceCostLimitUsage(usage, candidate, { ...limits, maxMonthlyUSDPerOwner: 1 }),
+    ).not.toBe("");
+  });
+
   it("allows configured capacity admins to use the admin owner active cap", () => {
     const now = new Date("2026-05-01T02:00:00Z");
     const activeLeases = Array.from({ length: 4 }, (_, index) =>

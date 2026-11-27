@@ -22,6 +22,8 @@ export function isLeasePolicyOverrides(value) {
         if (durationPolicyFields.has(key)) {
           if (!Number.isInteger(field) || typeof field !== "number" || field < 1 || field > 86_400)
             return false;
+        } else if (key === "maxActiveLeases" && group === "owners") {
+          if (!Number.isSafeInteger(field) || field < 1 || field > 2147483647) return false;
         } else if (switchPolicyFields.has(key)) {
           if (field !== "allow" && field !== "deny") return false;
         } else return false;

@@ -354,7 +354,8 @@ successful upload alone is not the Stage A convergence receipt.
 
 Git owns coordinator defaults and deployment settings in `worker/wrangler.jsonc`.
 The existing runtime binding `CRABBOX_LEASE_POLICY_OVERRIDES` owns operator-managed
-owner/org exceptions. Keep individual memberships and exceptions outside source
+owner/org exceptions, including owner-only `maxActiveLeases` concurrent-lease caps.
+Keep individual memberships and exceptions outside source
 control; do not add this binding to Wrangler source or enable `keep_vars`.
 Ordinary owners retain the global defaults (30-minute TTL and idle timeout,
 4-hour maximum) unless runtime policy gives them an exception.

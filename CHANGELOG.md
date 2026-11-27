@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Coordinator: support exact per-owner concurrent-lease caps through runtime policy overrides without changing shared caps or monthly budgets.
+
 ## 0.84.0 - 2026-11-21
 
 ### Highlights
