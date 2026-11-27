@@ -1,4 +1,5 @@
 import { base64ToBytes, bytesToBase64 } from "./encoding";
+import { validRegisteredLeaseID } from "./lease-state";
 import type { Env, LeaseRecord } from "./types";
 
 export const leaseListPagination = "keyset-v1";
@@ -59,7 +60,8 @@ export async function openLeaseListCursor(
       bytes.slice(12),
     );
     const key = new TextDecoder().decode(plaintext);
-    return /^lease(?:-maintenance|-current)?:cbx_[a-f0-9]{12}$/.test(key) ? key : undefined;
+    const id = /^lease(?:-maintenance|-current)?:(.+)$/.exec(key)?.[1];
+    return validRegisteredLeaseID(id) ? key : undefined;
   } catch {
     return undefined;
   }
