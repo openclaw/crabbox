@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Coordinator: continue lease listings when a page ends on a registered lease ID. [Issue 3231](https://github.com/openclaw/crabbox/issues/3231).
 - Coordinator: support exact per-owner concurrent-lease caps through runtime policy overrides without changing shared caps or monthly budgets.
 
 ## 0.84.0 - 2026-11-21

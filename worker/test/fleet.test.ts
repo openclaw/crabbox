@@ -62596,6 +62596,66 @@ describe("current lease index and indexed listings", () => {
     }
   });
 
+  it.each([false, true])(
+    "continues a registered lease cursor after state changes (indexed=%s)",
+    async (indexed) => {
+      const storage = new BoundedObservedMemoryStorage();
+      const fleet = testFleet(storage, {}, { CRABBOX_SESSION_SECRET: "synthetic-list-secret" });
+      await fleet.ready();
+      storage.seed(leaseCurrentIndex.stateKey, { version: 1, complete: indexed });
+      const owner = "alice@example.com";
+      const org = "example-org";
+      const headers = { "x-crabbox-owner": owner, "x-crabbox-org": org };
+      const idFor = (i: number) => `cbx_${i.toString(16).padStart(12, "0")}`;
+      const registeredID = `${idFor(99)}feedfacecafe`;
+      for (let i = 0; i < 125; i++) {
+        if (i === 99) continue;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- populate each lease and its indexes together.
+        await putLeaseRecord(
+          storage,
+          testLease({ id: idFor(i), owner, org, provider: "aws", keep: false }),
+        );
+      }
+      const registered = await fleet.fetch(
+        request("PUT", `/v1/leases/${registeredID}/registration`, {
+          headers,
+          body: { provider: "aws", target: "linux", host: "192.0.2.1" },
+        }),
+      );
+      expect(registered.status).toBe(201);
+
+      const query = "/v1/leases?pagination=keyset-v1&limit=100&provider=aws&view=current";
+      const first = await fleet.fetch(request("GET", query, { headers }));
+      expect(first.status).toBe(200);
+      const page = (await first.json()) as { leases: LeaseRecord[]; nextCursor: string };
+      expect(page.leases).toHaveLength(100);
+      expect(page.leases.at(-1)?.id).toBe(registeredID);
+      expect(page.nextCursor).toBeTruthy();
+
+      for (const id of [registeredID, idFor(102)]) {
+        const row = storage.value<LeaseRecord>(`lease:${id}`)!;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- remove the cursor key and a future result through the lease writer.
+        await putLeaseRecord(storage, { ...row, state: "released", keep: false });
+      }
+      await putLeaseRecord(
+        storage,
+        testLease({ id: idFor(125), owner, org, provider: "aws", keep: false }),
+      );
+
+      const second = await fleet.fetch(
+        request("GET", `${query}&cursor=${encodeURIComponent(page.nextCursor)}`, { headers }),
+      );
+      expect(second.status).toBe(200);
+      const tail = (await second.json()) as { leases: LeaseRecord[]; nextCursor?: string };
+      expect(tail.leases.map(({ id }) => id)).toEqual(
+        Array.from({ length: 26 }, (_, i) => i + 100)
+          .filter((i) => i !== 102)
+          .map(idFor),
+      );
+      expect(tail.nextCursor).toBeUndefined();
+    },
+  );
+
   it("rejects index mode changes and expired readiness but continues raw cursors after readiness", async () => {
     const { storage, fleet } = await listingFixture();
     const headers = { "x-crabbox-admin": "true" };

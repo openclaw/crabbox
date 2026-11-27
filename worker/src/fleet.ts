@@ -111,7 +111,7 @@ import {
   putLeaseRecord,
   type LeaseIndexDescriptor,
 } from "./lease-record-store";
-import { isRegisteredLease, leaseIsLive } from "./lease-state";
+import { isRegisteredLease, leaseIsLive, validRegisteredLeaseID } from "./lease-state";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import {
@@ -25649,10 +25649,6 @@ function validLeaseID(value: string | undefined): value is string {
 
 function validCreateAttemptID(value: string | undefined): value is string {
   return typeof value === "string" && /^cat_[a-f0-9]{32}$/.test(value);
-}
-
-function validRegisteredLeaseID(value: string | undefined): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/.test(value);
 }
 
 function validWebVNCPortalViewerTicket(value: string | undefined): value is string {
