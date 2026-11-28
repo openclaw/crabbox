@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +19,110 @@ import (
 
 	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
+
+func TestSSHTransportContextDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH process fixture")
+	}
+	privateCause := errors.New("private-cancellation-cause-must-not-appear")
+	for _, route := range []string{"posix", "metadata", "windows", "plain", "diagnostics", "workspace-owner"} {
+		for _, tc := range []struct {
+			name  string
+			state error
+			code  int
+		}{
+			{name: "success"}, {name: "remote failure", code: 23},
+			{name: "cancel", state: context.Canceled}, {name: "deadline", state: context.DeadlineExceeded},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				isolateRunTestUserDirs(t, dir)
+				ready := filepath.Join(dir, "ready")
+				command := fmt.Sprintf("exit %d", tc.code)
+				if tc.state != nil {
+					command = "exec sleep 30"
+				}
+				writeExecutable(t, filepath.Join(dir, "ssh"), "#!/bin/sh\nprintf ready\n: > "+shellQuote(ready)+"\n"+command+"\n")
+				t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				timeout := 5 * time.Second
+				if tc.state == context.DeadlineExceeded {
+					timeout = time.Second
+				}
+				ctx, stop := context.WithTimeoutCause(ctx, timeout, privateCause)
+				defer stop()
+				joined := make(chan struct{})
+				go func() {
+					defer close(joined)
+					if tc.state != context.Canceled {
+						return
+					}
+					ticker := time.NewTicker(time.Millisecond)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							if _, err := os.Stat(ready); err == nil {
+								cancel(privateCause)
+								return
+							}
+						}
+					}
+				}()
+				var output bytes.Buffer
+				r := remoteNativeRuntime{target: SSHTarget{Host: "example.invalid", Port: "22", TargetOS: targetLinux, NoControlMaster: true}}
+				var err error
+				switch route {
+				case "metadata":
+					err = r.runMetadata(ctx, []string{"identity"}, &output)
+				case "posix":
+					err = r.runPOSIX(ctx, "true", &output)
+				case "windows":
+					r.target.TargetOS = targetWindows
+					err = r.runWindows(ctx, "exit 0", &output)
+				case "workspace-owner":
+					var response string
+					response, err = callWorkspaceOwnerTransport(ctx, time.Minute, sshWorkspaceOwnerTransport{target: r.target}, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: "fixture", Token: "fixture"})
+					output.WriteString(response)
+				default:
+					transport := sshTransportPreparation{command: "true"}
+					_, err = transport.runOnce(ctx, r.target, "2", "1", &output, io.Discard, route == "diagnostics")
+					if !transport.dispatched || transport.retirementUnconfirmed != (tc.state != nil) {
+						t.Errorf("dispatched=%t retirementUnconfirmed=%t state=%v", transport.dispatched, transport.retirementUnconfirmed, tc.state)
+					}
+				}
+				state := ctx.Err()
+				cancel(nil)
+				<-joined
+				if output.String() != "ready" {
+					t.Fatalf("transport did not start: output=%q error=%v", output.String(), err)
+				}
+				if tc.state != nil {
+					var exit *exec.ExitError
+					if state != tc.state || !errors.Is(err, tc.state) || !errors.As(err, &exit) || strings.Contains(err.Error(), privateCause.Error()) {
+						t.Fatalf("unsafe or incorrect canceled transport: state=%v error=%v", state, err)
+					}
+					if route == "workspace-owner" {
+						diagnostic := workspaceOwnerCallError("inspect", err).Error()
+						label := "context=canceled"
+						if tc.state == context.DeadlineExceeded {
+							label = "context=deadline-exceeded"
+						}
+						if !strings.Contains(diagnostic, label) || strings.Contains(diagnostic, privateCause.Error()) {
+							t.Fatalf("unsafe owner diagnostic: %s", diagnostic)
+						}
+						t.Logf("owner diagnostic: %s", diagnostic)
+					}
+				} else if exitCode(err) != tc.code {
+					t.Fatalf("exit=%d error=%v, want %d", exitCode(err), err, tc.code)
+				}
+			})
+		}
+	}
+}
 
 func nativeRuntimeTestTarget(t *testing.T, checksumTool, gzipTool bool) SSHTarget {
 	t.Helper()

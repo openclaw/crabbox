@@ -113,9 +113,6 @@ func windowsFilesystemArchive(ctx context.Context, artifact io.Reader, size int6
 func (r *remoteNativeRuntime) runWindows(ctx context.Context, script string, stdout io.Writer) error {
 	transport := sshTransportPreparation{command: PowershellCommand(script)}
 	_, err := transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, false)
-	if err == nil {
-		err = context.Cause(ctx)
-	}
 	return err
 }
 

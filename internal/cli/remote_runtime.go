@@ -80,9 +80,6 @@ func (r *remoteNativeRuntime) runPOSIX(ctx context.Context, script string, stdou
 	}
 	transport := sshTransportPreparation{command: command}
 	_, err := transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, false)
-	if err == nil {
-		err = context.Cause(ctx)
-	}
 	return err
 }
 
@@ -100,9 +97,6 @@ func (r *remoteNativeRuntime) runMetadata(ctx context.Context, args []string, st
 	}
 	transport := sshTransportPreparation{command: command}
 	_, err := transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, false)
-	if err == nil {
-		err = context.Cause(ctx)
-	}
 	return err
 }
 

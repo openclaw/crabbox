@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- SSH: report canonical cancellation and deadline state alongside process failures, including native runtime cleanup errors, without adding private caller causes. [PR 3235](https://github.com/openclaw/crabbox/pull/3235).
 - Sync: preserve Git coherence and overlay with Apple Git, transfer dangling symlinks with stock macOS rsync, and report idle timeouts promptly.
 - Coordinator: continue lease listings when a page ends on a registered lease ID. [Issue 3231](https://github.com/openclaw/crabbox/issues/3231).
 - Coordinator: support exact per-owner concurrent-lease caps through runtime policy overrides without changing shared caps or monthly budgets.

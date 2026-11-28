@@ -1136,6 +1136,15 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 }
 
 func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
+	defer func() {
+		// Keep the existing cause when cancellation follows a zero exit. Failed
+		// commands need canonical state only; caller causes can contain private details.
+		if err == nil {
+			err = context.Cause(ctx)
+		} else if state := ctx.Err(); state != nil {
+			err = errors.Join(err, state)
+		}
+	}()
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	if p.direct != nil || p.replay != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
