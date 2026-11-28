@@ -53,7 +53,7 @@ func TestDeleteHetznerCheckpointImageRequiresUniqueLocalRecord(t *testing.T) {
 				}
 			}
 			lifecycle := &fakeImageDeleteLifecycle{}
-			_, err := deleteHetznerCheckpointImage(context.Background(), store, lifecycle, "99", "")
+			_, err := deleteNativeCheckpointImage(context.Background(), store, lifecycle, nativeImageDeleteSpecs["hetzner"], "99", "")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v, want %q", err, tc.want)
 			}
@@ -84,7 +84,7 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 		t.Fatal(err)
 	}
 	lifecycle := &fakeImageDeleteLifecycle{}
-	if _, err := deleteHetznerCheckpointImage(context.Background(), store, lifecycle, "99", "hel1"); err == nil || !strings.Contains(err.Error(), "location mismatch") {
+	if _, err := deleteNativeCheckpointImage(context.Background(), store, lifecycle, nativeImageDeleteSpecs["hetzner"], "99", "hel1"); err == nil || !strings.Contains(err.Error(), "location mismatch") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(lifecycle.requests) != 0 {
@@ -93,7 +93,7 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 
 	remoteErr := errors.New("remote refusal")
 	lifecycle.err = remoteErr
-	if _, err := deleteHetznerCheckpointImage(context.Background(), store, lifecycle, "99", "fsn1"); !errors.Is(err, remoteErr) {
+	if _, err := deleteNativeCheckpointImage(context.Background(), store, lifecycle, nativeImageDeleteSpecs["hetzner"], "99", "fsn1"); !errors.Is(err, remoteErr) {
 		t.Fatalf("err=%v", err)
 	}
 	if _, _, err := store.Read(record.ID); err != nil {
@@ -101,7 +101,7 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 	}
 
 	lifecycle.err = nil
-	deleted, err := deleteHetznerCheckpointImage(context.Background(), store, lifecycle, "99", "fsn1")
+	deleted, err := deleteNativeCheckpointImage(context.Background(), store, lifecycle, nativeImageDeleteSpecs["hetzner"], "99", "fsn1")
 	if err != nil {
 		t.Fatal(err)
 	}

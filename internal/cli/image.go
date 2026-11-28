@@ -364,7 +364,7 @@ func (a App) imageFSRStatus(ctx context.Context, args []string) error {
 
 func (a App) imageDelete(ctx context.Context, args []string) error {
 	fs := newFlagSet("image delete", a.Stderr)
-	provider := fs.String("provider", "aws", "image provider: aws, azure, gcp, or hetzner")
+	provider := fs.String("provider", "aws", "image provider: aws, azure, gcp, hetzner, or ovh")
 	region := fs.String("region", "", "region, location, or zone containing the image")
 	project := fs.String("project", "", "GCP project containing the image")
 	catalogOnly := fs.Bool("catalog-only", false, "unpublish AWS catalog-only variants without deleting the AMI")
@@ -373,11 +373,11 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return Exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only|--retire-promotions]")
+		return Exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner|ovh] [--region <region>] [--project <project>] [--catalog-only|--retire-promotions]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
-	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" {
-		return Exit(2, "unsupported image provider %q; use aws, azure, gcp, or hetzner", *provider)
+	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" && normalizedProvider != "ovh" {
+		return Exit(2, "unsupported image provider %q; use aws, azure, gcp, hetzner, or ovh", *provider)
 	}
 	if *catalogOnly && normalizedProvider != "aws" {
 		return Exit(2, "--catalog-only is AWS-only")
@@ -388,23 +388,23 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	if *retirePromotions && *catalogOnly {
 		return Exit(2, "--catalog-only and --retire-promotions are mutually exclusive")
 	}
-	if normalizedProvider == "hetzner" {
+	if native, ok := nativeImageDeleteSpecs[normalizedProvider]; ok {
 		if strings.TrimSpace(*project) != "" {
-			return Exit(2, "--project is not supported for Hetzner image deletion")
+			return Exit(2, "--project is not supported for %s image deletion", native.label)
 		}
 		store, err := defaultCheckpointStore()
 		if err != nil {
 			return err
 		}
-		lifecycle, ok := nativeCheckpointLifecycleProvider(Config{Provider: "hetzner"}, Server{})
+		lifecycle, ok := nativeCheckpointLifecycleProvider(Config{Provider: normalizedProvider}, Server{})
 		if !ok {
-			return Exit(2, "Hetzner snapshot lifecycle provider is unavailable")
+			return Exit(2, "%s snapshot lifecycle provider is unavailable", native.label)
 		}
-		record, err := deleteHetznerCheckpointImage(ctx, store, lifecycle, fs.Arg(0), strings.TrimSpace(*region))
+		record, err := deleteNativeCheckpointImage(ctx, store, lifecycle, native, fs.Arg(0), strings.TrimSpace(*region))
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "deleted image=%s provider=hetzner region=%s project=- checkpoint=%s\n", fs.Arg(0), blank(record.Native.Region, "-"), record.ID)
+		fmt.Fprintf(a.Stdout, "deleted image=%s provider=%s region=%s project=- checkpoint=%s\n", fs.Arg(0), normalizedProvider, blank(record.Native.Region, "-"), record.ID)
 		return nil
 	}
 	coord, err := configuredAdminCoordinator()
@@ -435,26 +435,39 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	return nil
 }
 
-func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, lifecycle NativeCheckpointLifecycleProvider, imageID, region string) (checkpointRecord, error) {
+// nativeImageDeleteSpec describes a direct provider whose images are removed
+// only through an exact local native checkpoint record.
+type nativeImageDeleteSpec struct {
+	kind     string
+	label    string
+	location string
+}
+
+var nativeImageDeleteSpecs = map[string]nativeImageDeleteSpec{
+	"hetzner": {kind: checkpointKindHetzner, label: "Hetzner", location: "location"},
+	"ovh":     {kind: checkpointKindOVH, label: "OVH", location: "region"},
+}
+
+func deleteNativeCheckpointImage(ctx context.Context, store checkpointStore, lifecycle NativeCheckpointLifecycleProvider, spec nativeImageDeleteSpec, imageID, region string) (checkpointRecord, error) {
 	records, err := store.List()
 	if err != nil {
 		return checkpointRecord{}, err
 	}
 	matches := make([]checkpointRecord, 0, 1)
 	for _, record := range records {
-		if record.Kind == checkpointKindHetzner && record.Native.ImageID == imageID {
+		if record.Kind == spec.kind && record.Native.ImageID == imageID {
 			matches = append(matches, record)
 		}
 	}
 	if len(matches) == 0 {
-		return checkpointRecord{}, Exit(2, "refusing to delete Hetzner snapshot %s without an exact local hetzner-snapshot checkpoint record", imageID)
+		return checkpointRecord{}, Exit(2, "refusing to delete %s snapshot %s without an exact local %s checkpoint record", spec.label, imageID, spec.kind)
 	}
 	if len(matches) > 1 {
-		return checkpointRecord{}, Exit(2, "refusing to delete Hetzner snapshot %s because %d local checkpoint records claim it", imageID, len(matches))
+		return checkpointRecord{}, Exit(2, "refusing to delete %s snapshot %s because %d local checkpoint records claim it", spec.label, imageID, len(matches))
 	}
 	record := matches[0]
 	if region != "" && region != record.Native.Region {
-		return checkpointRecord{}, Exit(2, "Hetzner snapshot %s location mismatch: recorded=%s requested=%s", imageID, blank(record.Native.Region, "unknown"), region)
+		return checkpointRecord{}, Exit(2, "%s snapshot %s %s mismatch: recorded=%s requested=%s", spec.label, imageID, spec.location, blank(record.Native.Region, "unknown"), region)
 	}
 	if unresolvedCheckpoint(record) {
 		return checkpointRecord{}, Exit(2, "checkpoint %s is unresolved; reconcile its capture before deletion", record.ID)

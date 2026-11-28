@@ -22,7 +22,7 @@ crabbox image delete my-machine-image --provider gcp --region europe-west1-b --p
 crabbox image delete 123456789 --provider hetzner --region fsn1
 ```
 
-Every `image` subcommand except direct Hetzner snapshot deletion requires a
+Every `image` subcommand except direct Hetzner and OVH snapshot deletion requires a
 configured coordinator (broker) and server-authorized admin access. An explicit
 `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` takes precedence;
 otherwise the CLI uses its configured broker authentication. GitHub login works
@@ -302,7 +302,7 @@ crabbox image delete 123456789 --provider hetzner --region fsn1
 Flags:
 
 ```text
---provider <name>   image provider: aws, azure, gcp, or hetzner (default aws)
+--provider <name>   image provider: aws, azure, gcp, hetzner, or ovh (default aws)
 --region <name>     region, location, or zone containing the image
 --project <name>    GCP project containing the image
 --catalog-only      unpublish every AWS catalog-only role without deleting the AMI
@@ -350,6 +350,13 @@ location, and requires exactly one local `hetzner-snapshot` checkpoint whose
 to verify the remote image is an owned, exactly bound snapshot, deletes the
 provider resource, and only then removes the local record. Zero or multiple
 local matches are refused; this is not a general Hetzner delete-by-ID path.
+
+OVH deletion follows the same direct path: it rejects `--project`, requires any
+supplied `--region` to match the recorded source region, and requires exactly
+one local `ovh-snapshot` checkpoint whose `native.imageId` is the requested
+snapshot id. Because OVH snapshots carry no labels, the remote check is the
+recorded snapshot id, `crabbox-<checkpoint-id>` name, region, and project. A
+snapshot without its local record is never deleted by Crabbox.
 
 Deletion fails closed unless the coordinator has stored Crabbox-created image
 metadata for the target, or (for direct Hetzner) the exact local checkpoint
