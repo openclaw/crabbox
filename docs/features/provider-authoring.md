@@ -260,6 +260,19 @@ Core does not reinterpret provider state names as capture barriers.
 An accepted request or allocated image ID alone is insufficient. Preserve accepted
 identity through errors and persist it before any observation or readiness wait.
 
+Source-only recovery keeps evidence hashing, claim-generation fencing, and journal
+transitions in core. Adapters may implement `NativeCheckpointAbandonScopeProvider`
+to attest retained cleanup account/region coordinates, including ordinary replay
+where the claim was already removed. A missing claim must not invent coordinates;
+exact provider absence checks still precede completion. Fixed receipts retain their
+stronger intent and generation checks. This capability does not resolve unknown
+image-submission obligations or authorize image deletion.
+
+Capture resolution uses `ReleaseOnly` plus `NoLocalStateMutations` to preserve
+checkpoint holds. `CheckpointAccess` additionally requests existing access
+material (such as a stored SSH key) for that already-bound capture; it is not
+ordinary activity admission or permission to rewrite the claim.
+
 Run evidence and agent attachments follow the same rule. Declare
 `FeatureRunProof`, `FeatureRunArtifacts`, `FeatureRunDownloads`,
 `FeatureURLBridge`, `FeatureRunSession`, and `FeatureMCP` only when the provider

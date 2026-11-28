@@ -214,14 +214,137 @@ func newForwardSSHServerWithSignerAt(t *testing.T, user, address string, signer 
 
 func (s *forwardSSHServer) port() int { return s.listener.Addr().(*net.TCPAddr).Port }
 
+func TestRealSSHProxyCommandExecAndStdinScript(t *testing.T) {
+	isolateTestUserDirs(t)
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Fatal("real OpenSSH is required:", err)
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Fatal("python3 is required for the byte proxy fixture:", err)
+	}
+
+	const user = "synthetic-proxy"
+	server := newForwardSSHServer(t, user)
+	server.mu.Lock()
+	server.sessionHandler = func(incoming ssh.NewChannel, _ string) {
+		channel, requests, err := incoming.Accept()
+		if err != nil {
+			return
+		}
+		defer channel.Close()
+		for request := range requests {
+			var payload struct{ Command string }
+			if request.Type != "exec" || ssh.Unmarshal(request.Payload, &payload) != nil {
+				_ = request.Reply(false, nil)
+				continue
+			}
+			var command *exec.Cmd
+			switch payload.Command {
+			case "printf normal-exec":
+				command = exec.CommandContext(t.Context(), "/bin/sh", "-c", "printf normal-exec")
+			case "/bin/sh":
+				command = exec.CommandContext(t.Context(), "/bin/sh")
+			default:
+				_ = request.Reply(false, nil)
+				return
+			}
+			if err := request.Reply(true, nil); err != nil {
+				return
+			}
+			command.Stdin = channel
+			command.Stdout = channel
+			command.Stderr = channel
+			command.Env = []string{"HOME=/tmp", "PATH=/usr/bin:/bin"}
+			err = command.Run()
+			var status uint32
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
+					t.Errorf("fixture command failed: %v", err)
+					return
+				}
+				status = uint32(exitErr.ExitCode())
+			}
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
+			return
+		}
+	}
+	server.mu.Unlock()
+	close(server.release)
+
+	root := t.TempDir()
+	proxyDir := filepath.Join(root, "proxy tools")
+	if err := os.MkdirAll(proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "proxy.log")
+	proxyPath := filepath.Join(proxyDir, "stream proxy.py")
+	proxyScript := fmt.Sprintf(`#!/usr/bin/env python3
+import os
+import select
+import socket
+import sys
+
+with open(%s, "a", encoding="utf-8") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+
+stream = socket.create_connection(("127.0.0.1", %d), timeout=5)
+stdin_open = True
+while True:
+    readers = [stream]
+    if stdin_open:
+        readers.append(sys.stdin.buffer)
+    ready, _, _ = select.select(readers, [], [])
+    if stream in ready:
+        data = stream.recv(65536)
+        if not data:
+            break
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    if stdin_open and sys.stdin.buffer in ready:
+        data = os.read(sys.stdin.fileno(), 65536)
+        if data:
+            stream.sendall(data)
+        else:
+            stdin_open = False
+            stream.shutdown(socket.SHUT_WR)
+`, strconv.Quote(logPath), server.port())
+	if err := os.WriteFile(proxyPath, []byte(proxyScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	target := SSHTarget{
+		User: user, Host: "i-0123456789abcdef0", Port: "2222", TargetOS: targetLinux,
+		NoControlMaster: true, DisableHostKeyChecking: true, FallbackPorts: []string{},
+		ProxyCommand: shellQuote(proxyPath) + " --target %h --port %p",
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if output, err := runSSHOutput(ctx, target, "printf normal-exec"); err != nil || output != "normal-exec" {
+		t.Fatalf("normal exec output=%q err=%v", output, err)
+	}
+	var stdout, stderr strings.Builder
+	err := runSSHInput(ctx, target, "/bin/sh", strings.NewReader("printf stdin-script; exit 7\n"), &stdout, &stderr)
+	if exitCode(err) != 7 || stdout.String() != "stdin-script" || stderr.Len() != 0 {
+		t.Fatalf("stdin script exit=%d stdout=%q stderr=%q err=%v", exitCode(err), stdout.String(), stderr.String(), err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(logData), "--target i-0123456789abcdef0 --port 2222\n"); got != 2 {
+		t.Fatalf("ProxyCommand expansion count=%d log=%q", got, logData)
+	}
+}
+
 func TestSSHTransportCapturedConfigPreventsAliasReassignment(t *testing.T) {
 	isolateTestUserDirs(t)
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Fatal("real OpenSSH is required:", err)
 	}
-	nc, err := exec.LookPath("nc")
+	python, err := exec.LookPath("python3")
 	if err != nil {
-		t.Fatal("loopback proxy fixture requires nc:", err)
+		t.Fatal("loopback proxy fixture requires python3:", err)
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -256,7 +379,37 @@ func TestSSHTransportCapturedConfigPreventsAliasReassignment(t *testing.T) {
 	}
 	// Both endpoints accept the same fixture identity and host key. A later
 	// provider refresh changes the alias's proxy, not the captured target.
-	reassigned := config + fmt.Sprintf(" ProxyCommand %s 127.0.0.1 %d\n", nc, replacement.port())
+	proxyPath := filepath.Join(root, "tcp_proxy.py")
+	proxyScript := `import os
+import select
+import socket
+import sys
+
+stream = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)
+stdin_open = True
+while True:
+    readers = [stream]
+    if stdin_open:
+        readers.append(sys.stdin.buffer)
+    ready, _, _ = select.select(readers, [], [])
+    if stream in ready:
+        data = stream.recv(65536)
+        if not data:
+            break
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    if stdin_open and sys.stdin.buffer in ready:
+        data = os.read(sys.stdin.fileno(), 65536)
+        if data:
+            stream.sendall(data)
+        else:
+            stdin_open = False
+            stream.shutdown(socket.SHUT_WR)
+`
+	if err := os.WriteFile(proxyPath, []byte(proxyScript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reassigned := config + fmt.Sprintf(" ProxyCommand %s %s 127.0.0.1 %d\n", shellQuote(python), shellQuote(proxyPath), replacement.port())
 	if err := os.WriteFile(path, []byte(reassigned), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -846,8 +999,27 @@ func TestSSHForwardRealDetachedAfterUnlink(t *testing.T) {
 					if hops > 0 {
 						parent.Env = append(parent.Env, "CRABBOX_FORWARD_REAL_CONFIG_ROUTE=1")
 					}
+					stdout, err := os.CreateTemp(f.root, "forward-parent-stdout-*.json")
+					if err != nil {
+						t.Fatal(err)
+					}
+					stderr, err := os.CreateTemp(f.root, "forward-parent-stderr-*.log")
+					if err != nil {
+						_ = stdout.Close()
+						t.Fatal(err)
+					}
+					parent.Stdout = stdout
+					parent.Stderr = stderr
 					go func() {
-						out, err := parent.Output()
+						err := parent.Run()
+						err = errors.Join(err, stdout.Close(), stderr.Close())
+						out, readErr := os.ReadFile(stdout.Name())
+						err = errors.Join(err, readErr)
+						if err != nil {
+							if diagnostic, readErr := os.ReadFile(stderr.Name()); readErr == nil && len(diagnostic) > 0 {
+								err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(diagnostic)))
+							}
+						}
 						var pid int
 						if err == nil {
 							err = json.Unmarshal(out, &pid)
@@ -940,7 +1112,7 @@ func TestSSHForwardRealDetachedAfterUnlink(t *testing.T) {
 				}
 				t.Cleanup(func() {
 					_ = syscall.Kill(-pid, syscall.SIGKILL)
-					boundaryEventually(t, "real SSH reap", func() bool { return syscall.Kill(pid, 0) == syscall.ESRCH })
+					boundaryEventually(t, "real SSH exit", func() bool { return forwardProcessExited(pid) })
 				})
 				if _, err := os.Stat(configDir); !os.IsNotExist(err) {
 					t.Fatal("successful detached forward retained config")
@@ -951,6 +1123,14 @@ func TestSSHForwardRealDetachedAfterUnlink(t *testing.T) {
 			})
 		}
 	}
+}
+
+func forwardProcessExited(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	state, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 }
 
 func TestSSHForwardRealPondWaitsForEveryGroup(t *testing.T) {

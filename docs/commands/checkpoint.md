@@ -385,8 +385,10 @@ interruption or attempted submission without a returned image identity remains
 unresolved; this does not unlock historical blank records.
 
 For an ordinary Machine0 record without an image identity, `abandon` can dispose
-of the exact source while retaining the unresolved image obligation. It does not
-prove whether the original image was submitted or whether an image is absent.
+of the exact source while retaining the unresolved image obligation. Direct AWS
+also supports source-only recovery of an existing pre-submit retirement using
+`--pre-submit-error-file`; see [abandon](#abandon) for its narrower requirements.
+Neither path proves whether the original image was submitted or is absent.
 
 Older binaries do not understand these operation holds. Before downgrading,
 stop new capture admission and finish all operations with this binary; do not
@@ -403,9 +405,10 @@ journal; it cannot undo a source deletion performed by an older binary.
 
 ## abandon
 
-Dispose of a source held by an unresolved ordinary native checkpoint. Machine0
-currently supports this recovery; other providers refuse it without changing
-the record or source.
+Dispose of an exact source while retaining its unresolved native image obligation.
+Machine0 supports ordinary unresolved captures without an image identity. Direct
+AWS supports adopting an existing pre-submit retirement as described below, not
+ordinary blank-image records. Coordinator-managed checkpoints are not eligible.
 
 ```sh
 crabbox checkpoint abandon chk_0123456789abcdef \
@@ -419,6 +422,44 @@ changed claim, or other unresolved capture prevents admission. The command
 records separate source-cleanup account evidence before disposing of the VM;
 it never treats that account as proof about the original image submission.
 
+### Pre-submit retirement recovery
+
+`--pre-submit-error-file <path>` permits adoption of an existing retirement with
+`capture.sourceDisposition: retire` and `capture.phase: submitting`, with no
+image/resource/delete identity. It requires the exact current source claim,
+matching checkpoint binding, repository, provider, immutable source ID and name,
+and a provider capability that permits source retirement. Changed ownership or
+another unresolved source checkpoint blocks recovery.
+
+For direct AWS, use the canonical lease ID (not a slug), the exact instance ID,
+and a local file containing the original CLI preparation failure:
+
+```sh
+crabbox checkpoint abandon chk_0123456789abcdef \
+  --provider aws --id cbx_012345abcdef \
+  --expected-provider-resource-id '<exact-instance-id>' \
+  --pre-submit-error-file ./checkpoint-prepare-error.txt --json
+```
+
+The file must be nonempty, at most 64 KiB, contain no NUL bytes, and begin with
+`prepare native checkpoint source:` after trimming whitespace. Crabbox hashes
+its exact bytes with SHA-256 and retains the digest in
+`native.metadata.crabbox_pre_submit_failure_sha256`. This is an audit of
+**operator-supplied evidence, not cryptographic proof of non-submission**; the
+prefix check does not authenticate the diagnostic. Do not fabricate evidence or
+include raw secrets in examples or shared diagnostics. A different evidence hash
+is rejected on replay.
+
+AWS cleanup requires a valid 12-digit account ID and nonempty region in the
+source claim, matching its `account:<id>` scope and any already recorded native
+account/region. These identify source cleanup, not the original image's owner.
+Current AWS caller account, exact instance identity, canonical ownership tags,
+and retained claim/create-intent identity must pass the provider's validation;
+changing credentials/accounts cannot establish absence. Replay with the evidence
+file also requires the retained fixed-create-intent fingerprint, claim timestamp,
+and source scope to match. Preserve these receipts rather than editing them to
+force cleanup.
+
 Replay the same command if source removal is pending or the process was
 interrupted. The retained record reports `capture.phase: abandoned` only after
 exact source absence and claim finalization are verified. Its error text still
@@ -428,7 +469,8 @@ provider operation/account to resolve any image storage obligation. A later
 image observation does not cause this command to adopt or delete the image.
 
 Abandonment never creates another snapshot, starts the source, or deletes an
-image. The record remains unavailable to fork, restore, delete, local-only
+image. Do not blindly retry image creation, delete an uncertain image, or fork it.
+The record remains unavailable to fork, restore, delete, local-only
 delete, and prune, including to older readers that retain unknown capture
 phases. Source-only abandonment does not authorize forgetting the checkpoint.
 

@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 	"github.com/openclaw/crabbox/internal/rootdisk"
@@ -49,6 +50,7 @@ var awsSnapshotDeleteBackoff = []time.Duration{
 type AWSClient struct {
 	ec2           *ec2.Client
 	serviceQuotas *servicequotas.Client
+	ssm           awsSSMSessionsAPI
 	sts           *sts.Client
 	region        string
 }
@@ -94,6 +96,7 @@ func newAWSClientForRegion(ctx context.Context, cfg Config, region string) (*AWS
 	return &AWSClient{
 		ec2:           ec2.NewFromConfig(awsCfg),
 		serviceQuotas: servicequotas.NewFromConfig(awsCfg),
+		ssm:           ssm.NewFromConfig(awsCfg),
 		sts:           sts.NewFromConfig(awsCfg),
 		region:        region,
 	}, nil
@@ -686,6 +689,9 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	labels := DirectLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
 	labels["aws_region"] = cfg.AWSRegion
+	if cfg.AWSSSHTransport == AWSSSHTransportSSM {
+		labels["aws_ssh_transport"] = AWSSSHTransportSSM
+	}
 	if control != nil {
 		labels["fixed_intent_sha256"] = control.IntentFingerprint
 		labels["aws_account_id"] = control.AccountID
@@ -761,7 +767,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		input.SecurityGroupIds = nil
 		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{
 			{
-				AssociatePublicIpAddress: aws.Bool(true),
+				AssociatePublicIpAddress: aws.Bool(cfg.AWSSSHTransport != AWSSSHTransportSSM),
 				DeleteOnTermination:      aws.Bool(true),
 				DeviceIndex:              aws.Int32(0),
 				Groups:                   []string{securityGroupID},
@@ -899,8 +905,12 @@ func mapMarket(spot bool) string {
 	return "on-demand"
 }
 
-func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, error) {
-	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS instance public IP"))
+func (c *AWSClient) waitForServer(ctx context.Context, id string, requirePublicIP bool) (Server, error) {
+	detail := "instance"
+	if requirePublicIP {
+		detail = "instance public IP"
+	}
+	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS %s", detail))
 	defer cancel()
 	interval := 250 * time.Millisecond
 	for {
@@ -912,7 +922,7 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 		if err != nil && awsAPIErrorCode(err) != "InvalidInstanceID.NotFound" {
 			return Server{}, err
 		}
-		if err == nil && server.PublicNet.IPv4.IP != "" {
+		if err == nil && (!requirePublicIP || server.PublicNet.IPv4.IP != "") {
 			return server, nil
 		}
 		if err := sleepContext(ctx, interval); err != nil {
@@ -923,7 +933,11 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 }
 
 func (c *AWSClient) WaitForServerIP(ctx context.Context, id string) (Server, error) {
-	return c.waitForServerIP(ctx, id)
+	return c.waitForServer(ctx, id, true)
+}
+
+func (c *AWSClient) WaitForServer(ctx context.Context, id string, requirePublicIP bool) (Server, error) {
+	return c.waitForServer(ctx, id, requirePublicIP)
 }
 
 func (c *AWSClient) GetServer(ctx context.Context, id string) (Server, error) {
@@ -968,6 +982,9 @@ func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name 
 		},
 	})
 	if err != nil {
+		if awsAPIErrorCode(err) == "UnauthorizedOperation" {
+			return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
+		}
 		return CoordinatorImage{}, err
 	}
 	imageID := aws.ToString(out.ImageId)
@@ -1286,6 +1303,9 @@ func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string
 	}
 	if groupID == "" {
 		return "", Exit(3, "aws security group id is empty")
+	}
+	if cfg.AWSSSHTransport == AWSSSHTransportSSM {
+		return groupID, nil
 	}
 	ports := sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)
 	if group != nil {

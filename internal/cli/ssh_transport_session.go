@@ -832,6 +832,11 @@ func proxyJumpDirectCommand(sshExecutable, configPath, hop string) string {
 	return strings.Join(sshProxyCommandWords(args), " ")
 }
 
+// SSHProxyCommand quotes command words for the local OpenSSH implementation.
+func SSHProxyCommand(words ...string) string {
+	return strings.Join(sshProxyCommandWords(words), " ")
+}
+
 func proxyJumpHopArgs(hop string) []string {
 	if len(hop) >= len("ssh://") && strings.EqualFold(hop[:len("ssh://")], "ssh://") {
 		return []string{hop}

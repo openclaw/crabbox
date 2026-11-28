@@ -190,6 +190,45 @@ func TestFixedAWSCreateIntentWarmupKeepDefaultDoesNotOverrideRequest(t *testing.
 	}
 }
 
+func TestFixedAWSCreateIntentFingerprintSeparatesSSMTransport(t *testing.T) {
+	cfg := BaseConfig()
+	cfg.Provider = "aws"
+	req := FixedAWSCreateIntentRequest{AccountID: "123456789012", RequestedSlug: "transport-proof", SSHPublicKey: "ssh-ed25519 AAAAtransportProof"}
+
+	direct, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AWSSSHTransport = AWSSSHTransportDirect
+	explicitDirect, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil || explicitDirect != direct {
+		t.Fatalf("explicit direct fingerprint=%s implicit=%s err=%v", explicitDirect, direct, err)
+	}
+	cfg.AWSSSHTransport = AWSSSHTransportSSM
+	ssm, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil || ssm == direct {
+		t.Fatalf("SSM fingerprint=%s direct=%s err=%v", ssm, direct, err)
+	}
+}
+
+func TestFixedAWSCreateIntentSSMIgnoresDirectSSHCIDRs(t *testing.T) {
+	cfg := BaseConfig()
+	cfg.Provider = "aws"
+	cfg.AWSSSHTransport = AWSSSHTransportSSM
+	req := FixedAWSCreateIntentRequest{AccountID: "123456789012", RequestedSlug: "ssm-cidr-free", SSHPublicKey: "ssh-ed25519 AAAAssmCIDRFree"}
+
+	withoutCIDRs, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AWSSSHCIDRsPinned = true
+	cfg.AWSSSHCIDRs = []string{"198.51.100.7/32"}
+	withCIDRs, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil || withCIDRs != withoutCIDRs {
+		t.Fatalf("SSM fingerprint with direct CIDRs=%s without=%s err=%v", withCIDRs, withoutCIDRs, err)
+	}
+}
+
 func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	included := map[string]bool{}
 	collectFixedAWSConfigFields(reflect.TypeOf(fixedAWSCreateIntent{}), included)

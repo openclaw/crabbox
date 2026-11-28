@@ -16,6 +16,71 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestAWSSSHTransportValidation(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  string
+		fail  bool
+	}{
+		{value: "", want: core.AWSSSHTransportDirect},
+		{value: " DIRECT ", want: core.AWSSSHTransportDirect},
+		{value: "SSM", want: core.AWSSSHTransportSSM},
+		{value: "custom", fail: true},
+	} {
+		cfg := core.Config{AWSSSHTransport: test.value}
+		err := (Provider{}).ApplyFlags(&cfg, nil, nil)
+		if test.fail {
+			if err == nil {
+				t.Fatalf("transport %q accepted", test.value)
+			}
+			continue
+		}
+		if err != nil || cfg.AWSSSHTransport != test.want {
+			t.Fatalf("transport %q normalized to %q, err=%v", test.value, cfg.AWSSSHTransport, err)
+		}
+	}
+}
+
+func TestAWSSSMTargetUsesDocumentedCLIArgv(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	awsPath := filepath.Join(dir, "aws")
+	if err := os.WriteFile(awsPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_PATH\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ARGS_PATH", argsPath)
+	region := "region with ' quote"
+	if output, err := exec.Command("sh", "-c", awsSSMProxyCommand(region)).CombinedOutput(); err != nil {
+		t.Fatalf("proxy command: %v: %s", err, output)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"ssm", "start-session",
+		"--target", "%h",
+		"--document-name", "AWS-StartSSHSession",
+		"--parameters", "portNumber=%p",
+		"--region", region,
+	}, "\n") + "\n"
+	if string(data) != want {
+		t.Fatalf("aws argv=%q want=%q", data, want)
+	}
+
+	server := core.Server{CloudID: "i-0123456789abcdef0"}
+	server.PublicNet.IPv4.IP = "203.0.113.10"
+	target := awsSSHTarget(core.Config{Provider: "aws", AWSSSHTransport: core.AWSSSHTransportSSM, AWSRegion: "eu-west-1"}, server, server.PublicNet.IPv4.IP)
+	if target.Host != server.CloudID || !target.NoControlMaster || !strings.Contains(target.ProxyCommand, "AWS-StartSSHSession") || strings.Contains(target.ProxyCommand, server.PublicNet.IPv4.IP) {
+		t.Fatalf("SSM target=%+v", target)
+	}
+	direct := awsSSHTarget(core.Config{Provider: "aws", AWSSSHTransport: core.AWSSSHTransportDirect}, server, server.PublicNet.IPv4.IP)
+	if direct.Host != server.PublicNet.IPv4.IP || direct.ProxyCommand != "" {
+		t.Fatalf("direct target=%+v", direct)
+	}
+}
+
 func TestProviderAdvertisesRunSessionContract(t *testing.T) {
 	spec := (Provider{}).Spec()
 	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCleanup, core.FeatureRunSession} {

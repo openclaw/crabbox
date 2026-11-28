@@ -52,17 +52,55 @@ var sshHostKeyVerificationPrefixes = func() [len(sshHostKeyVerificationDiagnosti
 
 // Retain only matching state, never stderr bytes. Matching survives arbitrary
 // write boundaries and output volume without weakening bounded-buffer semantics.
+type sshReadinessPatternState struct {
+	fragment []byte
+	prefixes []int
+	matched  int
+	err      error
+}
+
+type sshReadinessTerminalError struct{ message string }
+
+func (e *sshReadinessTerminalError) Error() string { return e.message }
+
 type sshReadinessDiagnostic struct {
 	mu       sync.Mutex
 	matched  int
 	rejected bool
+	patterns []sshReadinessPatternState
+}
+
+func newSSHReadinessDiagnostic(target SSHTarget) *sshReadinessDiagnostic {
+	diagnostic := &sshReadinessDiagnostic{}
+	for _, pattern := range target.ReadinessErrorPatterns {
+		if pattern.Fragment == "" || pattern.Message == "" {
+			continue
+		}
+		fragment := []byte(pattern.Fragment)
+		prefixes := make([]int, len(fragment))
+		for i, matched := 1, 0; i < len(fragment); i++ {
+			for matched > 0 && fragment[i] != fragment[matched] {
+				matched = prefixes[matched-1]
+			}
+			if fragment[i] == fragment[matched] {
+				matched++
+			}
+			prefixes[i] = matched
+		}
+		diagnostic.patterns = append(diagnostic.patterns, sshReadinessPatternState{
+			fragment: fragment,
+			prefixes: prefixes,
+			err:      &sshReadinessTerminalError{message: pattern.Message},
+		})
+	}
+	return diagnostic
 }
 
 func (d *sshReadinessDiagnostic) Write(data []byte) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.rejected {
-		for _, b := range data {
+	for _, b := range data {
+		if !d.rejected {
 			for d.matched > 0 && b != sshHostKeyVerificationDiagnostic[d.matched] {
 				d.matched = sshHostKeyVerificationPrefixes[d.matched-1]
 			}
@@ -71,7 +109,18 @@ func (d *sshReadinessDiagnostic) Write(data []byte) (int, error) {
 			}
 			if d.matched == len(sshHostKeyVerificationDiagnostic) {
 				d.rejected = true
-				break
+			}
+		}
+		for i := range d.patterns {
+			pattern := &d.patterns[i]
+			if pattern.err == nil || pattern.matched == len(pattern.fragment) {
+				continue
+			}
+			for pattern.matched > 0 && b != pattern.fragment[pattern.matched] {
+				pattern.matched = pattern.prefixes[pattern.matched-1]
+			}
+			if b == pattern.fragment[pattern.matched] {
+				pattern.matched++
 			}
 		}
 	}
@@ -84,9 +133,20 @@ func (d *sshReadinessDiagnostic) hostKeyRejected() bool {
 	return d.rejected
 }
 
+func (d *sshReadinessDiagnostic) terminalError() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, pattern := range d.patterns {
+		if pattern.matched == len(pattern.fragment) {
+			return pattern.err
+		}
+	}
+	return nil
+}
+
 func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connectTimeout, attempts string) error {
-	var diagnostic sshReadinessDiagnostic
-	var stderr io.Writer = &diagnostic
+	diagnostic := newSSHReadinessDiagnostic(target)
+	var stderr io.Writer = diagnostic
 	if usesServeRelay(target) && os.Getenv("CRABBOX_SERVE_RELAY_DEBUG") == "1" {
 		stderr = io.MultiWriter(stderr, &serveRelayDiagnosticForwarder{out: os.Stderr})
 	}
@@ -94,7 +154,7 @@ func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connect
 	if err == nil {
 		recordCreationObservation(ctx, "ssh_authenticated")
 	}
-	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
+	return sshReadinessProbeError(ctx, err, diagnostic)
 }
 
 func canWaitForLinuxReadiness(target SSHTarget) bool {
@@ -138,25 +198,31 @@ func waitForLinuxReadiness(ctx context.Context, target SSHTarget, profile sshRea
 
 func runWSLReadinessTransport(ctx context.Context, target SSHTarget, command, connectTimeout, attempts string) error {
 	transport := sshTransportPreparation{command: command}
-	var diagnostic sshReadinessDiagnostic
-	_, err := transport.runOnce(ctx, target, connectTimeout, attempts, io.Discard, &diagnostic, false)
+	diagnostic := newSSHReadinessDiagnostic(target)
+	_, err := transport.runOnce(ctx, target, connectTimeout, attempts, io.Discard, diagnostic, false)
 	if err == nil {
 		err = context.Cause(ctx)
 	}
-	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
+	return sshReadinessProbeError(ctx, err, diagnostic)
 }
 
-func sshReadinessProbeError(ctx context.Context, err error, hostKeyRejected bool) error {
-	// A host-key rejection cannot recover while waiting for guest bootstrap.
-	// Retain the exit cause, but never expose captured remote stderr or key data.
-	if ctx.Err() == nil && exitCode(err) == 255 && hostKeyRejected {
+func sshReadinessProbeError(ctx context.Context, err error, diagnostic *sshReadinessDiagnostic) error {
+	// Terminal diagnostics are matched while streaming and retain no stderr bytes.
+	// Retain the exit cause without exposing remote output or key data.
+	if ctx.Err() == nil && exitCode(err) == 255 && diagnostic.hostKeyRejected() {
 		return errors.Join(errSSHHostKeyVerification, err)
+	}
+	if ctx.Err() == nil && err != nil {
+		if terminalErr := diagnostic.terminalError(); terminalErr != nil {
+			return errors.Join(terminalErr, err)
+		}
 	}
 	return err
 }
 
 func sshReadinessError(err error, phase string) error {
-	if errors.Is(err, errSSHHostKeyVerification) {
+	var terminalErr *sshReadinessTerminalError
+	if errors.Is(err, errSSHHostKeyVerification) || errors.As(err, &terminalErr) {
 		return fmt.Errorf("%s: %w", phase, err)
 	}
 	return workspaceOwnerReadinessError(err, phase)

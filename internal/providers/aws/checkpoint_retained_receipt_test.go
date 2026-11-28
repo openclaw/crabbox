@@ -3,11 +3,14 @@ package aws
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,8 +38,19 @@ func TestCheckpointRetirementReplaysAWSRetainedReceipt(t *testing.T) {
 	}
 }
 
+func TestCheckpointAbandonReplaysAWSRetainedReceipt(t *testing.T) {
+	for _, tc := range []checkpointReceiptCase{
+		{name: "legacy fixed retained receipt", abandon: true},
+		{name: "changed fixed generation", abandon: true, mutate: func(c *core.LeaseClaim) { c.ClaimedAt = "changed" }, wantError: "exact source receipt"},
+		{name: "wrong fixed account", abandon: true, account: "999999999999", wantError: "source account changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runCheckpointRetirementReceipt(t, tc) })
+	}
+}
+
 type checkpointReceiptCase struct {
 	name, account, region, wantError string
+	abandon                          bool
 	mutate                           func(*core.LeaseClaim)
 	getErr                           error
 }
@@ -74,6 +88,9 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 		SourceScope: source.ProviderScope, SourceRevision: source.Revision, SourceClaimedAt: source.ClaimedAt,
 		SourceIntent: source.FixedCreateIntent.Fingerprint,
 	}
+	if tc.abandon {
+		capture.SourceDisposition = "abandon"
+	}
 	if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
 		claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: checkpointID, Revision: source.Revision}
 		return persist()
@@ -89,6 +106,14 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 		"id": checkpointID, "kind": "aws-ami", "provider": "aws", "leaseId": lease.LeaseID,
 		"createdAt": stamp, "lastUsedAt": stamp, "capture": capture, "repo": map[string]string{"root": repo},
 		"native": map[string]any{"provider": "aws", "kind": "aws-ami", "imageId": "ami-captured", "region": "us-east-1", "accountId": "123456789012", "direct": true, "strategy": "image", "noReboot": true},
+	}
+	evidence := filepath.Join(repo, "evidence.txt")
+	if tc.abandon {
+		content := []byte("prepare native checkpoint source: fixture failure\n")
+		if err := os.WriteFile(evidence, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		record["native"] = map[string]any{"provider": "aws", "kind": "aws-ami", "direct": true, "strategy": "image", "metadata": map[string]string{"crabbox_pre_submit_failure_sha256": fmt.Sprintf("%x", sha256.Sum256(content))}}
 	}
 	path := filepath.Join(dirs.StateHome, "crabbox", "checkpoints", checkpointID, "checkpoint.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -133,14 +158,43 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 	}
 	for replay := 0; replay < 2; replay++ {
 		var output bytes.Buffer
-		err := (core.App{Stdout: &output, Stderr: &output}).Run(t.Context(), []string{"checkpoint", "create", "--provider", "aws", "--id", lease.LeaseID, "--checkpoint-id", checkpointID, "--retire-source", "--mode", "native", "--wait=false", "--json"})
+		args := []string{"checkpoint", "create", "--provider", "aws", "--id", lease.LeaseID, "--checkpoint-id", checkpointID, "--retire-source", "--mode", "native", "--wait=false", "--json"}
+		if tc.abandon {
+			args = []string{"checkpoint", "abandon", checkpointID, "--provider", "aws", "--id", lease.LeaseID, "--expected-provider-resource-id", source.CloudID, "--pre-submit-error-file", evidence, "--json"}
+		}
+		err := (core.App{Stdout: &output, Stderr: &output}).Run(t.Context(), args)
 		if tc.wantError != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("replay error=%v, want %q", err, tc.wantError)
 			}
 			after, readErr := os.ReadFile(path)
-			if readErr != nil || !bytes.Equal(data, after) {
+			if readErr != nil || (!tc.abandon && !bytes.Equal(data, after)) {
 				t.Fatal("refused replay changed the checkpoint journal")
+			}
+			if tc.abandon {
+				var beforeRecord, afterRecord map[string]any
+				if err := json.Unmarshal(data, &beforeRecord); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(after, &afterRecord); err != nil {
+					t.Fatal(err)
+				}
+				// Scope restoration may precede a current-account rejection;
+				// nothing else in the retained journal may change.
+				for _, r := range []map[string]any{beforeRecord, afterRecord} {
+					native := r["native"].(map[string]any)
+					delete(native, "accountId")
+					delete(native, "region")
+				}
+				// Canonical serialization can add defaults; capture and original
+				// image authority must remain byte-equivalent semantically.
+				if !reflect.DeepEqual(beforeRecord["capture"], afterRecord["capture"]) {
+					t.Fatal("refused replay changed capture authority")
+				}
+				n := afterRecord["native"].(map[string]any)
+				if n["imageId"] != nil && n["imageId"] != "" {
+					t.Fatal("invented image authority")
+				}
 			}
 			continue
 		}
@@ -150,12 +204,16 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 		var got struct {
 			Capture core.NativeCheckpointCapture `json:"capture"`
 		}
-		if err := json.Unmarshal(output.Bytes(), &got); err != nil || got.Capture.Phase != "retired" {
+		wantPhase := "retired"
+		if tc.abandon {
+			wantPhase = "abandoned"
+		}
+		if err := json.Unmarshal(output.Bytes(), &got); err != nil || got.Capture.Phase != wantPhase {
 			t.Fatalf("retirement did not finish: %v %s", err, output.String())
 		}
 	}
 	after, err := os.ReadFile(claimPath)
-	if err != nil || !bytes.Equal(before, after) || reloaded.createCalls != 0 || len(reloaded.deletedInstances) != 0 || len(reloaded.deletedKeys) != 0 || len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
+	if err != nil || !bytes.Equal(before, after) || reloaded.createCalls != 0 || len(reloaded.deletedInstances) != 0 || len(reloaded.deletedKeys) != 0 || len(reloaded.terminatedSSM) != 0 || len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
 		t.Fatal("retirement replay changed the receipt or repeated provider effects")
 	}
 }
