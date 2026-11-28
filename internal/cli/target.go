@@ -220,6 +220,9 @@ func validateProviderTarget(cfg Config) error {
 		!awsInstanceTypeSupportsNestedVirtualization(cfg.ServerType) {
 		return Exit(2, "provider=aws target=windows windows.mode=wsl2 requires an instance type with AWS nested virtualization; %s is not supported. Use --type m8i.4xlarge or omit --type and choose class=tiny|small|standard|fast|large|beast", cfg.ServerType)
 	}
+	if err := validateAWSNestedVirtualization(provider, cfg); err != nil {
+		return err
+	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
 		if cfg.HostID == "" && cfg.AWSMacHostID == "" && cfg.Coordinator == "" {
 			return Exit(2, "provider=aws target=macos requires CRABBOX_HOST_ID, hostId, CRABBOX_AWS_MAC_HOST_ID, or aws.macHostId for an allocated host")
@@ -757,3 +760,38 @@ func NormalizeTargetOS(value string) string { return normalizeTargetOS(value) }
 
 // NormalizeWindowsMode canonicalizes a mode without changing configuration.
 func NormalizeWindowsMode(value string) string { return normalizeWindowsMode(value) }
+
+// validateAWSNestedVirtualization admits aws.nestedVirtualization only where
+// the lease can expose /dev/kvm: AWS Linux amd64 on a supported virtual family
+// or a bare-metal size. Windows WSL2 already enables nested virtualization.
+func validateAWSNestedVirtualization(provider Provider, cfg Config) error {
+	if !cfg.AWSNestedVirtualization {
+		return nil
+	}
+	if provider.Spec().Name != "aws" {
+		return Exit(2, "aws.nestedVirtualization (--aws-nested-virtualization, CRABBOX_AWS_NESTED_VIRTUALIZATION) requires provider=aws; provider=%s is not supported", provider.Spec().Name)
+	}
+	switch normalizeTargetOS(cfg.TargetOS) {
+	case targetLinux:
+	case targetWindows:
+		if cfg.WindowsMode == windowsModeWSL2 {
+			return nil
+		}
+		return Exit(2, "aws.nestedVirtualization requires target=linux; target=windows windows.mode=normal is not supported (windows.mode=wsl2 always enables it)")
+	default:
+		return Exit(2, "aws.nestedVirtualization requires target=linux; target=%s is not supported", cfg.TargetOS)
+	}
+	if effectiveArchitectureForConfig(cfg) != ArchitectureAMD64 {
+		return Exit(2, "aws.nestedVirtualization requires architecture=amd64; AWS supports nested virtualization only on Intel instance families")
+	}
+	if cfg.ServerTypeExplicit {
+		if !AWSInstanceTypeProvidesLinuxKVM(cfg.ServerType) {
+			return Exit(2, "aws.nestedVirtualization requires an instance type with AWS nested virtualization (%s) or a *.metal* size; %s is not supported. Use --type c8i.2xlarge or omit --type and choose class=tiny|small|standard|fast|large|beast", awsNestedVirtualizationFamilyList(), cfg.ServerType)
+		}
+		return nil
+	}
+	if !IsCanonicalProviderClass(cfg.Class) && !AWSInstanceTypeProvidesLinuxKVM(cfg.Class) {
+		return Exit(2, "aws.nestedVirtualization requires class=tiny|small|standard|fast|large|beast or an instance type with AWS nested virtualization (%s); class=%s is not supported", awsNestedVirtualizationFamilyList(), cfg.Class)
+	}
+	return nil
+}
