@@ -19,8 +19,8 @@ import (
 )
 
 // Local seeds are complete histories, never depth-limited approximations. Zero
-// maxBytes selects the hard bound; a positive value may only lower it. Both raw
-// object bytes and the finished bundle must fit independently.
+// maxBytes selects the default bundle budget; a positive value may only lower it.
+// Allow eight bundle budgets of expanded history, but not a larger single object.
 const (
 	localGitSeedMaxBytes    = int64(512 << 20)
 	localGitSeedMaxMetadata = 16 << 20
@@ -256,6 +256,18 @@ type localGitSeedObject struct {
 	kind string
 	size int64
 }
+
+func (obj localGitSeedObject) account(total *int64, historyLimit int64) error {
+	if obj.size > localGitSeedMaxBytes {
+		return fmt.Errorf("local Git seed single object byte limit exceeded (object_bytes=%d limit=%d)", obj.size, localGitSeedMaxBytes)
+	}
+	if obj.size > historyLimit-*total {
+		return fmt.Errorf("local Git seed uncompressed object byte limit exceeded (previous_bytes=%d object_bytes=%d limit=%d)", *total, obj.size, historyLimit)
+	}
+	*total += obj.size
+	return nil
+}
+
 type localGitSeedReader struct {
 	cmd       *exec.Cmd
 	in        io.WriteCloser
@@ -358,6 +370,7 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	if maxBytes == 0 || maxBytes > localGitSeedMaxBytes {
 		maxBytes = localGitSeedMaxBytes
 	}
+	historyLimit := 8 * maxBytes
 	format, err := localGitSeedSourceOutput(ctx, root, "rev-parse", "--show-object-format")
 	if err != nil {
 		return artifact, err
@@ -458,14 +471,13 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 		if readErr != nil {
 			return readErr
 		}
-		if obj.size > maxBytes-objectBytes {
-			return fmt.Errorf("local Git seed uncompressed object byte limit exceeded")
+		if err := obj.account(&objectBytes, historyLimit); err != nil {
+			return err
 		}
 		if obj.kind != "commit" && obj.kind != "tree" && obj.kind != "blob" {
 			return fmt.Errorf("unexpected object type in local Git history")
 		}
 		selected[oid] = obj
-		objectBytes += obj.size
 		if obj.kind == "commit" {
 			commits[oid] = true
 		}
@@ -476,7 +488,10 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 		// missing history, and cannot explain a parser or consumer refusal.
 		var writeErr *localGitSeedWriteError
 		var commandErr *exec.ExitError
-		if errors.As(err, &commandErr) && !errors.As(err, &writeErr) && ctx.Err() == nil {
+		if errors.As(err, &writeErr) && writeErr.cause != nil {
+			// The parser or object consumer refused a record, not the ID stream's byte budget.
+			err = writeErr.cause
+		} else if errors.As(err, &commandErr) && writeErr == nil && ctx.Err() == nil {
 			if shallow, shallowErr := localGitSeedSourceOutput(ctx, root, "rev-parse", "--is-shallow-repository"); shallowErr == nil && shallow == "true" {
 				return artifact, fmt.Errorf("enumerate complete required local Git objects: source repository is shallow; run git fetch --unshallow, or set sync.gitSeed=false and sync.gitSeedSource=origin for file-only sync: %w", err)
 			}
@@ -535,11 +550,10 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 			if _, exists := selected[tagOID]; exists {
 				continue
 			}
-			if obj.size > maxBytes-objectBytes {
-				return artifact, fmt.Errorf("local Git seed uncompressed object byte limit exceeded")
+			if err := obj.account(&objectBytes, historyLimit); err != nil {
+				return artifact, err
 			}
 			selected[tagOID] = obj
-			objectBytes += obj.size
 		}
 		if i, exists := refIndexes[name]; exists {
 			// A tag-valued base pins its peeled commit while retaining the exact
@@ -577,13 +591,13 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	}
 	header.WriteByte('\n')
 	if _, err = io.WriteString(writer, header.String()); err != nil {
-		return artifact, err
+		return artifact, fmt.Errorf("write local Git seed bundle header: %w", err)
 	}
 	packOffset := int64(header.Len())
-	pack := localGitSeedCommand(ctx, readerRoot, false, "pack-objects", "--stdout", "--no-reuse-delta", "--no-reuse-object", "--window=0", "--threads=1")
+	pack := localGitSeedCommand(ctx, readerRoot, false, "pack-objects", "--stdout", "--no-reuse-delta", "--no-reuse-object", "--window=10", "--window-memory=32m", "--threads=1")
 	pack.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
 	if err = runLocalGitSeedCommand(ctx, pack, writer); err != nil {
-		return artifact, fmt.Errorf("pack complete local Git objects: %w", err)
+		return artifact, fmt.Errorf("pack complete local Git objects into seed bundle: %w", err)
 	}
 	stat, err := bundle.Stat()
 	if err != nil {

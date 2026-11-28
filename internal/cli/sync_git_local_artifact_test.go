@@ -521,6 +521,9 @@ func TestLocalGitSeedArtifactShallowMarkerDoesNotMislabelByteLimit(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "uncompressed object byte limit exceeded") {
 		t.Fatalf("missing byte-limit cause: %v", err)
 	}
+	if !strings.Contains(err.Error(), "previous_bytes=0 object_bytes=") || !strings.Contains(err.Error(), "limit=64)") || strings.Contains(err.Error(), "written=") {
+		t.Fatalf("expected only the expanded history budget: %v", err)
+	}
 	if strings.Contains(err.Error(), "source repository is shallow") || strings.Contains(err.Error(), "unshallow") {
 		t.Fatalf("byte-limit refusal incorrectly advises fetching history: %v", err)
 	}
@@ -553,6 +556,40 @@ func TestLocalGitSeedArtifactBoundsAndExactSelection(t *testing.T) {
 	if artifact, err := prepareLocalGitSeedArtifact(ctx, root, localGitSeedSelection{Head: head, Tree: tree}, 0); err == nil {
 		_ = artifact.cleanup()
 		t.Fatal("canceled preparation succeeded")
+	}
+}
+
+func TestLocalGitSeedArtifactDeltaCompressesHistoryWithinBundleBudget(t *testing.T) {
+	root := localSeedTestRepo(t, "sha1")
+	// Revisions of an otherwise incompressible blob fit together only as deltas.
+	data := make([]byte, 32<<10)
+	for i := 0; i < len(data); i += sha256.Size {
+		h := sha256.Sum256([]byte(strconv.Itoa(i)))
+		copy(data[i:], h[:])
+	}
+	var head, tree string
+	for i := range 4 {
+		data[0] = byte(i)
+		blob := localSeedTestGit(t, root, string(data), "hash-object", "-w", "--stdin")
+		tree = localSeedTestGit(t, root, "100644 blob "+blob+"\tfixture.bin\n", "mktree")
+		args := []string{"commit-tree", tree, "-m", "revision"}
+		if head != "" {
+			args = append(args, "-p", head)
+		}
+		head = localSeedTestGit(t, root, "", args...)
+	}
+	const budget = 48 << 10
+	artifact, err := prepareLocalGitSeedArtifact(t.Context(), root, localGitSeedSelection{Head: head, Tree: tree}, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.cleanup()
+	if artifact.ObjectBytes <= budget || artifact.PackedBytes > budget {
+		t.Fatalf("object bytes=%d, bundle bytes=%d, budget=%d", artifact.ObjectBytes, artifact.PackedBytes, budget)
+	}
+	imported := localSeedTestImport(t, artifact)
+	if count := localSeedTestGit(t, imported, "", "rev-list", "--count", head); count != "4" {
+		t.Fatalf("imported %s commits, want 4", count)
 	}
 }
 
