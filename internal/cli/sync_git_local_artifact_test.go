@@ -509,6 +509,30 @@ func TestLocalGitSeedArtifactNamesShallowSourceCause(t *testing.T) {
 	}
 }
 
+func TestLocalGitSeedSizeLimitRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		size   int64
+		counts string
+	}{
+		{"single object", localGitSeedMaxBytes + 1, "object_bytes=536870913 limit=536870912"},
+		{"history", 8, "previous_bytes=3 object_bytes=8 limit=10"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			total := int64(3)
+			err := (localGitSeedObject{size: tc.size}).account(&total, 10)
+			if err == nil {
+				t.Fatal("expected a size-limit refusal")
+			}
+			for _, want := range []string{tc.counts, "--git-seed-source origin for origin seeding", "sync.gitSeed=false with --git-seed-source origin for file-only sync"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("missing %q in %q", want, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLocalGitSeedArtifactShallowMarkerDoesNotMislabelByteLimit(t *testing.T) {
 	root := localSeedTestRepo(t, "sha1")
 	parent, _, _ := localSeedTestCommit(t, root, "parent")

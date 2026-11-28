@@ -258,11 +258,12 @@ type localGitSeedObject struct {
 }
 
 func (obj localGitSeedObject) account(total *int64, historyLimit int64) error {
+	const recovery = "; use --git-seed-source origin for origin seeding, or set sync.gitSeed=false with --git-seed-source origin for file-only sync"
 	if obj.size > localGitSeedMaxBytes {
-		return fmt.Errorf("local Git seed single object byte limit exceeded (object_bytes=%d limit=%d)", obj.size, localGitSeedMaxBytes)
+		return fmt.Errorf("local Git seed single object byte limit exceeded (object_bytes=%d limit=%d)"+recovery, obj.size, localGitSeedMaxBytes)
 	}
 	if obj.size > historyLimit-*total {
-		return fmt.Errorf("local Git seed uncompressed object byte limit exceeded (previous_bytes=%d object_bytes=%d limit=%d)", *total, obj.size, historyLimit)
+		return fmt.Errorf("local Git seed uncompressed object byte limit exceeded (previous_bytes=%d object_bytes=%d limit=%d)"+recovery, *total, obj.size, historyLimit)
 	}
 	*total += obj.size
 	return nil
