@@ -23,7 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const tenkiProductionAPI = "https://api.tenki.cloud"
+const tenkiProductionAPI = "https://api.luxor.ai"
 const tenkiSSHAuthorityService = "/tenki.sandbox.v1.SSHGatewayClientService/"
 
 var tenkiGatewayIdentity = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -40,45 +40,44 @@ func tenkiNativeCredentialContext(cfg core.Config) (tenkiCredentialContext, erro
 		Token    string `yaml:"auth_token"`
 		Endpoint string `yaml:"api_endpoint"`
 	}
-	name := os.Getenv("TENKI_CONFIG_FILE")
+	name := tenkiNativeEnv("CONFIG_FILE")
 	if name == "" {
 		name = "config.yaml"
 	}
 	if name == "." || name == ".." || strings.ContainsAny(name, "/\\\r\n\x00") {
-		return tenkiCredentialContext{}, core.Exit(2, "TENKI_CONFIG_FILE must be a filename inside the Tenki config directory")
+		return tenkiCredentialContext{}, core.Exit(2, "LUXORAI_CONFIG_FILE must be a filename inside the Luxor config directory")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return tenkiCredentialContext{}, fmt.Errorf("resolve Tenki config directory: %w", err)
+		return tenkiCredentialContext{}, fmt.Errorf("resolve Luxor config directory: %w", err)
 	}
-	file, err := os.Open(filepath.Join(home, ".config", "tenki", name))
+	file, err := os.Open(filepath.Join(tenkiNativeConfigDir(filepath.Join(home, ".config")), name))
 	if err == nil {
 		defer file.Close()
 		data, readErr := io.ReadAll(io.LimitReader(file, 1<<20+1))
 		if readErr != nil || len(data) > 1<<20 || yaml.Unmarshal(data, &stored) != nil {
-			return tenkiCredentialContext{}, core.Exit(2, "cannot decode Tenki credential config")
+			return tenkiCredentialContext{}, core.Exit(2, "cannot decode Luxor credential config")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return tenkiCredentialContext{}, core.Exit(2, "cannot read Tenki credential config")
+		return tenkiCredentialContext{}, core.Exit(2, "cannot read Luxor credential config")
 	}
 
 	key := stored.Token
-	auth, authSet := os.LookupEnv("TENKI_AUTH_TOKEN")
-	if authSet {
-		key = auth
-	}
-	if !authSet || auth == "" {
-		if apiKey := strings.TrimSpace(os.Getenv("TENKI_API_KEY")); apiKey != "" {
-			key = apiKey
+	for _, name := range []string{"LUXORAI_AUTH_TOKEN", "LUXORAI_API_KEY", "TENKI_AUTH_TOKEN", "TENKI_API_KEY"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			key = value
+			break
 		}
 	}
 	key = strings.TrimSpace(key)
-	if !strings.HasPrefix(key, "tk_") || strings.ContainsAny(key, " \t\r\n") {
-		return tenkiCredentialContext{}, core.Exit(3, "Tenki SSH authority requires a workspace API key; run tenki onboard or set TENKI_API_KEY")
+	if !tenkiAPIKey(key) || strings.ContainsAny(key, " \t\r\n") {
+		return tenkiCredentialContext{}, core.Exit(3, "Luxor SSH authority requires a workspace API key; run luxor onboard or set LUXORAI_API_KEY")
 	}
 	endpoint := stored.Endpoint
-	if value, set := os.LookupEnv("TENKI_API_ENDPOINT"); set {
-		endpoint = value
+	for _, name := range []string{"TENKI_API_ENDPOINT", "LUXORAI_API_ENDPOINT"} {
+		if value := os.Getenv(name); strings.TrimSpace(value) != "" {
+			endpoint = value
+		}
 	}
 	if cfg.Tenki.Endpoint != "" {
 		endpoint = cfg.Tenki.Endpoint
@@ -88,9 +87,47 @@ func tenkiNativeCredentialContext(cfg core.Config) (tenkiCredentialContext, erro
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return tenkiCredentialContext{}, core.Exit(2, "Tenki SSH authority requires an HTTPS API endpoint without userinfo, query, or fragment")
+		return tenkiCredentialContext{}, core.Exit(2, "Luxor SSH authority requires an HTTPS API endpoint without userinfo, query, or fragment")
 	}
 	return tenkiCredentialContext{key: key, endpoint: parsed}, nil
+}
+
+// tenkiNativeEnv matches the CLI's config.Getenv: LUXORAI_<name> when
+// non-blank, otherwise TENKI_<name>.
+func tenkiNativeEnv(name string) string {
+	if value := os.Getenv("LUXORAI_" + name); strings.TrimSpace(value) != "" {
+		return value
+	}
+	return os.Getenv("TENKI_" + name)
+}
+
+func tenkiAPIKey(key string) bool {
+	return strings.HasPrefix(key, "lx_") || strings.HasPrefix(key, "tk_")
+}
+
+// tenkiNativeConfigDir resolves the directory the CLI would read without
+// performing its one-time ~/.config/tenki -> ~/.config/luxor migration. A
+// pending migration copies the legacy directory, so reading it is equivalent.
+func tenkiNativeConfigDir(configRoot string) string {
+	dir := filepath.Join(configRoot, "luxor")
+	legacy := filepath.Join(configRoot, "tenki")
+	if !tenkiIsDir(legacy) || tenkiPathExists(filepath.Join(dir, ".migrated-from-tenki")) {
+		return dir
+	}
+	if !tenkiIsDir(dir) || (!tenkiPathExists(filepath.Join(dir, "config.yaml")) && tenkiPathExists(filepath.Join(legacy, "config.yaml"))) {
+		return legacy
+	}
+	return dir
+}
+
+func tenkiIsDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func tenkiPathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 func tenkiCommandGateway(output tenkiSSHCommandOutput) (*url.URL, error) {
