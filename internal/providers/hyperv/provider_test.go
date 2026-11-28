@@ -29,20 +29,22 @@ func TestMain(m *testing.M) {
 func TestHyperVConfigShowSection(t *testing.T) {
 	for _, selected := range []string{"", "hyperv", "multipass"} {
 		for _, tc := range []struct {
-			name         string
-			raw          string
-			cpus, memory int
-			initPassword bool
+			name                 string
+			raw                  string
+			cpus, memory         int
+			initPassword         bool
+			nestedVirtualization bool
 		}{
 			{name: "empty"},
 			{name: "raw", raw: " padded ", cpus: -2, memory: -7},
-			{name: "configured", raw: "configured", cpus: 4, memory: 8192, initPassword: true},
+			{name: "configured", raw: "configured", cpus: 4, memory: 8192, initPassword: true, nestedVirtualization: true},
 		} {
 			t.Run(selected+"/"+tc.name, func(t *testing.T) {
 				cfg := core.Config{Provider: selected, HyperV: core.HyperVConfig{
 					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw,
 					CPUs: tc.cpus, Memory: tc.memory, InitPassword: tc.initPassword,
-					GuestPassword: "synthetic-omission-marker",
+					NestedVirtualization: tc.nestedVirtualization,
+					GuestPassword:        "synthetic-omission-marker",
 				}}
 				before := cfg
 				section := (Provider{}).ConfigShowSection(cfg)
@@ -52,9 +54,9 @@ func TestHyperVConfigShowSection(t *testing.T) {
 					got[field.JSONName] = field.JSONValue
 					text = append(text, field.TextName+"="+field.TextValue)
 				}
-				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
-				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
-				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 7 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
+				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword, "nestedVirtualization": tc.nestedVirtualization}
+				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t nested_virtualization=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword, tc.nestedVirtualization)
+				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != len(want) || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
 					t.Fatal("unexpected Hyper-V projection roster, types, or values")
 				}
 				encoded, err := json.Marshal(section)

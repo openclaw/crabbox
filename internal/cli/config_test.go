@@ -19404,7 +19404,7 @@ func TestSuperserveBindingListStorageAndFacts(t *testing.T) {
 }
 
 func TestMXCBindingDefaultsAndFile(t *testing.T) {
-	wantDefaults := MXCConfig{CLIPath: "wxc-exec.exe", Version: "0.6.0-alpha", Containment: "processcontainer", Network: "block"}
+	wantDefaults := MXCConfig{CLIPath: "wxc-exec.exe", Version: "1.0.0", Containment: "processcontainer", Network: "block"}
 	if !reflect.DeepEqual(baseConfig().MXC, wantDefaults) {
 		t.Fatalf("defaults=%#v", baseConfig().MXC)
 	}

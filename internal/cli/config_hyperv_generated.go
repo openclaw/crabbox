@@ -7,14 +7,15 @@ import (
 )
 
 type fileHyperVConfig struct {
-	Image         string `yaml:"image,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
-	CPUs          int    `yaml:"cpus,omitempty"`
-	Memory        int    `yaml:"memory,omitempty"`
-	Switch        string `yaml:"switch,omitempty"`
-	GuestPassword string `yaml:"guestPassword,omitempty"`
-	InitPassword  *bool  `yaml:"initPassword,omitempty"`
+	Image                string `yaml:"image,omitempty"`
+	User                 string `yaml:"user,omitempty"`
+	WorkRoot             string `yaml:"workRoot,omitempty"`
+	CPUs                 int    `yaml:"cpus,omitempty"`
+	Memory               int    `yaml:"memory,omitempty"`
+	Switch               string `yaml:"switch,omitempty"`
+	GuestPassword        string `yaml:"guestPassword,omitempty"`
+	InitPassword         *bool  `yaml:"initPassword,omitempty"`
+	NestedVirtualization *bool  `yaml:"nestedVirtualization,omitempty"`
 }
 
 const HyperVConfigDefaultUser string = "crabbox"
@@ -44,19 +45,20 @@ func (cfg *HyperVConfig) applyFile(file *fileHyperVConfig) (HyperVConfigApplied,
 
 func (cfg *HyperVConfig) applyEnv() (HyperVConfigApplied, error) {
 	var applied HyperVConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
 	return applied, err
 }
 
 // HyperVConfigFlagValues holds parsed values; only visited flags are applied.
 type HyperVConfigFlagValues struct {
-	Image        *string
-	User         *string
-	WorkRoot     *string
-	CPUs         *int
-	Memory       *int
-	Switch       *string
-	InitPassword *bool
+	Image                *string
+	User                 *string
+	WorkRoot             *string
+	CPUs                 *int
+	Memory               *int
+	Switch               *string
+	InitPassword         *bool
+	NestedVirtualization *bool
 }
 
 // RegisterHyperVConfigFlags registers mechanical bindings without selecting a provider.

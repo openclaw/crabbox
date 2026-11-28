@@ -201,7 +201,7 @@ Notes:
 text line and JSON section, even when another provider is selected. It preserves
 empty, zero and false values without resolving new defaults or invoking Hyper-V.
 The guest password and credential-presence information are not displayed;
-`initPassword` is only the configured boolean, not evidence of guest changes.
+`initPassword` and `nestedVirtualization` report configured values, not live VM state.
 
 ### Flags
 
@@ -214,6 +214,7 @@ The guest password and credential-presence information are not displayed;
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
 | `--hyperv-init-password` | `false` | Windows only: set the guest password at first boot via the lease disk |
+| `--hyperv-nested-virtualization` | `false` | Expose virtualization extensions to newly created Hyper-V VMs |
 
 Decoded negative CPU or memory values, including environment and explicit flag
 values, are rejected when creating a VM, before native commands or local lease
@@ -238,6 +239,7 @@ hyperv:
   memory: 8192
   switch: Default Switch
   initPassword: false
+  nestedVirtualization: false
 ```
 
 For Windows, keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted
@@ -255,6 +257,26 @@ user config, not repository config. There is no default guest password.
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
 | `CRABBOX_HYPERV_GUEST_PASSWORD` | Windows guest password for PowerShell Direct bootstrap |
 | `CRABBOX_HYPERV_INIT_PASSWORD` | Windows only: set the guest password at first boot (`true`/`false`) |
+| `CRABBOX_HYPERV_NESTED_VIRTUALIZATION` | Expose virtualization extensions to newly created VMs (`true`/`false`) |
+
+### Nested virtualization for WSL 2
+
+WSL 2 inside a Hyper-V Windows guest requires [nested virtualization](https://learn.microsoft.com/en-us/windows/wsl/troubleshooting).
+The host CPU, host Windows version and VM configuration version must meet
+[Microsoft's Hyper-V nesting requirements](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/enable-nested-virtualization).
+Use a Windows template with WSL 2 and the desired distro already set up; this
+option exposes the CPU extensions but does not install or configure WSL.
+
+From PowerShell on the Hyper-V host, with a template containing Ubuntu on WSL 2:
+
+```powershell
+crabbox run --provider hyperv --target windows --hyperv-nested-virtualization `
+  --hyperv-image 'C:\Images\windows-crabbox.vhdx' --no-sync -- wsl.exe -d Ubuntu -- uname -a
+```
+
+Crabbox sets and reads back the VM processor setting before the first boot. If
+either step fails, acquisition fails and Crabbox uses its normal failed-creation
+cleanup. The option does not reconfigure existing leases or change `--windows-mode`.
 
 ## Bootstrap contract
 

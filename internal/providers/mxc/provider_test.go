@@ -10,14 +10,14 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestExperimentalContainmentRequiresOptIn(t *testing.T) {
+func TestUnsupportedContainmentFailsClosed(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetWindows
 	cfg.WindowsMode = core.WindowsModeNormal
 	cfg.MXC.Containment = "windows_sandbox"
 	_, err := (Provider{}).Configure(cfg, core.Runtime{})
-	if err == nil || !strings.Contains(err.Error(), "--mxc-experimental") {
+	if err == nil || !strings.Contains(err.Error(), "--mxc-containment processcontainer") {
 		t.Fatalf("err=%v", err)
 	}
 }

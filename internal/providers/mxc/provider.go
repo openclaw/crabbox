@@ -37,10 +37,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=mxc supports native Windows mode only")
 	}
-	containment := strings.ToLower(strings.TrimSpace(cfg.MXC.Containment))
-	if containment != "process" && containment != "processcontainer" && !cfg.MXC.Experimental {
-		return nil, core.Exit(2, "MXC containment %q is experimental; pass --mxc-experimental to enable it", containment)
+	if err := validateConfig(cfg.MXC); err != nil {
+		return nil, err
 	}
-	cfg.MXC.Containment = containment
+	cfg.MXC.Version = core.MXCConfigDefaultVersion
+	cfg.MXC.Containment = strings.ToLower(defaultString(cfg.MXC.Containment, core.MXCConfigDefaultContainment))
 	return newBackend(p.Spec(), cfg, rt), nil
 }

@@ -21,7 +21,7 @@ type fileMXCConfig struct {
 }
 
 const MXCConfigDefaultCLIPath string = "wxc-exec.exe"
-const MXCConfigDefaultVersion string = "0.6.0-alpha"
+const MXCConfigDefaultVersion string = "1.0.0"
 const MXCConfigDefaultContainment string = "processcontainer"
 const MXCConfigDefaultNetwork string = "block"
 
