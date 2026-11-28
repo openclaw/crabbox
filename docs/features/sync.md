@@ -641,8 +641,9 @@ Shallow markers alone do not prevent seeding when the complete selected history
 is available locally.
 The combined full file payload and uncompressed Git objects count against ordinary
 sync size guardrails, even when the dirty delta is small. The existing allow-large
-override affects those soft limits only. Separate hard bounds limit each of the
-uncompressed object total and bundle to 512 MiB and selected objects to one million.
+override affects those soft limits only. Crabbox uses Git delta compression for similar
+revisions. Separate hard limits allow up to 4 GiB of uncompressed history, 512 MiB per object, 512 MiB per
+finished bundle, and one million selected objects.
 Object enumeration is streamed as exact object IDs followed by newlines, with at
 most one million records including duplicates and at most 41 million bytes for
 SHA-1 or 65 million bytes for SHA-256. Other control output, tag listings, and
