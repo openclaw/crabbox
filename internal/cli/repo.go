@@ -235,7 +235,9 @@ func gitCheckoutSparseEnabled(root string) bool {
 }
 
 func loadGitTrackedPaths(root string) ([]gitTrackedPath, error) {
-	trackedCmd := exec.Command("git", "ls-files", "-v", "--stage", "-z")
+	// Read the stored skip-worktree bits. Sparse discovery can clear them in
+	// memory when a symlink ancestor makes a missing file appear present.
+	trackedCmd := exec.Command("git", "-c", "core.sparseCheckout=false", "ls-files", "-v", "--stage", "-z")
 	trackedCmd.Dir = root
 	trackedCmd.Env = repositoryGitEnvironment()
 	tagged, err := trackedCmd.Output()
@@ -736,25 +738,8 @@ func gitTargetRequiresOverlayOnly(root, target string) (bool, error) {
 		paths.Write(name)
 		paths.WriteByte(0)
 	}
-	if paths.Len() == 0 {
-		return false, nil
-	}
-	cmd = exec.Command("git", "check-attr", "--source="+target, "-z", "--stdin", "filter")
-	cmd.Dir = root
-	cmd.Env = repositoryGitEnvironment()
-	cmd.Stdin = bytes.NewReader(paths.Bytes())
-	out, err = cmd.Output()
-	if err != nil {
-		return false, err
-	}
-	fields := bytes.Split(out, []byte{0})
-	for i := 2; i < len(fields); i += 3 {
-		value := string(fields[i])
-		if value != "" && value != "unspecified" && value != "unset" {
-			return true, nil
-		}
-	}
-	return false, nil
+	attribute, err := gitCheckTransformAttribute(root, target, paths.Bytes(), []string{"filter"})
+	return attribute != "", err
 }
 
 func warnCredentialBearingGitSeed(w io.Writer) {
@@ -956,6 +941,7 @@ func syncFingerprintPathsAndSize(ctx context.Context, h hash.Hash, root string, 
 
 type SyncManifest struct {
 	seededExtraFiles         []string
+	hasSymlinks              bool
 	hasSpecialFiles          bool
 	Files                    []string
 	Deleted                  []string
@@ -1155,6 +1141,7 @@ func projectSyncManifest(root string, excludes SyncExcludeRules, includes, paths
 		if info.Mode().IsRegular() && (info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || info.Mode().Perm() != 0o644 && info.Mode().Perm() != 0o755) {
 			manifest.seededExtraFiles = append(manifest.seededExtraFiles, rel)
 		}
+		manifest.hasSymlinks = manifest.hasSymlinks || info.Mode()&os.ModeSymlink != 0
 		manifest.hasSpecialFiles = manifest.hasSpecialFiles || (!info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0)
 		if protectedPattern != "" {
 			manifest.ProtectedTrackedExcludes = append(manifest.ProtectedTrackedExcludes, SyncProtectedTrackedExclude{

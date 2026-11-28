@@ -51,7 +51,7 @@ func captureLocalGitSnapshotInputs(ctx context.Context, root string) (inputs loc
 	}
 	// Close each capture with the index and HEAD, rather than sampling them
 	// before potentially lengthy enumeration of working files.
-	inputs.index, err = localGitSnapshotBytes(ctx, root, nil, "ls-files", "-v", "--stage", "-z")
+	inputs.index, err = localGitSnapshotBytes(ctx, root, nil, "-c", "core.sparseCheckout=false", "ls-files", "-v", "--stage", "-z")
 	if err != nil {
 		return inputs, err
 	}

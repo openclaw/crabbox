@@ -50,17 +50,8 @@ func nativeRuntimeTestTarget(t *testing.T, checksumTool, gzipTool bool) SSHTarge
 	if err != nil {
 		t.Skip("ssh unavailable")
 	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapper := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- ssh \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(transport, "ssh"), []byte(wrapper), 0700); err != nil {
-		t.Fatal(err)
-	}
 	isolateRunTestUserDirs(t, root)
-	t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
-	t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
+	installPOSIXRunSSH(t, transport, ssh, os.Getenv("HOME"))
 	t.Setenv("CRABBOX_POSIX_REMOTE_PATH", tools)
 	t.Setenv("CRABBOX_POSIX_BASH_AVAILABLE", "false")
 	t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))

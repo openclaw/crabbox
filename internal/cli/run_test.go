@@ -1492,61 +1492,78 @@ func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
 	}
 }
 
-// This transport fixture executes every generated command and uses real rsync.
-// It does not simulate successful sync or carry manifest bytes in shell variables.
+func installPOSIXRunSSH(t *testing.T, bin, ssh, home string) {
+	t.Helper()
+	// SSH is invoked for every control command. Execute those commands directly
+	// in the fixture environment, including on race-instrumented test runs.
+	writeExecutable(t, filepath.Join(bin, "ssh"), `#!/bin/sh
+for arg do
+  if [ "$arg" = -G ]; then exec `+shellQuote(ssh)+` "$@"; fi
+  remote=$arg
+done
+if [ "$CRABBOX_POSIX_BASH_AVAILABLE" = false ]; then
+  case "$remote" in */bin/bash*) echo 'fixture: absolute Bash control invocation is unavailable' >&2; exit 127;; esac
+fi
+export HOME=`+shellQuote(home)+` PATH="$CRABBOX_POSIX_REMOTE_PATH"
+exec /bin/sh -c "$remote"
+`)
+}
+
+func installPOSIXRunTransport(t *testing.T, bin, ssh, rsync string) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	installPOSIXRunSSH(t, bin, ssh, os.Getenv("HOME"))
+	writeExecutable(t, filepath.Join(bin, "rsync"), "#!/bin/sh\n"+synchronousHelperRacePrefix()+"exec "+shellQuote(self)+" -test.run='^TestPOSIXRunTransportHelper$' -- \"$@\"\n")
+	t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
+	t.Setenv("CRABBOX_POSIX_REAL_RSYNC", rsync)
+	t.Setenv("CRABBOX_POSIX_REMOTE_HOME", os.Getenv("HOME"))
+}
+
+// Adapt only the remote operand and its shell-expanded receiver path for a
+// local copy. The real rsync processes receive the original manifest on stdin.
 func TestPOSIXRunTransportHelper(t *testing.T) {
 	if os.Getenv("CRABBOX_POSIX_TRANSPORT_HELPER") != "1" {
 		return
 	}
 	separator := slices.Index(os.Args, "--")
-	if separator < 0 || len(os.Args) <= separator+2 {
+	if separator < 0 || len(os.Args) <= separator+1 {
 		os.Exit(90)
 	}
-	mode, args := os.Args[separator+1], os.Args[separator+2:]
-	var command *exec.Cmd
-	if mode == "ssh" {
-		if slices.Contains(args, "-G") {
-			command = exec.Command(os.Getenv("CRABBOX_POSIX_REAL_SSH"), args...)
-		} else {
-			remote := args[len(args)-1]
-			if os.Getenv("CRABBOX_POSIX_BASH_AVAILABLE") == "false" && strings.Contains(remote, "/bin/bash") {
-				fmt.Fprintln(os.Stderr, "fixture: absolute Bash control invocation is unavailable")
-				os.Exit(127)
-			}
-			command = exec.Command("/bin/sh", "-c", remote)
-			command.Env = append(os.Environ(), "PATH="+os.Getenv("CRABBOX_POSIX_REMOTE_PATH"))
-			if home := os.Getenv("CRABBOX_POSIX_REMOTE_HOME"); home != "" {
-				command.Env = append(command.Env, "HOME="+home)
+	args := os.Args[separator+1:]
+	remoteHome := os.Getenv("CRABBOX_POSIX_REMOTE_HOME")
+	var local []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-e" {
+			i++
+			continue
+		}
+		// The remote shell normally expands the staged receiver's home path.
+		if args[i] == "--rsync-path" && i+1 < len(args) {
+			if rel, ok := strings.CutPrefix(args[i+1], "~/"); ok {
+				args[i+1] = filepath.Join(remoteHome, rel)
 			}
 		}
-	} else if mode == "rsync" {
-		var local []string
-		for i := 0; i < len(args); i++ {
-			if args[i] == "-e" {
-				i++
-				continue
-			}
-			local = append(local, args[i])
-		}
-		if len(local) < 2 {
-			os.Exit(91)
-		}
-		_, destination, remote := strings.Cut(local[len(local)-1], ":")
-		if !remote && slices.Contains(local, "--server") {
-			destination, remote = local[len(local)-1], true
-		}
-		destination = strings.Trim(destination, "'")
-		root := os.Getenv("CRABBOX_POSIX_REMOTE_ROOT") + string(os.PathSeparator)
-		if !remote || !strings.HasPrefix(filepath.Clean(destination), root) {
-			fmt.Fprintf(os.Stderr, "fixture: unexpected rsync destination %q\n", local[len(local)-1])
-			os.Exit(92)
-		}
-		local[len(local)-1] = destination
-		command = exec.Command(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"), local...)
-		command.Env = append(os.Environ(), "PATH="+filepath.Dir(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"))+string(os.PathListSeparator)+os.Getenv("PATH"))
-	} else {
-		os.Exit(93)
+		local = append(local, args[i])
 	}
+	if len(local) < 2 {
+		os.Exit(91)
+	}
+	_, destination, remote := strings.Cut(local[len(local)-1], ":")
+	if !remote && slices.Contains(local, "--server") {
+		destination, remote = local[len(local)-1], true
+	}
+	destination = strings.Trim(destination, "'")
+	root := os.Getenv("CRABBOX_POSIX_REMOTE_ROOT") + string(os.PathSeparator)
+	if !remote || !strings.HasPrefix(filepath.Clean(destination), root) {
+		fmt.Fprintf(os.Stderr, "fixture: unexpected rsync destination %q\n", local[len(local)-1])
+		os.Exit(92)
+	}
+	local[len(local)-1] = destination
+	command := exec.Command(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"), local...)
+	command.Env = append(os.Environ(), "PATH="+filepath.Dir(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"))+string(os.PathListSeparator)+os.Getenv("PATH"), "HOME="+remoteHome)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := command.Run(); err != nil {
 		os.Exit(exitCode(err))
@@ -1565,10 +1582,6 @@ func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
 	rsync, err := exec.LookPath("rsync")
 	if err != nil {
 		t.Skip("real rsync unavailable")
-	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
 	}
 	for _, kind := range []string{"matching-custom", "configured", "bound", "foreign", "foreign-no-sync", "foreign-full-resync", "reassigned", "competing-owner"} {
 		t.Run(kind, func(t *testing.T) {
@@ -1608,17 +1621,8 @@ func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
 			state := actionsHydrationState{Workspace: workspace, EnvFile: envFile, RunID: "123", ReadyAt: "2026-01-01T00:00:00Z"}
 			writeFile(t, marker, "WORKSPACE="+workspace+"\nENV_FILE="+envFile+"\nRUN_ID="+state.RunID+"\nREADY_AT="+state.ReadyAt+"\n")
 			writeFile(t, envFile, "printf used > "+shellQuote(envEffect)+"\n")
-			for _, name := range []string{"ssh", "rsync"} {
-				body := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- " + name + " \"$@\"\n"
-				if err := os.WriteFile(filepath.Join(transport, name), []byte(body), 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
-			t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
-			t.Setenv("CRABBOX_POSIX_REAL_RSYNC", rsync)
+			installPOSIXRunTransport(t, transport, ssh, rsync)
 			t.Setenv("CRABBOX_POSIX_REMOTE_PATH", "/usr/bin:/bin:"+os.Getenv("PATH"))
-			t.Setenv("CRABBOX_POSIX_REMOTE_HOME", os.Getenv("HOME"))
 			t.Setenv("CRABBOX_POSIX_REMOTE_ROOT", remoteRoot)
 			t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))
 			config := filepath.Join(root, "config.yaml")
@@ -1629,7 +1633,8 @@ func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
 			writeFile(t, config, configBody)
 			t.Setenv("CRABBOX_CONFIG", config)
 			t.Chdir(source)
-			target := SSHTarget{User: "fixture", Host: "127.0.0.1", Port: startTCPReadinessFixture(t), TargetOS: targetLinux, ReadyCheck: "true"}
+			// The local SSH wrapper executes commands but has no control socket.
+			target := SSHTarget{User: "fixture", Host: "127.0.0.1", Port: startTCPReadinessFixture(t), TargetOS: targetLinux, ReadyCheck: "true", NoControlMaster: true}
 			providerName := runEnvProfileTestProvider{}.Spec().Name
 			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 				return LeaseTarget{Server: Server{Provider: providerName}, SSH: target, LeaseID: leaseID}, nil
@@ -1755,10 +1760,6 @@ func TestRunDefaultSyncWithoutBash(t *testing.T) {
 	if sshErr != nil || rsyncErr != nil {
 		t.Skip("requires local SSH config inspection and real rsync")
 	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		targetOS      string
 		bashAvailable bool
@@ -1801,15 +1802,7 @@ func TestRunDefaultSyncWithoutBash(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for _, name := range []string{"ssh", "rsync"} {
-				body := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- " + name + " \"$@\"\n"
-				if err := os.WriteFile(filepath.Join(transport, name), []byte(body), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
-			t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
-			t.Setenv("CRABBOX_POSIX_REAL_RSYNC", rsync)
+			installPOSIXRunTransport(t, transport, ssh, rsync)
 			t.Setenv("CRABBOX_POSIX_REMOTE_PATH", remoteBin)
 			t.Setenv("CRABBOX_POSIX_REMOTE_ROOT", remoteRoot)
 			t.Setenv("CRABBOX_POSIX_BASH_AVAILABLE", strconv.FormatBool(bashAvailable))
@@ -1830,7 +1823,7 @@ func TestRunDefaultSyncWithoutBash(t *testing.T) {
 			writeFile(t, profile, "FIXTURE_VALUE=profile-value\n")
 			port := startTCPReadinessFixture(t)
 			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
-				return LeaseTarget{Server: Server{Provider: "run-env-profile-test"}, SSH: SSHTarget{User: "fixture", Host: "127.0.0.1", Port: port, TargetOS: tc.targetOS, ReadyCheck: "true"}, LeaseID: "cbx_posix_fixture"}, nil
+				return LeaseTarget{Server: Server{Provider: "run-env-profile-test"}, SSH: SSHTarget{User: "fixture", Host: "127.0.0.1", Port: port, TargetOS: tc.targetOS, ReadyCheck: "true", NoControlMaster: true}, LeaseID: "cbx_posix_fixture"}, nil
 			}
 			t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
 			var stdout, stderr bytes.Buffer
