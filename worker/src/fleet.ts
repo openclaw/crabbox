@@ -1130,6 +1130,7 @@ type BridgeAttachment =
       leaseID: string;
       id: string;
       capabilities: Set<string>;
+      pendingWebVNC?: WebVNCBuffer;
       owner?: string;
       org?: string;
       admin?: boolean;
@@ -2252,6 +2253,12 @@ export class FleetCoordinator {
         continue;
       }
       this.trackBridgeSocket(socket, attachment);
+      if (attachment.kind === "webvnc-agent" && attachment.pendingWebVNC) {
+        this.pendingWebVNCToViewer.set(
+          webVNCBufferKey(attachment.leaseID, attachment.id),
+          attachment.pendingWebVNC,
+        );
+      }
       this.restoredBridgeSockets.add(socket);
     }
   }
@@ -3224,17 +3231,35 @@ export class FleetCoordinator {
       return;
     }
     switch (attachment.kind) {
-      case "webvnc-agent":
+      case "webvnc-agent": {
         if (this.wayVNCRetirement.handle(socket, message)) break;
+        const recipient = await this.currentBridgeRecipient(
+          this.webVNCViewerForAgent(attachment.leaseID, attachment.id)?.socket,
+        );
         await forwardOrBufferWebVNC(
           message,
-          await this.currentBridgeRecipient(
-            this.webVNCViewerForAgent(attachment.leaseID, attachment.id)?.socket,
-          ),
+          recipient,
           this.pendingWebVNCToViewer,
           webVNCBufferKey(attachment.leaseID, attachment.id),
         );
+        if (!recipient) {
+          const pending = this.pendingWebVNCToViewer.get(
+            webVNCBufferKey(attachment.leaseID, attachment.id),
+          );
+          if (!pending) {
+            this.clearWebVNCAgent(attachment.leaseID, attachment.id, socket);
+            closeSocket(socket, 1000, "WebVNC bridge reset: opening buffer exceeded");
+            break;
+          }
+          try {
+            this.serializeBridgeAttachment(socket, { ...attachment, pendingWebVNC: pending });
+          } catch {
+            this.clearWebVNCAgent(attachment.leaseID, attachment.id, socket);
+            closeSocket(socket, 1000, "WebVNC bridge reset: opening buffer could not be retained");
+          }
+        }
         break;
+      }
       case "webvnc-viewer":
         if (isReservedWebVNCControlFrame(message)) {
           return;
@@ -13340,6 +13365,11 @@ export class FleetCoordinator {
         label,
         ...viewerSessionAttachment,
       });
+      const agentAttachment = this.bridgeAttachment(agent.socket);
+      if (agentAttachment?.kind === "webvnc-agent") {
+        delete agentAttachment.pendingWebVNC;
+        this.serializeBridgeAttachment(agent.socket, agentAttachment);
+      }
       flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
       return upgrade.response;
     });
