@@ -1137,10 +1137,10 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 
 func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
 	defer func() {
-		// CommandContext can report only the killed process. Preserve its cause
-		// after owned cleanup without replacing the process exit or retirement facts.
-		if cause := context.Cause(ctx); cause != nil {
-			err = errors.Join(err, cause)
+		// CommandContext can report only the killed process. Add canonical context
+		// state after cleanup; caller-provided causes can contain private details.
+		if state := ctx.Err(); state != nil {
+			err = errors.Join(err, state)
 		}
 	}()
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
