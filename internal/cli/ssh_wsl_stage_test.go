@@ -2958,9 +2958,10 @@ func TestSSHTransportRejectsLateZeroExit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("local POSIX output-drain fixture")
 	}
-	for _, staged := range []bool{false, true} {
+	for _, route := range []string{"plain", "staged", "posix", "metadata", "windows"} {
+		staged := route == "staged"
 		for _, code := range []int{0, 23} {
-			t.Run(fmt.Sprintf("staged=%t/exit=%d", staged, code), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/exit=%d", route, code), func(t *testing.T) {
 				dir := t.TempDir()
 				// The descendant writes only after the SSH leader has been reaped.
 				// Cancellation during output drain therefore cannot kill the leader
@@ -3000,8 +3001,19 @@ exit ` + fmt.Sprint(code) + "\n"
 						return cleanupFailure
 					}
 					err = spool.run(ctx, &target, "10", "3", stdout, io.Discard)
-				} else {
+				} else if route == "plain" {
 					err = executePreparedSSH(ctx, &target, "true", nil, 0, sshCommandLimit{execution: sshControlExecutionLimit}, "10", "3", stdout, io.Discard)
+				} else {
+					r := remoteNativeRuntime{target: target}
+					switch route {
+					case "posix":
+						err = r.runPOSIX(ctx, "true", stdout)
+					case "metadata":
+						err = r.runMetadata(ctx, []string{"identity"}, stdout)
+					case "windows":
+						r.target.TargetOS = targetWindows
+						err = r.runWindows(ctx, "exit 0", stdout)
+					}
 				}
 				probes, probeErr := os.ReadFile(probeLog)
 				if staged {
