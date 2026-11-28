@@ -767,6 +767,109 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 	}
 }
 
+func TestSpritesTouchHoldsResolvedLeaseWithClampedTimeout(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, tc := range []struct {
+		name       string
+		requested  time.Duration
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "configured idle window", requested: 30 * time.Minute, configured: 45 * time.Minute, want: 30 * time.Minute},
+		{name: "minimum", requested: 10 * time.Second, configured: time.Hour, want: time.Minute},
+		{name: "maximum", requested: 4 * time.Hour, configured: time.Hour, want: time.Hour},
+		{name: "unset uses configured", configured: 30 * time.Minute, want: 30 * time.Minute},
+		{name: "unset defaults", want: 30 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: spritesProvider, IdleTimeout: tc.configured}
+			b := &spritesBackend{cfg: cfg}
+			var gotName string
+			var gotTimeout time.Duration
+			b.holdTask = func(_ context.Context, name string, timeout time.Duration) error {
+				gotName, gotTimeout = name, timeout
+				return nil
+			}
+			lease := core.LeaseTarget{LeaseID: "cbx_touchtest", Server: core.Server{
+				CloudID: "crabbox-test", Labels: map[string]string{"name": "crabbox-test"},
+			}}
+			_, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "active", IdleTimeout: tc.requested})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotName != "crabbox-test" || gotTimeout != tc.want {
+				t.Fatalf("hold name=%q timeout=%s, want name=crabbox-test timeout=%s", gotName, gotTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestSpritesTouchPropagatesHoldFailure(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	b := &spritesBackend{}
+	wantErr := errors.New("task unavailable")
+	b.holdTask = func(context.Context, string, time.Duration) error { return wantErr }
+	lease := core.LeaseTarget{LeaseID: "cbx_touchtest", Server: core.Server{CloudID: "crabbox-test"}}
+	if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease}); !errors.Is(err, wantErr) {
+		t.Fatalf("Touch err=%v, want wrapped hold error", err)
+	}
+}
+
+func TestSpritesPrepareLeaseHoldsAfterSSHReady(t *testing.T) {
+	cfg := core.Config{Provider: spritesProvider, IdleTimeout: 20 * time.Minute, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+	var calls int
+	b := &spritesBackend{
+		cfg:     cfg,
+		rt:      core.Runtime{Stderr: io.Discard, Exec: &recordingRunner{}},
+		waitSSH: func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil },
+		holdTask: func(_ context.Context, name string, timeout time.Duration) error {
+			calls++
+			if name != "crabbox-test" || timeout != 20*time.Minute {
+				t.Fatalf("hold name=%q timeout=%s", name, timeout)
+			}
+			return nil
+		},
+	}
+	if _, err := b.prepareLease(t.Context(), spritesInfo{Name: "crabbox-test"}, "cbx_preparetest", "test", nil, "/tmp/key", "ssh-ed25519 test"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("hold calls=%d, want one", calls)
+	}
+}
+
+func TestSpritesHoldTaskScriptContainsNoCredentialsOrEnvironmentValues(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := core.Config{IdleTimeout: time.Hour, Sprites: core.SpritesConfig{Token: "secret-token"}}
+	b := &spritesBackend{cfg: cfg, rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
+	if err := b.holdSpriteTask(t.Context(), "crabbox-test", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%d, want one", len(runner.requests))
+	}
+	args := strings.Join(runner.requests[0].Args, " ")
+	for _, forbidden := range []string{"secret-token", "SPRITE_TOKEN", "SPRITES_API_URL", "$", "${"} {
+		if strings.Contains(args, forbidden) {
+			t.Errorf("hold task argv contains %q: %s", forbidden, args)
+		}
+	}
+	for _, want := range []string{"exec -s crabbox-test", "/.sprite/api.sock", "tasks/crabbox-lease", `"expire":1800`} {
+		if !strings.Contains(args, want) {
+			t.Errorf("hold task argv missing %q: %s", want, args)
+		}
+	}
+}
+
+func TestSpritesHoldTaskErrorIncludesExitCode(t *testing.T) {
+	runner := &recordingRunner{failContains: "tasks/crabbox-lease", err: errors.New("process exited")}
+	b := &spritesBackend{rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
+	err := b.holdSpriteTask(t.Context(), "crabbox-test", 30*time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "exit code 1") {
+		t.Fatalf("hold task err=%v, want exit code", err)
+	}
+}
+
 type recordingRunner struct {
 	calls        []string
 	requests     []core.LocalCommandRequest
