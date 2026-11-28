@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +19,72 @@ import (
 
 	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
+
+func TestSSHTransportPreservesCancellationCause(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH process fixture")
+	}
+	for _, route := range []string{"posix", "metadata", "windows", "plain", "diagnostics"} {
+		for _, tc := range []struct {
+			name  string
+			cause error
+			code  int
+		}{
+			{name: "success"},
+			{name: "remote failure", code: 23},
+			{name: "cancel", cause: errors.New("native control canceled by caller")},
+			{name: "deadline", cause: context.DeadlineExceeded},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				isolateRunTestUserDirs(t, dir)
+				command := fmt.Sprintf("exit %d", tc.code)
+				if tc.cause != nil {
+					command = "exec sleep 30"
+				}
+				writeExecutable(t, filepath.Join(dir, "ssh"), "#!/bin/sh\nprintf ready\n"+command+"\n")
+				t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				var output bytes.Buffer
+				stdout := writerFunc(func(p []byte) (int, error) {
+					if tc.cause != nil {
+						cancel(tc.cause)
+					}
+					return output.Write(p)
+				})
+				r := remoteNativeRuntime{target: SSHTarget{Host: "example.invalid", Port: "22", TargetOS: targetLinux, NoControlMaster: true}}
+				var err error
+				switch route {
+				case "metadata":
+					err = r.runMetadata(ctx, []string{"identity"}, stdout)
+				case "posix":
+					err = r.runPOSIX(ctx, "true", stdout)
+				case "windows":
+					r.target.TargetOS = targetWindows
+					err = r.runWindows(ctx, "exit 0", stdout)
+				default:
+					transport := sshTransportPreparation{command: "true"}
+					_, err = transport.runOnce(ctx, r.target, "2", "1", stdout, io.Discard, route == "diagnostics")
+					if !transport.dispatched || transport.retirementUnconfirmed != (tc.cause != nil) {
+						t.Fatalf("dispatched=%t retirementUnconfirmed=%t cause=%v", transport.dispatched, transport.retirementUnconfirmed, tc.cause)
+					}
+				}
+				if output.String() != "ready" {
+					t.Fatalf("transport did not start: output=%q error=%v", output.String(), err)
+				}
+				if tc.cause != nil {
+					var exit *exec.ExitError
+					if !errors.Is(err, tc.cause) || !errors.As(err, &exit) {
+						t.Fatalf("canceled transport lost cause or process error: %v", err)
+					}
+				} else if exitCode(err) != tc.code {
+					t.Fatalf("exit=%d error=%v, want %d", exitCode(err), err, tc.code)
+				}
+			})
+		}
+	}
+}
 
 func nativeRuntimeTestTarget(t *testing.T, checksumTool, gzipTool bool) SSHTarget {
 	t.Helper()
