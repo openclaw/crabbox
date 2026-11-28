@@ -447,45 +447,53 @@ func coordinatorTailscaleResponseServer(cfg Config, previous Server, lease Coord
 	return updated, nil
 }
 
+var tailscaleMetadataFiles = []string{
+	"tailscale-ipv4",
+	"tailscale-hostname",
+	"tailscale-fqdn",
+	"tailscale-exit-node",
+	"tailscale-exit-node-allow-lan-access",
+	"tailscale-version",
+	"tailscale-device-id",
+}
+
+// tailscaleMetadataReadScript prints one name=value line per metadata file.
+// Bootstrap writes each file with a trailing newline, which command
+// substitution strips; naming every value keeps a missing or empty file from
+// shifting the others, even after the SSH output is whitespace-trimmed.
+func tailscaleMetadataReadScript(dir string) string {
+	var b strings.Builder
+	for _, name := range tailscaleMetadataFiles {
+		b.WriteString("printf '%s=%s\\n' " + name + " \"$(cat " + shellQuote(dir+"/"+name) + " 2>/dev/null)\"\n")
+	}
+	return b.String()
+}
+
 func readRemoteTailscaleMetadata(ctx context.Context, target SSHTarget) (TailscaleMetadata, error) {
-	out, err := runSSHOutput(ctx, target, `if [ -f /var/lib/crabbox/tailscale-ipv4 ]; then cat /var/lib/crabbox/tailscale-ipv4; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-hostname ]; then cat /var/lib/crabbox/tailscale-hostname; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-fqdn ]; then cat /var/lib/crabbox/tailscale-fqdn; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node ]; then cat /var/lib/crabbox/tailscale-exit-node; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/lib/crabbox/tailscale-exit-node-allow-lan-access; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-version ]; then cat /var/lib/crabbox/tailscale-version; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-device-id ]; then cat /var/lib/crabbox/tailscale-device-id; fi`)
+	out, err := runSSHOutput(ctx, target, tailscaleMetadataReadScript("/var/lib/crabbox"))
 	if err != nil {
 		return TailscaleMetadata{}, err
 	}
-	lines := strings.Split(out, "\n")
-	meta := TailscaleMetadata{Enabled: true, State: "ready"}
-	if len(lines) > 0 {
-		meta.IPv4 = strings.TrimSpace(lines[0])
+	return parseRemoteTailscaleMetadata(out)
+}
+
+func parseRemoteTailscaleMetadata(out string) (TailscaleMetadata, error) {
+	values := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if name, value, ok := strings.Cut(line, "="); ok {
+			values[strings.TrimSpace(name)] = strings.TrimSpace(value)
+		}
 	}
-	if len(lines) > 1 {
-		meta.Hostname = strings.TrimSpace(lines[1])
-	}
-	if len(lines) > 2 {
-		meta.FQDN = strings.TrimSpace(lines[2])
-	}
-	if len(lines) > 3 {
-		meta.ExitNode = strings.TrimSpace(lines[3])
-	}
-	if len(lines) > 4 {
-		meta.ExitNodeAllowLANAccess = labelBool(strings.TrimSpace(lines[4]))
-	}
-	if len(lines) > 5 {
-		meta.Version = strings.TrimSpace(lines[5])
-	}
-	if len(lines) > 6 {
-		meta.DeviceID = strings.TrimSpace(lines[6])
+	meta := TailscaleMetadata{
+		Enabled:                true,
+		State:                  "ready",
+		IPv4:                   values["tailscale-ipv4"],
+		Hostname:               values["tailscale-hostname"],
+		FQDN:                   values["tailscale-fqdn"],
+		ExitNode:               values["tailscale-exit-node"],
+		ExitNodeAllowLANAccess: labelBool(values["tailscale-exit-node-allow-lan-access"]),
+		Version:                values["tailscale-version"],
+		DeviceID:               values["tailscale-device-id"],
 	}
 	if meta.IPv4 == "" {
 		return TailscaleMetadata{}, fmt.Errorf("remote tailscale metadata missing ipv4")
